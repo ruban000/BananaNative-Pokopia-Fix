@@ -62,7 +62,7 @@ static int dec_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, uint3
     void *p = NULL;
     switch (k) {
         case CAP_K_TEX: p = i < rp_nto ? &rp_to[i] : NULL; break;
-        case CAP_K_TEXIN: if (payload && i + sizeof(tex_t) <= size) { p = payload + i; cap_tex_fields(p, &rp_dec, NULL); } break;
+        case CAP_K_TEXIN: if (payload && i + sizeof(tex_t) <= size) { p = payload + i; vcap_tex_fields(p, &rp_dec, NULL); } break;
         case CAP_K_PROG: p = i < rp_npr ? &rp_pr[i] : NULL; break;
         case CAP_K_DPOOL: p = i < rp_ndp ? &rp_dp[i] : NULL; break;
         case CAP_K_SYNC: p = i < rp_nsy ? &rp_sy[i] : NULL; break;
@@ -144,11 +144,15 @@ static void add_pools(const uint8_t *d, size_t n) {   // the replay's pool list,
 // A TPIX chunk: the image made as the replay makes it (vka_tex_get), then its levels and slices copied in from the captured bytes
 static uint64_t g_fill_n, g_fill_bytes;
 static void fill_tex(const uint8_t *d, size_t n) {
-    cap_tpix h; if (n < sizeof h) RFAIL("short texture chunk");
-    memcpy(&h, d, sizeof h); cap_tex_fields(&h.t, &rp_dec, NULL);
-    const uint8_t *cs = d + sizeof h, *px = cs + (size_t)h.nsub * sizeof(cap_tsub);
+    vcap_tpix snapshot; if (n < sizeof snapshot) RFAIL("short texture chunk");
+    memcpy(&snapshot, d, sizeof snapshot); cap_tpix h = snapshot.image;
+    uint32_t levels = h.t.d.levels ? h.t.d.levels : 1;
+    if (snapshot.base >= levels || snapshot.vmin >= levels || snapshot.view_cut > 1 || snapshot.reserved || h.levels != levels - snapshot.base
+        || h.nsub > (n - sizeof snapshot) / sizeof(cap_tsub)) RFAIL("invalid realized texture state for serial %llu", (unsigned long long)h.t.serial);
+    vcap_tex_fields(&h.t, &rp_dec, NULL);
+    const uint8_t *cs = d + sizeof snapshot, *px = cs + (size_t)h.nsub * sizeof(cap_tsub);
     VkCommandBuffer cb = vcap_cb_begin(); if (!cb) RFAIL("no command buffer");
-    vka_img *im = vka_tex_get(&h.t, cb);
+    vka_img *im = vka_tex_restore(&h.t, cb, snapshot.base, snapshot.vmin, snapshot.view_cut, !!(h.pad & 1));
     if (!im) { vcap_cb_run(cb); RFAIL("texture ser=%llu %ux%u: the replay made no image for it", (unsigned long long)h.t.serial, h.width, h.height); }
     cap_tsub *subs; uint64_t total; uint32_t ns = vcap_subs(im, &subs, &total);
     if ((uint32_t)im->f.vk != h.pixfmt || im->w != h.width || im->h != h.height || im->levels != h.levels || im->layers != h.slices || ns != h.nsub) {
@@ -165,7 +169,6 @@ static void fill_tex(const uint8_t *d, size_t n) {
     }
     vcap_img_copy(cb, im, subs, ns, hb.b, 1);
     if (!vcap_cb_run(cb)) RFAIL("texture ser=%llu: the upload did not finish", (unsigned long long)h.t.serial);
-    im->track = 0; if (h.pad & 1) im->gpu_owned = 1;   // as the live image: not following its storage
     vcap_hbuf_free(&hb); free(subs);
     g_fill_n++; g_fill_bytes += total;
 }
@@ -262,7 +265,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
     if (strcmp(backend, "vulkan")) RFAIL("the capture is of the %s replay: this replayer replays Android captures (DM_NVN_CAPTURE on the phone)", backend);
     if (strcmp(title, DM_GAME_ID)) RFAIL("the capture is of %s, this replayer is built for %s", title, DM_GAME_ID);
     if (ln != strlen(cap_layout()) || memcmp(lay, cap_layout(), ln)) RFAIL("the capture's record layout differs from this build's (nvn_obj.h changed since the capture): capture again");
-    if (!head_get(head, hn, "iface", v, sizeof v) || atoi(v) != VCAP_IFACE) RFAIL("the capture's shader interface hashes are of another kind: capture again");
+    if (!head_get(head, hn, "iface", v, sizeof v) || atoi(v) != VCAP_IFACE) RFAIL("the capture's Vulkan interface or image state format differs: capture again");
     printf("capture %s: %s frame %s, build %s, host %s, chain %s (this build: chain %s)\n", path, title, frame, build, commit, chain, DMSH_CHAIN);
     apply_env(head, hn);
     setenv("DM_VK_STATS", "0", 0);   // frame numbers jump between replays: no every-300-frames lines
@@ -314,7 +317,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
             uint64_t po = p.pool; dec_obj(NULL, CAP_K_POOL, &po, NULL, 0); rp_dp[p.index] = (dpool_t){(const pool_t *)(uintptr_t)po, p.off, p.n}; }
     }
     for (uint32_t i = 0; i < rp_nto; i++) {   // a texture whose storage field names no captured memory (the window's textures may hold none the capture knows): kept without storage
-        uint64_t b0 = rp_bad; cap_tex_fields(&rp_to[i], &rp_dec, NULL);
+        uint64_t b0 = rp_bad; vcap_tex_fields(&rp_to[i], &rp_dec, NULL);
         if (rp_bad != b0) { printf("texture object #%u (ser=%llu, %ux%u format %#x): its storage is in no captured region: replayed without storage\n", i, (unsigned long long)rp_to[i].serial,
                                    rp_to[i].d.width, rp_to[i].d.height, rp_to[i].d.format); rp_to[i].mem = NULL; rp_to[i].pool = NULL; rp_bad = b0; }
     }
@@ -323,10 +326,10 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
         nvn_dpool_base_set(&rp_dp[p.index], p.tex_base, p.samp_base); }
     uint64_t ncpu = 0, ntreg_bad = 0;
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_TKND) for (size_t o = 0; o + sizeof(cap_tknd) <= rp_ch[i].c.raw; o += sizeof(cap_tknd)) {
-        cap_tknd *k = (cap_tknd *)(rp_ch[i].d + o); uint64_t b0 = rp_bad; cap_tex_fields(&k->t, &rp_dec, NULL); if (rp_bad != b0) { rp_bad = b0; continue; } if (k->kind & CAP_TK_CPU) { mtl_tex_cpu_written(&k->t); ncpu++; } }
+        cap_tknd *k = (cap_tknd *)(rp_ch[i].d + o); uint64_t b0 = rp_bad; vcap_tex_fields(&k->t, &rp_dec, NULL); if (rp_bad != b0) { rp_bad = b0; continue; } if (k->kind & CAP_TK_CPU) { mtl_tex_cpu_written(&k->t); ncpu++; } }
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_TREG) for (size_t o = 0; o + sizeof(cap_treg) <= rp_ch[i].c.raw; o += sizeof(cap_treg)) {
         cap_treg *e = (cap_treg *)(rp_ch[i].d + o); if (!e->ok) continue;
-        uint64_t b0 = rp_bad, m0 = (uint64_t)(uintptr_t)e->t.mem; cap_tex_fields(&e->t, &rp_dec, NULL);
+        uint64_t b0 = rp_bad, m0 = (uint64_t)(uintptr_t)e->t.mem; vcap_tex_fields(&e->t, &rp_dec, NULL);
         if (m0 && !cap_is_addr(m0)) rp_bad++;   // a live address the capture could not place (outside every pool)
         if (rp_bad != b0) { if (ntreg_bad++ < 4) printf("[RED] nxreplay: texture registry entry %d (ser=%llu): its storage is in no captured region: left unregistered\n", e->tid, (unsigned long long)e->t.serial); e->ok = 0; rp_bad = b0; } }
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_PADD && rp_ch[i].c.submit <= 1) add_pools(rp_ch[i].d, rp_ch[i].c.raw);

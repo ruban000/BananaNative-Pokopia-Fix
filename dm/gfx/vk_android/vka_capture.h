@@ -8,7 +8,19 @@
 #include "../nvn/dmsh_chain.h"
 #include "../nvn/dmsh_chain_vk.h"
 
-#define VCAP_IFACE 101   // header key iface: what vcap_iface hashes (the Mac's cap_iface is 2)
+#define VCAP_IFACE 102   // shader interface hashes plus Vulkan TPIX realized image/view state (Mac iface is 2)
+// Vulkan-only TPIX payload header. NVN's logical descriptor can outlive its sparse
+// pool; dimensions alone cannot restore its sampled-view clamp or mip numbering.
+typedef struct { cap_tpix image; uint32_t base, vmin, view_cut, reserved; } vcap_tpix;
+
+// Vulkan's CPU upload consumes mip data, not final allocation alignment. Keep
+// L.size intact for layout/strides; the shared Metal field walker keeps its ABI.
+static inline int vcap_tex_fields(tex_t *t, const cap_ops *ops, void *ctx) {
+    uint64_t *mem = (uint64_t *)((uint8_t *)t + offsetof(tex_t, mem));
+    uint64_t *pool = (uint64_t *)((uint8_t *)t + offsetof(tex_t, pool));
+    int ok = ops->addr(ctx, mem, nvn_tex_data_size(&t->d), 0);
+    return ops->obj(ctx, CAP_K_POOL, pool, NULL, 0) && ok;
+}
 
 // One-off GPU work outside the submissions (texture contents in and out): a command buffer of its own, submitted on the queue and waited for
 VkCommandBuffer vcap_cb_begin(void);
@@ -40,6 +52,8 @@ int vka_cap_sreg(int id, samp_par *p, int *n);
 int vka_cap_cpuw(uint64_t serial);
 vka_img *vka_cap_shared(const tex_t *t);
 int vka_pools(uint64_t *lo, uint64_t *size, int max);
+uint64_t nvn_pool_live(const void *pool, unsigned *flags, int *sparse);
+void nvn_pool_use(int on);
 uint64_t vka_frame(void);
 void nvn_prog_keys_set(const prog_t *p, const uint8_t key[6][8], uint8_t ok);
 void nvn_dpool_base_set(const void *pool, int tex_base, int samp_base);

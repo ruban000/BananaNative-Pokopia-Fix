@@ -224,6 +224,7 @@ typedef struct vka_img {
     // Texture levels in views, render targets and copies go through vka_img_lv
     // vmin: the texture level its sampled views start at (vka_tex.c sparse_base: the finest level from which every level is wholly mapped)
     uint32_t base, vmin;
+    int replay_vcut;   // captured sampled-view clamp without a live sparse page table
     // A sparse residency image (vka_sparse.c): memory only behind its mapped 64 KB tiles (rs_tw x rs_th texels), va bytes of the sparse address space; bfloor: the finest level it
     // may start at (levels left out to fit the address space, vka_tex.c img_create), a hint kept while vks_va_free() is less than bneed (the address space the next finer start asked for when it did not fit)
     struct vks_img *rs; uint32_t rs_tw, rs_th, bfloor; uint64_t va, bneed;
@@ -242,6 +243,8 @@ typedef struct vka_img {
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }
 // The layers a render target view of level lv can name: a 3D texture's slices at that level (drawn into through 2D / 2D-array views, VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT), else the array layers
 static inline uint32_t vka_img_slices(const vka_img *im, uint32_t lv) { return im->d.target == NVN_TEXTURE_TARGET_3D ? (im->depth >> lv ? im->depth >> lv : 1) : im->layers; }
+// Restore an image snapshot at its realized mip base; content is supplied by TPIX, not guest memory.
+vka_img *vka_tex_restore(const tex_t *t, VkCommandBuffer cb, uint32_t base, uint32_t vmin, int view_cut, int gpu_owned);
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb);   // the texture's image, made (and filled from guest memory, or cleared) on first use in cb; NULL = no image
 uint64_t vka_tex_mem(int *n, uint64_t *gpu_written);   // bytes of image memory now: n images, of which gpu_written bytes the GPU wrote (the rest copies pool storage)
 void vka_tex_alias_stats(char *b, size_t n);        // image bytes by content (cleared, filled once, tracked) and how many of them could live on their pool storage

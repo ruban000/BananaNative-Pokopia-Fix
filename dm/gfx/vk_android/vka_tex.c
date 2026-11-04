@@ -1290,6 +1290,45 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (throttle) vka_up_throttle();
     return im;
 }
+// Captured GPU pixels are authoritative. Sparse page tables may no longer exist
+// (the pool was finalized), so restore the realized base/view state explicitly,
+// with the original logical descriptor kept for texture-level -> image-level views.
+vka_img *vka_tex_restore(const tex_t *t, VkCommandBuffer cb, uint32_t base, uint32_t vmin, int view_cut, int gpu_owned) {
+    uint32_t levels = t && t->d.levels ? t->d.levels : 1;
+    if (!t || !t->serial || !vka_ok() || base >= levels || vmin >= levels || (base && t->d.target == NVN_TEXTURE_TARGET_3D)) return NULL;
+    nvn_pool_use(1);
+    pthread_mutex_lock(&g_tmu);
+    smap_ent *e = map_get(t->serial); vka_img *im = e ? e->im : NULL;
+    vka_fmt f;
+    if (!vka_fmt_of(t->d.format, &f)) goto out;
+    if (!im) {
+        for (int i = 0; i < g_nlive && !im; i++)
+            if (t->mem && same_shape(g_live[i], t, &f, 1) && !img_pool_dead(g_live[i]) && g_live[i]->base == base) { im = g_live[i]; im->refs++; }
+        if (!im) {
+            // Dense pixels of precisely the captured subresources. Do not run
+            // first-use upload/clear or reselect the base from absent mappings.
+            im = img_create_(t, &f, base, 0, NULL, NULL);
+            if (!im) goto out;
+            if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
+            g_live[g_nlive++] = im;
+            vka_img_barrier(cb, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+            im->inited = 1;
+        }
+        lazy_drop(t->serial);
+        map_put(t->serial, im);
+    }
+    // A later snapshot (or another repeat) may restore a different realized base.
+    // No sparse refresh follows a snapshot; its captured pixels supply the state.
+    im->vpool = NULL;
+    if (im->base != base && !img_rebase(im, base, cb)) { im = NULL; goto out; }
+    if (im->vmin != vmin || im->replay_vcut != view_cut) { im->vmin = vmin; im->replay_vcut = view_cut; redirty_ids(im); atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release); }
+    im->track = im->vtrack = im->vbind = im->cpu_dirty = im->from_mem = 0;
+    im->gpu_owned = gpu_owned;
+out:
+    pthread_mutex_unlock(&g_tmu);
+    nvn_pool_use(0);
+    return im;
+}
 vka_img *vka_tex_acquire(uint64_t serial) {
     pthread_mutex_lock(&g_tmu); smap_ent *e = map_get(serial); vka_img *im = e ? e->im : NULL; if (im) { im->refs++; im->holds++; } pthread_mutex_unlock(&g_tmu); return im;
 }
@@ -1662,7 +1701,7 @@ static VkImageView view_of(const treg_ent *e, vka_img *im, int vt_want, int stor
     vka_fmt f; const view_t *v = e->has_v ? &e->v : NULL;
     if (!vka_fmt_of(v && v->set_format ? v->format : e->t.d.format, &f)) f = im->f;
     uint32_t tl = im->base + im->levels, l0 = v && v->set_levels ? v->base_level : 0, nl = v && v->set_levels && v->nlevels ? v->nlevels : tl > l0 ? tl - l0 : 1;
-    if (im->vtrack && !storage && l0 < im->vmin) { uint32_t cut = im->vmin - l0; nl = nl > cut ? nl - cut : 1; l0 = im->vmin; }   // a sparse texture: from its wholly mapped levels
+    if ((im->vtrack || im->replay_vcut) && !storage && l0 < im->vmin) { uint32_t cut = im->vmin - l0; nl = nl > cut ? nl - cut : 1; l0 = im->vmin; }   // a sparse texture: from its wholly mapped levels
     if (l0 < im->base) { uint32_t cut = im->base - l0; nl = nl > cut ? nl - cut : 1; l0 = 0; } else l0 -= im->base;   // texture levels → the image's (a sparse texture's left-out levels)
     uint32_t a0 = v && v->set_layers ? v->min_layer : 0, na = v && v->set_layers && v->nlayers ? v->nlayers : im->layers - a0;
     if (im->d.target == NVN_TEXTURE_TARGET_3D) { a0 = 0; na = 1; }   // a 3D texture's view range names slices (a render target view's), which a 3D view does not take

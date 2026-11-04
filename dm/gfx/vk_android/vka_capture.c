@@ -214,7 +214,7 @@ static uint32_t g_cap_submit, g_cap_cur_submit;
 static uint64_t g_cap_presents;
 static cap_writer g_cap_w;
 static uint64_t g_cap_gone, g_cap_nostore, g_cap_ns, g_cap_unmapped, g_cap_segs, g_cap_tex_bytes, g_cap_tex_n, g_cap_tex_skip;
-typedef struct { uint64_t lo, size; uint32_t kind, pending; uint64_t *hash; } cap_region;
+typedef struct { uint64_t lo, size; uint32_t kind, pending; uint64_t *hash; uint8_t *hash_valid; } cap_region;
 static cap_region *g_cap_reg; static uint32_t g_cap_nreg;
 static uint32_t *g_cap_rid; static uint32_t g_cap_nrid;
 static nvn_hmap g_cap_tex = {.klen = sizeof(tex_t)}, g_cap_prog = {.klen = 16}, g_cap_dpol = {.klen = 8 + sizeof(dpool_t)}, g_cap_sync = {.klen = 8}, g_cap_pool = {.klen = 8 + sizeof(pool_t)};
@@ -255,14 +255,19 @@ static int cap_reg_find(uint64_t a) {
     return -1;
 }
 static void cap_reg_hash(cap_region *r, const uint8_t *p) {
-    size_t nb = (size_t)((r->size + 4095) / 4096); r->hash = realloc(r->hash, nb * 8);
+    size_t nb = (size_t)((r->size + 4095) / 4096); r->hash = realloc(r->hash, nb * 8); r->hash_valid = realloc(r->hash_valid, nb);
+    if (!r->hash || !r->hash_valid) die("capture region hash allocation failed");
+    memset(r->hash_valid, 1, nb);
     for (size_t b = 0; b < nb; b++) { uint64_t o = (uint64_t)b * 4096; r->hash[b] = cap_hash_block(p + o, (size_t)MIN(4096, r->size - o)); }
 }
 static int cap_reg_add(uint64_t lo, uint64_t size, uint32_t kind) {
+    // All callers hold the mapping/pool lease. A record outside the enumerated
+    // pools may name inaccessible memory; it has no bytes to snapshot.
+    if (dm_guest_unmapped(lo, size)) { cap_fail("a record names unmapped guest memory"); return -1; }
     int pos = 0; while (pos < (int)g_cap_nreg && g_cap_reg[pos].lo < lo) pos++;
     g_cap_reg = realloc(g_cap_reg, (g_cap_nreg + 1) * sizeof *g_cap_reg); g_cap_rid = realloc(g_cap_rid, (g_cap_nreg + 1) * sizeof *g_cap_rid);
     memmove(g_cap_reg + pos + 1, g_cap_reg + pos, (g_cap_nreg - pos) * sizeof *g_cap_reg); memmove(g_cap_rid + pos + 1, g_cap_rid + pos, (g_cap_nreg - pos) * sizeof *g_cap_rid);
-    g_cap_reg[pos] = (cap_region){lo, size, kind, 1, NULL}; g_cap_rid[pos] = g_cap_nrid++; g_cap_nreg++;
+    g_cap_reg[pos] = (cap_region){lo, size, kind, 1, NULL, NULL}; g_cap_rid[pos] = g_cap_nrid++; g_cap_nreg++;
     cap_reg_hash(&g_cap_reg[pos], (const uint8_t *)(uintptr_t)lo);
     return pos;
 }
@@ -290,7 +295,7 @@ static int cap_enc_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, u
 static const cap_ops g_cap_enc = {cap_enc_addr, cap_enc_obj};
 static void cap_tex_read(const tex_t *t, int rec);
 static uint64_t cap_pool_obj(const pool_t *p) {
-    if (!p) return 0;
+    if (!p || !nvn_pool_live(p, NULL, NULL)) return 0;
     uint8_t k[8 + sizeof(pool_t)]; memcpy(k, &p, 8); memcpy(k + 8, p, sizeof *p);
     void *have = nvn_hm_get(&g_cap_pool, k); if (have) return cap_obj(CAP_K_POOL, (uint64_t)(uintptr_t)have - 1);
     uint32_t idx = g_cap_npool++; nvn_hm_put(&g_cap_pool, k, (void *)(uintptr_t)(idx + 1));
@@ -302,15 +307,18 @@ static uint64_t cap_pool_obj(const pool_t *p) {
 // A texture's storage outside every live pool (a pool finalized while the texture stays registered, a render target whose storage was given back): written as none. Its image is
 // found by serial and its content, the GPU's, is read back like any other; the storage address would name memory the replayer does not have (and the game may have reused)
 static int cap_in_pool(const tex_t *t) {
+    if (t->pool && !nvn_pool_live(t->pool, NULL, NULL)) return 0;
     if (!t->mem) return 1;
     int r = cap_reg_find((uint64_t)(uintptr_t)t->mem);
-    return r >= 0 && !g_cap_reg[r].kind && (uint64_t)(uintptr_t)t->mem + t->L.size <= g_cap_reg[r].lo + g_cap_reg[r].size;
+    uint64_t bytes = nvn_tex_data_size(&t->d);
+    return r >= 0 && !g_cap_reg[r].kind && (uint64_t)(uintptr_t)t->mem + bytes <= g_cap_reg[r].lo + g_cap_reg[r].size
+        && !dm_guest_unmapped((uint64_t)(uintptr_t)t->mem, bytes);
 }
 static void cap_tex_enc(tex_t *t, const char *what) {
-    if (!cap_in_pool(t)) { t->mem = NULL; t->pool = NULL; g_cap_nostore++; }
+    if ((t->pool && !nvn_pool_live(t->pool, NULL, NULL)) || !cap_in_pool(t)) { t->mem = NULL; t->pool = NULL; g_cap_nostore++; }
     char sv[sizeof g_cap_where]; const uint8_t *sb = g_cap_where_base; memcpy(sv, g_cap_where, sizeof sv);
     CAP_WHERE(t, "%s ser=%llu%s%s", what, (unsigned long long)t->serial, sb ? " in " : "", sb ? sv : "");
-    cap_tex_fields(t, &g_cap_enc, NULL);
+    vcap_tex_fields(t, &g_cap_enc, NULL);
     memcpy(g_cap_where, sv, sizeof sv); g_cap_where_base = sb;
 }
 static uint64_t cap_tex_obj(const tex_t *src) {
@@ -405,7 +413,13 @@ static void cap_tex_read(const tex_t *t, int rec) {
         if (k.kind) { cap_tex_enc(&k.t, "texture kind"); cap_buf_put(&g_cap_kind, &k, sizeof k); }
     }
     if (!im) return;
-    if (!im->inited || (im->track && !im->gpu_owned)) { vka_tex_drop(im); return; }
+    if (!im->inited || (im->track && !im->gpu_owned)) {
+        // A static pixel snapshot cannot replace CPU tracking across submits.
+        // Padding is excluded by cap_in_pool; missing actual source is an
+        // unsupported capture, rather than a replay with silently lost updates.
+        if (im->inited && im->track && !im->gpu_owned && !cap_in_pool(t)) cap_fail("a CPU-tracked texture's source is outside captured mapped regions");
+        vka_tex_drop(im); return;
+    }
     uint64_t key = (uint64_t)(uintptr_t)im;
     if (nvn_hm_get(&g_cap_img, &key)) { vka_tex_drop(im); return; }
     nvn_hm_put(&g_cap_img, &key, (void *)1);
@@ -419,8 +433,9 @@ static void cap_tex_read(const tex_t *t, int rec) {
     if (!(cb = vcap_cb_begin())) { cap_fail("no command buffer for a texture readback"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
     vcap_img_copy(cb, im, subs, nsub, hb.b, 0);
     if (!vcap_cb_run(cb)) { cap_fail("a texture readback did not finish"); vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im); return; }
-    cap_tpix h = {*t, (uint32_t)im->f.vk, im->d.target, im->w, im->h, im->depth, im->levels, im->layers, im->samples, nsub, im->gpu_owned ? 1u : 0u};
-    cap_tex_enc(&h.t, "texture contents");
+    vcap_tpix h = {{*t, (uint32_t)im->f.vk, im->d.target, im->w, im->h, im->depth, im->levels, im->layers, im->samples, nsub, im->gpu_owned ? 1u : 0u},
+                   im->base, im->vmin, !!(im->vtrack || im->replay_vcut), 0};
+    cap_tex_enc(&h.image.t, "texture contents");
     cap_buf c = {0}; cap_buf_put(&c, &h, sizeof h); cap_buf_put(&c, subs, nsub * sizeof *subs);
     VkDeviceSize off = 0; for (uint32_t i = 0; i < nsub; i++) { cap_buf_put(&c, hb.p + off, (size_t)subs[i].bytes); off += (subs[i].bytes + 15) & ~15ull; }
     cap_put(&g_cap_w, CAP_TPIX, g_cap_cur_submit, c.p, c.n, 0);
@@ -481,14 +496,36 @@ static void cap_head(void) {
 }
 typedef struct { uint64_t lo, hi; } pent;
 static int pent_cmp(const void *a, const void *b) { uint64_t x = ((const pent *)a)->lo, y = ((const pent *)b)->lo; return x < y ? -1 : x > y; }
+// Backend pool registration does not imply current guest backing: a pool may
+// remain registered after SVC release. Capture only existing mapped runs, keeping
+// their original addresses; absent pages have no bytes and are never zero-filled.
+// Caller holds nvn_pool_use through enumeration, hashing and writing the regions.
+static void cap_mapped_runs(uint64_t lo, uint64_t size, pent **ps, int *n, int *cap) {
+    uint64_t end = lo + size, run = lo;
+    if (end < lo) { cap_fail("a pool address range overflowed"); return; }
+    for (uint64_t p = lo; p < end;) {
+        uint64_t q = p + MIN(UINT64_C(4096) - (p & 4095), end - p);
+        if (!dm_guest_unmapped(p, q - p)) { p = q; continue; }
+        if (run < p) {
+            if (*n == *cap) { *cap = *cap ? 2 * *cap : 64; *ps = realloc(*ps, (size_t)*cap * sizeof **ps); if (!*ps) die("capture mapped-run allocation failed"); }
+            (*ps)[(*n)++] = (pent){run, p};
+        }
+        run = p = q;
+    }
+    if (run < end) {
+        if (*n == *cap) { *cap = *cap ? 2 * *cap : 64; *ps = realloc(*ps, (size_t)*cap * sizeof **ps); if (!*ps) die("capture mapped-run allocation failed"); }
+        (*ps)[(*n)++] = (pent){run, end};
+    }
+}
 static void cap_pools(uint32_t submit) {
     int n = vka_pools(NULL, NULL, 0), m = n + 64;
     uint64_t *lo = malloc((size_t)m * 8), *sz = malloc((size_t)m * 8);
     n = MIN(vka_pools(lo, sz, m), m);
-    pent *ps = malloc((size_t)MAX(n, 1) * sizeof *ps); int k = 0;
-    for (int i = 0; i < n; i++) if (sz[i]) ps[k++] = (pent){lo[i], lo[i] + sz[i]};
+    pent *ps = NULL; int k = 0, cap = 0, absent = 0;
+    for (int i = 0; i < n; i++) if (sz[i]) { int before = k; cap_mapped_runs(lo[i], sz[i], &ps, &k, &cap); absent += k == before; }
+    if (absent) CLOG("%d registered pools have no mapped backing; excluded from memory snapshots", absent);
     n = k; free(lo); free(sz);
-    qsort(ps, (size_t)n, sizeof *ps, pent_cmp);
+    if (n > 1) qsort(ps, (size_t)n, sizeof *ps, pent_cmp);
     for (int i = 0; i < n;) {
         uint64_t a = ps[i].lo, b = ps[i].hi; int j = i + 1;
         while (j < n && ps[j].lo < b) { b = MAX(b, ps[j].hi); j++; }
@@ -514,6 +551,7 @@ static void cap_reg_write(uint32_t submit) {
     for (uint32_t i = 0; i < g_cap_nreg; i++) {
         cap_region *r = &g_cap_reg[i]; if (!r->pending) continue;
         r->pending = 0;
+        if (dm_guest_unmapped(r->lo, r->size)) { cap_fail("a pending region lost its backing before capture"); continue; }
         cap_reg_hash(r, (const uint8_t *)(uintptr_t)r->lo);
         cap_regn hh = {g_cap_rid[i], r->kind, r->lo, r->size};
         cap_put_region(submit, &hh, (const void *)(uintptr_t)r->lo);
@@ -526,11 +564,26 @@ static void cap_mem(uint32_t submit) {
         cap_region *r = &g_cap_reg[i]; size_t nb = (size_t)((r->size + 4095) / 4096);
         for (size_t k = 0; k < nb;) {
             uint64_t o = (uint64_t)k * 4096; size_t len = (size_t)MIN(4096, r->size - o);
+            if (dm_guest_unmapped(r->lo + o, len)) {
+                r->hash_valid[k] = 0; // fragments no longer describe the old whole-block hash
+                // A record's region can start mid-page. Preserve its mapped
+                // fragments even when this relative hash block crosses a hole.
+                pent *runs = NULL; int nr = 0, nc = 0;
+                cap_mapped_runs(r->lo + o, len, &runs, &nr, &nc);
+                for (int j = 0; j < nr; j++) {
+                    struct { uint32_t region, pad; uint64_t off, len; } d = {g_cap_rid[i], 0, runs[j].lo - r->lo, runs[j].hi - runs[j].lo};
+                    cap_buf_put(&b, &d, sizeof d); cap_buf_put(&b, (const void *)(uintptr_t)runs[j].lo, (size_t)d.len);
+                }
+                free(runs); k++; continue; // absent bytes have no replacement contents
+            }
             uint64_t h = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, len);
-            if (h == r->hash[k]) { k++; continue; }
+            if (r->hash_valid[k] && h == r->hash[k]) { k++; continue; }
             size_t k1 = k; uint64_t end = o;
-            while (k1 < nb) { uint64_t o1 = (uint64_t)k1 * 4096; size_t l1 = (size_t)MIN(4096, r->size - o1); uint64_t h1 = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o1, l1);
-                if (h1 == r->hash[k1]) break; r->hash[k1] = h1; end = o1 + l1; k1++; }
+            while (k1 < nb) { uint64_t o1 = (uint64_t)k1 * 4096; size_t l1 = (size_t)MIN(4096, r->size - o1);
+                if (dm_guest_unmapped(r->lo + o1, l1)) break;
+                uint64_t h1 = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o1, l1);
+                if (r->hash_valid[k1] && h1 == r->hash[k1]) break;
+                r->hash[k1] = h1; r->hash_valid[k1] = 1; end = o1 + l1; k1++; }
             struct { uint32_t region, pad; uint64_t off, len; } d = {g_cap_rid[i], 0, o, end - o};
             cap_buf_put(&b, &d, sizeof d); cap_buf_put(&b, (const uint8_t *)(uintptr_t)r->lo + o, (size_t)(end - o));
             k = k1;
@@ -567,6 +620,10 @@ void nvn_cap_submit(int n, const uint64_t *h) {
         CLOG("frame %d: capture starts (%.1f s into the run)", g_cap_frame, (t0 - g_t0_ns) / 1e9);
         cap_head();
     }
+    // mtl_finish above drained reserved fences before taking the read lease.
+    // Under the queue submit lock no new replay work is needed by capture's
+    // one-off GPU copies. Hold mapping/pool lifetime until all CPU bytes are saved.
+    nvn_pool_use(1);
     cap_pools(g_cap_cur_submit);
     uint64_t t1 = now_ns(); cap_registries(g_cap_cur_submit);
     uint64_t t2 = now_ns(); nvn_hm_clear(&g_cap_seg, NULL); g_cap_nseg = 0;
@@ -579,6 +636,7 @@ void nvn_cap_submit(int n, const uint64_t *h) {
     if (g_cap_nsync) { uint32_t ns = g_cap_nsync; cap_put(&g_cap_w, CAP_SYNC, g_cap_cur_submit, &ns, 4, 0); }
     cap_buf s = {0}; uint32_t nn = (uint32_t)n; cap_buf_put(&s, &nn, 4); cap_buf_put(&s, top, (size_t)n * 4);
     cap_put(&g_cap_w, CAP_SUBM, g_cap_cur_submit, s.p, s.n, 0); cap_buf_free(&s); free(top);
+    nvn_pool_use(0);
     g_cap_ns += now_ns() - t0;
 }
 
@@ -597,7 +655,10 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
     uint64_t t0 = now_ns();
     cap_pres p = {0}; cap_buf px = {0}; char png[1100]; snprintf(png, sizeof png, "%s.live.png", g_cap_path);
     g_cap_cur_submit = g_cap_submit + 1; g_cap_no_read = 1;
+    mtl_finish();
+    nvn_pool_use(1);
     if (t) { p.tex = cap_tex_obj(t); cap_flush_objs(g_cap_cur_submit); cap_reg_write(g_cap_cur_submit); }
+    nvn_pool_use(0);
     if (crop) memcpy(p.crop, crop, sizeof p.crop);
     p.frame = (uint32_t)g_cap_frame;
     if (!t || !vcap_digest(t, p.sha256, &p.bytes, &p.width, &p.height, &p.pixfmt, png, vka_origin_ll(), &px)) cap_fail("the presented texture could not be read back");
@@ -606,11 +667,16 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
     if (px.n) cap_put(&g_cap_w, CAP_LPIX, g_cap_cur_submit, px.p, px.n, 0);
     cap_buf_free(&px);
     {
-        cap_buf hb = {0};
+        cap_buf hb = {0}; uint32_t retired = 0;
+        nvn_pool_use(1);
         for (uint32_t i = 0; i < g_cap_nreg; i++) {
-            cap_region *r = &g_cap_reg[i]; uint32_t nb = (uint32_t)((r->size + 4095) / 4096), hd[2] = {g_cap_rid[i], nb}; cap_buf_put(&hb, hd, 8);
+            cap_region *r = &g_cap_reg[i];
+            if (dm_guest_unmapped(r->lo, r->size)) { retired++; continue; }
+            uint32_t nb = (uint32_t)((r->size + 4095) / 4096), hd[2] = {g_cap_rid[i], nb}; cap_buf_put(&hb, hd, 8);
             for (uint32_t k = 0; k < nb; k++) { uint64_t o = (uint64_t)k * 4096, hv = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, (size_t)MIN(4096, r->size - o)); cap_buf_put(&hb, &hv, 8); }
         }
+        nvn_pool_use(0);
+        if (retired) CLOG("%u regions lost backing during the frame; no final memory comparison for them", retired);
         cap_put(&g_cap_w, CAP_PHSH, g_cap_cur_submit, hb.p, hb.n, 0); cap_buf_free(&hb);
     }
     uint64_t raw = g_cap_w.raw;
