@@ -50,8 +50,10 @@ void *nvn_real[NVN_NFUNC];               // DM_NVN_PROF: the real implementation
 _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // DM_NVN_PROF: cumulative time of each function (cntvct counts)
 static uint8_t g_unimpl_seen[NVN_NFUNC];
 
-uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
+static void nvn_shading_rate_note(const char *name, uint64_t cmd, uint64_t x1, uint64_t x2, uint64_t x3);
+uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     unsigned i = (unsigned)(slot - nvn_slot);
+    nvn_shading_rate_note(nvn_names[i], x0, x1, x2, x3);
     if (!g_unimpl_seen[i]++) LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
     return 0;
 }
@@ -108,6 +110,60 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+
+// Diagnostic only: these commands remain unimplemented. SDK 19's palette takes
+// 16 uint32 entries at most; a null pointer disables that palette. Preserve x3
+// at the common entry and read through the kernel, never through guest pointers.
+static pthread_once_t g_sr_trace_once = PTHREAD_ONCE_INIT;
+static int g_sr_trace;
+static void sr_trace_init(void) { const char *e = getenv("DM_NVN_SHADING_RATE_TRACE"); g_sr_trace = e && atoi(e); }
+static int sr_trace_read(uint64_t addr, void *dst, size_t size) {
+    if (!size) return 1;
+    if (!addr || addr > UINT64_MAX - size) return 0;
+    dm_guest_mapping_use(1);
+    int ok = !dm_guest_unmapped(addr, size) && !plat_mem_read(addr, dst, size);
+    dm_guest_mapping_use(0);
+    return ok;
+}
+static void nvn_shading_rate_note(const char *name, uint64_t cmd, uint64_t x1, uint64_t x2, uint64_t x3) {
+    pthread_once(&g_sr_trace_once, sr_trace_init);
+    if (!g_sr_trace) return;
+    int kind = !strcmp(name, "nvnCommandBufferShadingRateImagePalette") ? 1 : !strcmp(name, "nvnCommandBufferBindShadingRateImage") ? 2 : !strcmp(name, "nvnCommandBufferSetShadingRatePaletteMode") ? 3 : 0;
+    if (!kind) return;
+    struct sr_note { uint64_t cmd, arg1, arg2, arg3; uint32_t kind, status, entries[16]; tex_t tex; view_t view; } note = {0};
+    note.cmd = cmd; note.arg1 = x1; note.arg2 = x2; note.arg3 = kind == 1 ? x3 : 0; note.kind = (uint32_t)kind;
+    if (kind == 1 && x3) {
+        int32_t count = (int32_t)x2;
+        if (count < 0 || count > 16) note.status = 1;
+        else if (!sr_trace_read(x3, note.entries, (size_t)count * 4)) note.status = 2;
+    } else if (kind == 2 && x1) {
+        if (!sr_trace_read(x1, &note.tex, sizeof note.tex)) note.status |= 2;
+        if (x2 && !sr_trace_read(x2, &note.view, sizeof note.view)) note.status |= 4;
+    }
+    // Last observation per command buffer + palette slot / binding / mode. A full
+    // diagnostic table replaces an entry, causing extra logs rather than omissions.
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct sr_note seen[128];
+    pthread_mutex_lock(&mu);
+    unsigned at = 0;
+    for (; at < 128; at++) if (!seen[at].kind || (seen[at].cmd == cmd && seen[at].kind == note.kind && (kind != 1 || seen[at].arg1 == x1))) break;
+    if (at == 128) at = (unsigned)((cmd >> 4) ^ note.kind ^ (kind == 1 ? x1 : 0)) % 128;
+    if (!memcmp(&seen[at], &note, sizeof note)) { pthread_mutex_unlock(&mu); return; }
+    seen[at] = note;
+    if (kind == 1) {
+        char values[192] = {0}; size_t used = 0;
+        if (x3 && !note.status) for (int32_t i = 0; i < (int32_t)x2; i++) used += (size_t)snprintf(values + used, sizeof values - used, "%s%u", i ? "," : "", note.entries[i]);
+        LOG("[nvn] shading-rate diagnostic palette cmd=%#llx index=%u count=%d entries=%#llx status=%s values=[%s]", (unsigned long long)cmd, (uint32_t)x1, (int32_t)x2, (unsigned long long)x3,
+            !x3 ? "disabled" : note.status == 1 ? "invalid-count" : note.status ? "unreadable" : "read", values);
+    } else if (kind == 2) {
+        LOG("[nvn] shading-rate diagnostic bind cmd=%#llx texture=%#llx view=%#llx status=%u serial=%llu format=%#x target=%d size=%ux%ux%u levels=%u flags=%#x memory=%p pool=%p view-levels=%u:%u+%u view-layers=%u:%u+%u view-format=%u:%#x view-target=%u:%u",
+            (unsigned long long)cmd, (unsigned long long)x1, (unsigned long long)x2, note.status, (unsigned long long)note.tex.serial, note.tex.d.format, note.tex.d.target,
+            note.tex.d.width, note.tex.d.height, note.tex.d.depth, note.tex.d.levels, note.tex.d.flags, note.tex.mem, (void *)note.tex.pool,
+            note.view.set_levels, note.view.base_level, note.view.nlevels, note.view.set_layers, note.view.min_layer, note.view.nlayers, note.view.set_format, note.view.format, note.view.set_target, note.view.target);
+    } else LOG("[nvn] shading-rate diagnostic mode cmd=%#llx mode=%u", (unsigned long long)cmd, (uint32_t)x1);
+    pthread_mutex_unlock(&mu);
+}
+
 #include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
 
 // ---------- Device ----------
