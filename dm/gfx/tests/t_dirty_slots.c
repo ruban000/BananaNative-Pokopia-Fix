@@ -24,8 +24,49 @@ static void *page_map(void) {
     return p;
 }
 
+static void retained_handles(void) {
+    // Separate whole host pages: this checks handle lifetime on both 4 KB and 16 KB hosts, without adjacent pools sharing a page.
+    size_t pg = (size_t)getpagesize(), lo, hi;
+    uint8_t *p = mmap(NULL, 3 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(2); }
+    nvn_dirty_add_range(p, pg);
+    const void *original = nvn_dirty_span(p, pg), *bounds = original, *kept = original;
+    EXPECT("retained handle starts with a live range", 1, original != NULL);
+    uint64_t stamp = nvn_dirty_now();
+    nvn_dirty_remove_range(p);
+    EXPECT("retired bounds handle: conservatively dirty", 1, nvn_dirty_bounds_since(&bounds, p, pg, stamp, &lo, &hi));
+    EXPECT("retired bounds handle: cleared for unranged fallback", 1, bounds == NULL);
+    EXPECT("retired bounds handle: dirty bytes begin at zero", 0, lo);
+    EXPECT("retired bounds handle: dirty bytes cover the span", pg, hi);
+    EXPECT("retired kept handle: conservatively dirty", 1, nvn_dirty_since_kept(&kept, p, pg, stamp));
+    EXPECT("retired kept handle: cleared", 1, kept == NULL);
+
+    // Reuse the original slot elsewhere, then register the original storage in a different slot: neither a cleared nor a stale handle may keep using the unrelated range.
+    nvn_dirty_add_range(p + 2 * pg, pg);
+    nvn_dirty_add_range(p, pg);
+    const void *replacement = nvn_dirty_span(p, pg);
+    EXPECT("replacement range occupies another slot", 1, replacement && replacement != original);
+    EXPECT("cleared bounds handle: replacement is clean", 0, nvn_dirty_bounds_since(&bounds, p, pg, stamp, &lo, &hi));
+    EXPECT("cleared bounds handle: renewed", 1, bounds == replacement);
+    EXPECT("cleared kept handle: replacement is clean", 0, nvn_dirty_since_kept(&kept, p, pg, stamp));
+    EXPECT("cleared kept handle: renewed", 1, kept == replacement);
+    bounds = kept = original;
+    EXPECT("reused bounds handle: replacement is clean", 0, nvn_dirty_bounds_since(&bounds, p, pg, stamp, &lo, &hi));
+    EXPECT("reused bounds handle: renewed", 1, bounds == replacement);
+    EXPECT("reused kept handle: replacement is clean", 0, nvn_dirty_since_kept(&kept, p, pg, stamp));
+    EXPECT("reused kept handle: renewed", 1, kept == replacement);
+    nvn_dirty_protect(p, pg);
+    p[0] = 7;
+    EXPECT("renewed bounds handle sees a write", 1, nvn_dirty_bounds_since(&bounds, p, pg, stamp, &lo, &hi));
+    EXPECT("renewed kept handle sees a write", 1, nvn_dirty_since_kept(&kept, p, pg, stamp));
+    nvn_dirty_remove_range(p);
+    nvn_dirty_remove_range(p + 2 * pg);
+    munmap(p, 3 * pg);
+}
+
 int main(void) {
     crash_install();
+    retained_handles();
 
     for (int i = 0; i < 65; i++) {
         void *p = page_map();

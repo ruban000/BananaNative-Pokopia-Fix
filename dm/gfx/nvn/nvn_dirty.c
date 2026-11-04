@@ -28,7 +28,8 @@ enum { BLK_SHIFT = 10, BLK = 1 << BLK_SHIFT, NBLK = 256, MAX_RANGE = BLK * NBLK 
 // Ranges are rounded to host pages (16 KB) but guest memory pools are only 4 KB aligned: adjacent pools share their first / last pages, so one address can fall in several registered ranges.
 // So: "is this texture tracked" looks for a range that holds its whole span; a fault / host pre-write unprotects and stamps every range covering that page; pool destruction identifies its range by the pool's exact start mem.
 // (Previously the first range containing the address was always taken: two SMBW ASTC 6x5 textures whose pool's first page is shared with a small preceding pool were judged untracked and re-uploaded on every use, about 6 MB per frame)
-typedef struct { uintptr_t base, end, mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; } range_t;
+// written: set when a page of the range is stamped, taken (cleared) by nvn_dirty_ranges_written: which ranges a scan of the textures must look at
+typedef struct { uintptr_t base, end, mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; _Atomic int written; } range_t;
 static _Atomic(range_t *) g_blk[NBLK];
 static inline range_t *rg(int i) { return &atomic_load_explicit(&g_blk[i >> BLK_SHIFT], memory_order_acquire)[i & (BLK - 1)]; }
 static _Atomic int g_nr;
@@ -71,6 +72,7 @@ static range_t *find_span(uintptr_t a, size_t len) {
 }
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
+    atomic_store(&r->written, 1);   // after the generation (a scan that takes the flag reads it) and before the clock moves (a scan that missed the flag runs again)
     // Publish completion after the generation: a checker may have cached "clean" using the incremented clock before the generation store. Both fault and host-write paths
     // must invalidate that cached clock, as the page stays writable until the next upload protects it again.
     atomic_fetch_add(&g_now, 1);
@@ -159,7 +161,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     } else {
         memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
     }
-    r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
+    r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen; atomic_store(&r->written, 1);
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
@@ -207,6 +209,20 @@ void nvn_dirty_protect(const void *addr, size_t len) {
 void nvn_dirty_hold(const void *addr, size_t len) { pthread_mutex_lock(&g_slot_mu); if (g_pg) prep_write((void *)addr, len); }
 void nvn_dirty_unhold(void) { pthread_mutex_unlock(&g_slot_mu); }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
+// The live ranges written since the last call (each range's flag is taken): [lo[i], hi[i]), at most max; -1 = more than max (the flags of the rest stay set: scan
+// everything). A single consumer (the Vulkan replay's texture scan): a scan of only these ranges, started after reading nvn_dirty_now, sees every page stamped before
+// that read, and a page stamped after the flag was taken sets the flag again before the clock moves, so the next scan looks at its range
+int nvn_dirty_ranges_written(uintptr_t *lo, uintptr_t *hi, int max) {
+    int n = atomic_load(&g_nr), k = 0;
+    for (int i = 0; i < n; i++) {
+        range_t *r = rg(i);
+        if (!atomic_load_explicit(&r->written, memory_order_relaxed) || !live_at(i)) continue;
+        if (k == max) return -1;
+        atomic_store(&r->written, 0);
+        lo[k] = r->base; hi[k++] = r->end;
+    }
+    return k;
+}
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
     range_t *r = (range_t *)span; uintptr_t a0 = (uintptr_t)addr;   // the kept handle still holds the span (a slot reused by another pool over the same memory is as good): no scan
@@ -217,11 +233,13 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
     return 0;
 }
 // The written part of [addr, addr+len) since stamp, by pages: [*lo, *hi) as offsets from addr (clipped to the span). 0 = nothing written; untracked = all of it
-int nvn_dirty_bounds_since(const void *span, const void *addr, size_t len, uint64_t stamp, size_t *lo, size_t *hi) {
+// *span: the caller's kept handle, replaced by the range found when it no longer holds the span (the pool's range was removed and added again in another slot): the
+// search over every range then runs once, not at every check (Mario Kart World on the Vulkan replay: a sixth of the replay thread in find_span)
+int nvn_dirty_bounds_since(const void **span, const void *addr, size_t len, uint64_t stamp, size_t *lo, size_t *hi) {
     *lo = 0; *hi = len;
     if (!len) return 0;
-    range_t *r = (range_t *)span; uintptr_t a = (uintptr_t)addr;
-    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a < r->base || a + len > r->end) r = find_span(a, len);
+    range_t *r = (range_t *)*span; uintptr_t a = (uintptr_t)addr;
+    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a < r->base || a + len > r->end) { r = find_span(a, len); *span = r; }
     if (!r) return 1;
     uintptr_t p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift, f = UINTPTR_MAX, l = 0;
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) { if (f == UINTPTR_MAX) f = i; l = i; }
@@ -241,6 +259,13 @@ void nvn_dirty_debug(const void *span, const void *addr, size_t len, uint64_t st
              nl, np, nn, nb, (unsigned long long)mg, (unsigned long long)stamp, (unsigned long long)atomic_load(&g_now));
 }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
+// nvn_dirty_since_span with a handle the caller keeps across calls (*span: replaced by the range found when it no longer holds the span)
+int nvn_dirty_since_kept(const void **span, const void *addr, size_t len, uint64_t stamp) {
+    if (!len) return 0;
+    range_t *r = (range_t *)*span; uintptr_t a = (uintptr_t)addr;
+    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a < r->base || a + len > r->end) { r = find_span(a, len); *span = r; }
+    return nvn_dirty_since_span(r, addr, len, stamp);
+}
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
     for (int i = 0; i < n; i++) active += live_at(i) != 0;
