@@ -921,6 +921,26 @@ void vka_draw_prof(char *b, size_t n, double draws) {
 // non-indexed triangles by their vertex shader (3 * max_p vertices a record) with the program's pixel shader (its per-primitive inputs made flat). K bounds the mesh
 // workgroups a task workgroup may launch: Mario Kart World's 7 task programs launch the popcount of a 32-lane ballot, at most their 32 threads (more are dropped)
 static uint64_t g_mcs_draws, g_mcs_slots;
+// With no guest-memory writes, a twin writes only its generated records (g_xw). Keep the execution dependency against ALL_COMMANDS: later image uploads or guest-buffer
+// writes must still wait for this dispatch's reads, even though only the payload/output buffers need availability and visibility. The preceding pass end and uploads
+// retain their own barriers. Do not infer this from bound image slots alone: unknown walks, bindless pools, raw memory and spilled workgroup memory stay conservative.
+// DM_VK_MESH_CS_BARRIER=1 enables this bounded memory scope for device comparison; it never moves a dispatch or keeps a rendering pass open across one.
+static void mesh_cs_barrier(int st) {
+    int scoped = VKA_ENV("DM_VK_MESH_CS_BARRIER", 0) && g_wk.n[st] >= 0 && !g_wk.pool[st];
+    for (int i = 0; scoped && i < g_wk.n[st]; i++) {
+        const vka_res *r = &g_wk.r[st][i];
+        if ((r->flags & DMSH_VK_BF_RW) || r->desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || r->desc == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER ||
+            r->what == VKA_R_GMEM_MAP || r->what == VKA_R_GMEM_LOG || r->what == VKA_R_SHARED_SPILL) scoped = 0;
+    }
+    if (!scoped) { vka_barrier(g_cb); return; }
+    VkBufferMemoryBarrier b[3];
+    for (uint32_t i = 0; i < g_xw.n; i++) b[i] = (VkBufferMemoryBarrier){VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = g_xw.bi[i].buffer, .offset = g_xw.bi[i].offset, .size = g_xw.bi[i].range};
+    vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, g_xw.n, b, 0, NULL);
+    if (vka_gp_active) vka_gp_mark(g_cb, __FILE_NAME__, __LINE__);
+}
 static int mesh_cs_run(const vka_dstate *d, int st, vka_shader *tw, uint32_t x, uint32_t y) {   // one twin's dispatch (outside a pass), its records' buffers in g_xw
     vka_shader *s2[VKA_NSTAGE] = {0}; s2[st] = tw;
     vka_layout lay; if (!vka_layout_of(s2, 1, &lay)) return 0;
@@ -930,7 +950,7 @@ static int mesh_cs_run(const vka_dstate *d, int st, vka_shader *tw, uint32_t x, 
     if (!bind_sets(d, s2, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, NULL)) return 0;
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     vk.vkCmdDispatch(g_cb, x, y, 1);
-    vka_barrier(g_cb);
+    mesh_cs_barrier(st);
     return 1;
 }
 // 1 = the dispatches are recorded and sh holds the draw's vertex and pixel shaders (*nvert vertices, the records in *rec); 0 = skipped (counted, logged)
