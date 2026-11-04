@@ -132,6 +132,30 @@ Phone, 2026-11-03 (Honor PNM-N49, Adreno 840, system driver; test app `dev.nxnat
 - `[RED]` lines: `nvnTexturePoolWriteDescriptorTableData`, `nvnSamplerPoolWriteDescriptorTableData`, `nvnCommandBufferConvertCooperativeVectorMatrix`, `nvnDeviceGetCooperativeVectorMatrixSize`, `nvnDeviceConvertCooperativeVectorMatrix` (on the first boot, NVN address lookups of names the host did not know, twice each: new in SDK 21; the host names all five since a772aae3, so a lookup now finds them and only a call would log); `DM_WINDOW_SIZE` has no `window_fn` row for this build; `mtl_pso_prebuild_tool` not on Android.
 - The device's sparse support, printed for the first time: `sparseBinding` 1, residency buffer 1, image 2D 1, image 3D 0, aliased 0, standard 2D block shape 1, non-resident strict 1, `sparseAddressSpaceSize` 4095 MiB, sparse binding on the replay's queue family; `bufferImageGranularity` 1. `maxMemoryAllocationCount` is 4294967295 (no limit), so the earlier build's `-2` image allocation failures were not the allocation count (open: what the driver ran out of; 4.1 GB of placed pools were beside them).
 
+## Memory on the AYN Thor (Turnip)
+
+Current (2026-11-04, AYN Thor, Adreno 740, Turnip T30, which has no sparse residency images, so every sparse texture is a dense image). The world map's 3D scene (the title, "Press L + R to start", about 60 s in, 1,671 draws a frame); ctl stats, `memory:` lines and `dumpsys meminfo`:
+
+| Class | Before (`DM_VK_LAZY=0`, runs 20261104-200505, -190436) | After (run 20261104-200044) |
+|---|---|---|
+| Sparse GPU-written terrain targets (4 × 16384² R8, 4 × 8192² RG16, 2 × 8192² R16), not drawn at the world map | 3,078 MiB dense | 0: deferred ([Every registered texture gets an image at once](../../../docs/reference/memory.md#every-registered-texture-gets-an-image-at-once-vulkan-replay)) |
+| Other render targets registered before their first draw | about 170 MiB | made at their first draw |
+| Sparse sampled arrays (dense: RGBA8SN 1536² to 6144² × 2, ASTC 8×8 / BC6H 8192² × 68 from level 2-3) | about 1,000 MB | 606 MB (9) at this point |
+| Textures from storage, tracked | about 2,000 MB | 2,008 MB (31,160) |
+| Textures from storage, filled once | about 490 MB | 494 MB (2,903) |
+| GPU-written (render targets drawn) | about 960 MB | 957 MB |
+| Cleared, not GPU-written (depth arrays, small targets) | | 112 MB (298) |
+| **Images** | **7,226 MiB** | **3,984-4,177 MiB** (2,176 MiB in 34 blocks, 1,886 MiB in 82 dedicated) |
+| Placed pools | 856 MiB | 832-865 MiB |
+| Vulkan memory in all | 8,147 MiB | 4,880 MiB |
+| PSS (Graphics / guest memory, "Unknown" / native heap) | 9.6-11.5 GB in earlier runs; the two runs here ended first (below) | **8.49 GB** (5.30 / 2.59 / 0.48 GB), `MemAvailable` 4.3 GB (1.3 GB before) |
+
+- The picture is unchanged (`shot.png` of run 20261104-200044: the title over the desert road, terrain, characters and logo as before); 23.6 fps, GPU 17.4 ms, recording 27.5 ms, as the scene ran before (TASKS: 25.6 fps).
+- Eager images do not survive to the race: run 20261104-201554 (`DM_VK_LAZY=0`) was ended by the low-memory killer at 33 s (6,690 MiB of Vulkan memory, "device is not responding"); 20261104-200505 crashed at 43 s (`pc=0` from `main+0x19e77a0`, not studied). With deferred images the route of `sx2/agents/gameplay/route-race.md` reaches the track load at 140 s (run 20261104-201034).
+- Open, the track load: 10 s after the track was chosen a SIGSEGV on `vk-replay`: `memcpy` ← `dm_guest_read_mapped` (`hle_svc.c`) ← `unmapped_content` ← `upload_fill` ← `img_first_use` ← `vka_tex_get` ← `write_tex` ← `vka_tex_prepare`, reading `0x40c8a80000` (`SEGV_ACCERR`): a guest page the alias bitmap calls mapped but that is not readable, right after `MapVirtual` lines (probably a texture over a virtual pool's range, which `vpool_map` sets `PROT_NONE` on unmap; not studied).
+- Open, the rest: mostly the game's own textures, 2.5 GB of images from pool storage that the guest also holds (its texture heap, guest memory). The replay makes an image for every registered texture ID, and bindless shaders read the texture pool, so which textures a frame samples is not known; the guest's block-linear storage cannot be the image's memory (`pool_fit`: 8 MB could). The 6.5 GB PSS aim is not met at this scene.
+- In a race the terrain targets are drawn into and made: 3.0 GB dense again on Turnip, a platform limit (no sparse residency; kartnative maps 8-26 MB of each).
+
 ## Next on the phone
 
 In the order they block. Line numbers are those of `dm/gfx/vk_android/vka_tex.c` at ba792d46.
@@ -180,4 +204,5 @@ In the order they block. Line numbers are those of `dm/gfx/vk_android/vka_tex.c`
 - [Switch 2: uncompressed storage the CPU wrote before a texture's first sample (Vulkan replay)](../../../docs/reference/nvn-objects.md#switch-2-uncompressed-storage-the-cpu-wrote-before-a-textures-first-sample-vulkan-replay): its terrain tiles, flat untextured ground on the phone (resolved).
 - [Float colour outputs into integer targets on the Vulkan replay](../../../docs/reference/shaders.md#float-colour-outputs-into-integer-targets-on-the-vulkan-replay): fragment `dcb0504c844f1ecc` of its task-less mesh programs.
 - [Compute programs over the device's shared memory](../../../docs/reference/shaders.md#compute-programs-over-the-devices-shared-memory): 168 compute programs declare 48 KiB on the Adreno 840's 32 KiB; resolved: the translator keeps their shared memory in a storage buffer, a slice per workgroup (they were skipped before).
+- [Every registered texture gets an image at once (Vulkan replay)](../../../docs/reference/memory.md#every-registered-texture-gets-an-image-at-once-vulkan-replay): its sparse terrain render targets, 3.0 GB of images at the world map, which draws none of them (resolved on Turnip: deferred images).
 - [Upload staging grows within one Vulkan submission (Android)](../../../docs/reference/memory.md#upload-staging-grows-within-one-vulkan-submission-android): its boot ran out of memory on the phone (resolved; the images are the next wall).
