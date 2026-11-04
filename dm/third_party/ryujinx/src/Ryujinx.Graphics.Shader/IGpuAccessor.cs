@@ -525,6 +525,14 @@ namespace Ryujinx.Graphics.Shader
             return TextureFormat.R8G8B8A8Unorm;
         }
 
+        // nxnative: sampled textures need their descriptor's numeric type too.
+        // Separate from image formats: an NVN driver-bank word may name both a
+        // sampled slot and an image slot. Unknown preserves the float default.
+        TextureFormat QuerySampledTextureFormat(int handle, int cbufSlot = -1)
+        {
+            return TextureFormat.Unknown;
+        }
+
         /// <summary>
         /// Queries transform feedback enable state.
         /// </summary>

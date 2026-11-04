@@ -289,7 +289,7 @@
 639fc8644430c165	{"local":[128,1,1],"shared":9648}
 63e522ca07947866	{"local":[64,1,1],"shared":49152}
 6486162760faebbb	{"local":[8,8,1],"shared":0}
-649e36162cad9e79	{"local":[8,8,1],"shared":0}
+649e36162cad9e79	{"local":[8,8,1],"shared":0,"tex":{"2":{"fmt":"R8Uint"}},"img":{"0":{"fmt":"R32Uint"}}}
 64e0f471104cf8b5	{"local":[1,1,1],"shared":0}
 65c794b0e3998c32	{"local":[4,16,1],"shared":0}
 66349fcedad83367	{"local":[1,1,1],"shared":0}

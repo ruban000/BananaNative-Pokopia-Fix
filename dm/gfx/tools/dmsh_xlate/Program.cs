@@ -150,6 +150,15 @@ static class SwshXlate
             Notes.Add($"image handle {handle:X} slot {slot} has an unknown format in the answer table: {f}");
             return TextureFormat.Unknown;
         }
+        public TextureFormat QuerySampledTextureFormat(int handle, int cbufSlot = -1)
+        {
+            int slot = Slot(handle, cbufSlot, false);
+            string f = _job["tex"] is JsonObject t && slot >= 0 && t[slot.ToString()] is JsonObject o ? (string)o["fmt"] : null;
+            if (f == null) return TextureFormat.Unknown;
+            if (Enum.TryParse(f, true, out TextureFormat tf)) return tf;
+            Notes.Add($"sampled texture handle {handle:X} slot {slot} has an unknown format in the answer table: {f}");
+            return TextureFormat.Unknown;
+        }
         int Local(int i) => _job["local"] is JsonArray a && a.Count > i ? (int)a[i] : 1;
         public int QueryComputeLocalSizeX() => Local(0);
         public int QueryComputeLocalSizeY() => Local(1);

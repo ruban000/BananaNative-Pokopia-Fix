@@ -258,7 +258,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (!isImage)
             {
-                format = TextureFormat.Unknown;
+                format = type == SamplerType.None ? TextureFormat.Unknown : _gpuAccessor.QuerySampledTextureFormat(handle, cbufSlot);
             }
 
             SetBindingPair setAndBinding = GetTextureOrImageBinding(
