@@ -582,8 +582,9 @@ uint64_t mtl_upload_ns_take(void) { return atomic_exchange(&g_up_ns, 0); }
 uint64_t mtl_upload_bytes(void) { return atomic_load(&g_up_bytes); }
 // mem_any over guest storage: pages the guest has not mapped are skipped (inaccessible; they read as zeros: unmapped_content)
 static int mem_any_mapped(const uint8_t *c, const tex_t *t) {
-    if (c != t->mem || !dm_guest_unmapped((uintptr_t)c, t->L.size)) return mem_any(c, t->L.size);
-    for (uintptr_t p = (uintptr_t)c, e = p + t->L.size; p < e; ) {
+    uint64_t n = nvn_tex_data_size(&t->d);
+    if (c != t->mem || !dm_guest_unmapped((uintptr_t)c, n)) return mem_any(c, n);
+    for (uintptr_t p = (uintptr_t)c, e = p + n; p < e; ) {
         uintptr_t q = (p & ~(uintptr_t)0xFFF) + 0x1000; if (q > e) q = e;
         if (!dm_guest_unmapped(p, 1) && mem_any((const uint8_t *)p, q - p)) return 1;
         p = q;
@@ -823,28 +824,33 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
     *seen = cap;
     return c;
 }
+// Snapshots and content scans stop after the final mip, not at L.size's allocation
+// alignment. MKW's 512x512 packaged textures have 0x2c000-byte pools containing
+// 0x2b400 bytes of mip data; the sparse allocation is 0x30000 and its tail may be
+// unmapped or belong to another pool. Layer strides and dirty bounds stay intact.
 // Storage the guest has not mapped (all or part of it): its content as zeros, in a copy (NULL: all mapped). A memory pool is placed memory only once the GPU gets an address
 // in it (vka_mem.c mtl_pool_need); before, placing mapped the whole pool read-write, and Mario Kart World 1.8.0 uploads a texture of a CPU_NO_ACCESS pool whose pages its
 // SDK has not mapped (SIGSEGV in the deswizzle at 0x4074003000, phone m22)
 static uint8_t *unmapped_content(const tex_t *t) {
-    uint64_t u = dm_guest_unmapped((uintptr_t)t->mem, t->L.size); if (!u) return NULL;
-    uint8_t *c = malloc(t->L.size); if (!c) return NULL;
-    dm_guest_read_mapped(c, (uintptr_t)t->mem, t->L.size);
+    uint64_t nbytes = nvn_tex_data_size(&t->d);
+    uint64_t u = dm_guest_unmapped((uintptr_t)t->mem, nbytes); if (!u) return NULL;
+    uint8_t *c = malloc(nbytes); if (!c) return NULL;
+    dm_guest_read_mapped(c, (uintptr_t)t->mem, nbytes);
     static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("texture serial %llu: %llu of its %llu storage pages at %p are not mapped by the guest: read as zeros", (unsigned long long)t->serial,
-                                                              (unsigned long long)u, (unsigned long long)((t->L.size + 4095) >> 12), (const void *)t->mem);
+                                                              (unsigned long long)u, (unsigned long long)((nbytes + 4095) >> 12), (const void *)t->mem);
     return c;
 }
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
     im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
-    if (vka_nan_on()) im->hash = mem_hash(t->mem, t->L.size);
-    uint8_t *c = im->vpool ? NULL : gw_content(t->mem, t->L.size, &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
+    if (vka_nan_on()) im->hash = mem_hash(t->mem, nvn_tex_data_size(&t->d));
+    uint8_t *c = im->vpool ? NULL : gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
     if (!c && !im->vpool) c = unmapped_content(t);
     if (c) { tex_t tc = *t; tc.mem = c; upload(im, &tc, cb); free(c); g_gw_over++; } else upload(im, t, cb);
     if (vka_nan_on()) { im->head = mem_hash(t->mem, t->L.size < 64 ? t->L.size : 64); im->up_fence = vka_fence_last() + 1;
         if (!im->snap) im->snap = malloc(256); if (im->snap) memcpy(im->snap, t->mem, t->L.size < 256 ? t->L.size : 256); }
 }
 static void upload_fill(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // the same without tracking (ST_FILL)
-    uint8_t *c = im->vpool ? NULL : gw_content(t->mem, t->L.size, &im->gw_seen);
+    uint8_t *c = im->vpool ? NULL : gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);
     if (!c && !im->vpool) c = unmapped_content(t);
     if (c) { tex_t tc = *t; tc.mem = c; upload(im, &tc, cb); free(c); g_gw_over++; } else upload(im, t, cb);
 }
@@ -1127,7 +1133,7 @@ static void sparse_refresh(vka_img *im, VkCommandBuffer cb) {
 static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int cpu) {
     vka_img_barrier(cb, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     im->inited = 1;
-    uint64_t seen; uint8_t *c = im->samples == 1 && t->mem && !im->vpool ? gw_content(t->mem, t->L.size, &seen) : NULL;   // the content the mode's "holds data" checks look at
+    uint64_t seen; uint8_t *c = im->samples == 1 && t->mem && !im->vpool ? gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;   // the content the mode's "holds data" checks look at
     int mode = im->samples == 1 ? storage_mode(t, c ? c : t->mem, &im->f, cpu, g_first_sampled) : ST_ZERO;
     free(c);
     if (mode != ST_ZERO) im->from_mem = 1;
@@ -1174,7 +1180,7 @@ static int lazy_ok(const tex_t *t, const vka_fmt *f) {   // caller holds g_tmu (
     const nvn_texdesc *d = &t->d;
     if (!on || !t->mem || f->kind >= 3 || compressed(f) || d->samples > 1 || d->target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if ((double)t->L.size < VKA_ENVF("DM_VK_LAZY_MB", 1.0) * 1048576.0 || cpuw_has(t->serial)) return 0;
-    uint64_t seen; uint8_t *c = !(t->pool && pool_sparse(t->pool)) ? gw_content(t->mem, t->L.size, &seen) : NULL;
+    uint64_t seen; uint8_t *c = !(t->pool && pool_sparse(t->pool)) ? gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;
     int mode = storage_mode(t, c ? c : t->mem, f, 0, 1);
     free(c);
     return mode == ST_ZERO;
@@ -1740,7 +1746,7 @@ static int write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDesc
     g_first_sampled = !e->img;   // (a texture ID in the sampled table: a first use here is a sample, nvn2_sampled_content)
     g_lazy_hit = 0;
     if (VKA_ENV("DM_VK_STORAGE_TRACE", 0) && e->t.mem) {
-        uint64_t holes = dm_guest_unmapped((uintptr_t)e->t.mem, e->t.L.size), released = e->release_seq;
+        uint64_t holes = dm_guest_unmapped((uintptr_t)e->t.mem, nvn_tex_data_size(&e->t.d)), released = e->release_seq;
         // The local descriptor copy can predate a release while it waits for
         // the lease. Read its diagnostic marker again under the table lock.
         pthread_mutex_lock(&g_tmu);
@@ -1751,6 +1757,13 @@ static int write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDesc
             id, (unsigned long long)e->t.serial, e->t.mem, (unsigned long long)e->t.L.size, e->t.pool, (unsigned long long)e->pgen,
             (unsigned long long)nvn_pool_live(e->t.pool, NULL, NULL), e->finalized, (unsigned long long)holes, (unsigned long long)released, replaced,
             (unsigned long long)vka_fence_last(), (unsigned long long)vka_done());
+        if (holes || released || replaced) {
+            int live = e->t.pool && e->pgen && nvn_pool_live(e->t.pool, NULL, NULL) == e->pgen;
+            VLOG("storage layout: ID %d serial %llu shape %ux%ux%u levels %u format %#x flags %#x target %d samples %d stride %u packaged %d block %#x layer %#llx align %#x tile %u/%u pool-base %p pool-size %#llx pool-flags %#x offset %#llx",
+                id, (unsigned long long)e->t.serial, e->t.d.width, e->t.d.height, e->t.d.depth, e->t.d.levels, e->t.d.format, e->t.d.flags, e->t.d.target,
+                e->t.d.samples, e->t.d.stride, e->t.has_layout, e->t.d.pkg_block_h, (unsigned long long)e->t.L.layer_size, e->t.L.align, e->t.L.tileH, e->t.L.tileD,
+                live ? e->t.pool->mem : NULL, live ? (unsigned long long)e->t.pool->size : 0ull, live ? e->t.pool->flags : 0, (unsigned long long)e->t.off);
+        }
     }
     vka_img *im = treg_dead(id, e) ? NULL : vka_tex_get(&e->t, cb);
     int lazy = !im && g_lazy_hit && !e->img;   // deferred (Deferred images): a null descriptor, zeros, until the image is made
@@ -1878,7 +1891,7 @@ void vka_tex_id_check(int id) {
     if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return; }
     smap_ent *e = map_get(g_treg[id].t.serial); vka_img *im = e ? e->im : NULL;
     if (im && im->track && !im->gpu_owned && im->mem && im->hash && !img_pool_dead(im)) {
-        uint64_t h = mem_hash(im->mem, im->L.size); int dirty = nvn_dirty_since_span(im->span, im->mem, im->L.size, im->stamp);
+        uint64_t h = mem_hash(im->mem, nvn_tex_data_size(&im->d)); int dirty = nvn_dirty_since_span(im->span, im->mem, im->L.size, im->stamp);
         static _Atomic int n; if (h != im->hash && atomic_fetch_add(&n, 1) < 32) { char why[600]; nvn_dirty_debug(im->span, im->mem, im->L.size, im->stamp, why, sizeof why);
             {   // the mapping's protection as the kernel has it (diagnostic)
                 FILE *f = fopen("/proc/self/maps", "re"); char ln[512]; uintptr_t a = (uintptr_t)im->mem;

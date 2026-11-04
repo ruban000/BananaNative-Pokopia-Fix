@@ -15,6 +15,8 @@ typedef struct {
 } nvn_texlayout;
 
 void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o);
+// CPU source span: includes mip/block padding and layer strides, excludes final allocation alignment.
+uint64_t nvn_tex_data_size(const nvn_texdesc *d);
 uint64_t nvn_tex_level_offset(const nvn_texdesc *d, unsigned level);
 uint32_t nvn_tex_level_gobs(const nvn_texdesc *d, unsigned level);   // GOB columns level `level` is laid out with (its width in GOBs; padded to whole 64 KB tiles in a sparse texture's tiled levels)
 int nvn_fmt_bpb(int format, int *bw, int *bh);   // Bytes per block (0 = unknown format), block width and height
