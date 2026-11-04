@@ -1,12 +1,12 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game: version 1.8.0, from a dump of one Application content (version 0) that carries the 1.8.0 code and data, with no separate update. SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (`nn::ecli`, Nintendo's embedded Mono runtime) + `sdk`. **In bring-up, not playable:** the earlier base build reached its first frames on the Mac and on the arm64 Android emulator and stopped there on its sparse textures; on the phone its image allocations ran out ([Open](#open)). 1.8.0 has its profile, rewrite and Android shader library; on the phone it starts `nnMain` ([Boot (Android; 1.8.0)](#boot-android-180)). Its closest relative here is [Donkey Kong Bananza](../040074A01BF12000/README.md) (same engine, NVN2, Ampere shader code).
+A Switch 2 game. **The registered build is the dump the user supplies** (2026-11-04: SDK 19.3.3, display version not known, no separate update, one Application content of version 0), modules `main` + `subsdk0` (`nn::ecli`, Nintendo's embedded Mono runtime) + `sdk` (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2). The 1.8.0 build (SDK 21.4.0, which has a `subsdk1`) is no longer registered ([Builds](#builds)); most of the Android bring-up below was done on it. **In bring-up, not playable:** this build reached its first frames on the Mac and on the arm64 Android emulator and stopped there on its sparse textures; on a phone its image allocations ran out ([Open](#open)); 1.8.0 started `nnMain` on the phone ([Boot (Android; 1.8.0)](#boot-android-180)). Its closest relative here is [Donkey Kong Bananza](../040074A01BF12000/README.md) (same engine, NVN2, Ampere shader code).
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
-| `modules main subsdk0 subsdk1 sdk` | [`game.tsv`](game.tsv) | 1.8.0 has a module more than the earlier base build: its `subsdk0` is NintendoSDK movie 21.4.0 (806 exports; `main` imports 40 of them, its movie player), and the earlier `subsdk0`, the ecli module (40 exports: `mono_*`, `NnMono*`, `nn::ecli::Allocate` and the rest of its allocator), is now `subsdk1`. `main` imports `nn::ecli::Allocate` and `Deallocate` from it, which the host does not supply, so it is loaded |
+| `modules main subsdk0 sdk` | [`game.tsv`](game.tsv) | the registered build has no movie module: its `subsdk0` is the ecli module (40 exports: `mono_*`, `NnMono*`, `nn::ecli::Allocate` and the rest of its allocator). `main` imports `nn::ecli::Allocate` and `Deallocate` from it, which the host does not supply, so it is loaded. (1.8.0 had a module more: its `subsdk0` was NintendoSDK movie 21.4.0 and this one was `subsdk1`) |
 | `sys_resource 0x4000000` | `game.tsv` | the NPDM declares 64 MB of system resource: virtual address memory on (unlike Donkey Kong Bananza). 1.8.0's NPDM differs from the earlier one only by three more services, `chat:u` (GameChat, `nn::chat`), `mnpp:app` and `stpl:u` (streamplay, which the host already answers for Donkey Kong Bananza); kernel capabilities and file system access are the same |
 | `mem_alias 0x100000000`, `mem_reserve 0x300000000` | `game.tsv` | with a 1 GB alias region the SDK's AddressRegionManager node area (0x3fe00000) took nearly all of it, the regions the game maps physical memory into got no address, and the earlier base build read a null object 2 s into `nnMain`, every run. With a Switch-sized alias region its regions ended past +1.6 GB within 8 s; 4 GB holds the node area and the 1.5 GB the pool leaves beside the heap. `nninitStartup` sets the heap to the free application memory less a fixed reserve (`main+0x84790` in 1.8.0): 0x5dc00000 in 1.8.0, 0x60400000 before (whose Mac heap check measured 0x1dbc00000), so 1.8.0 asks for 0x1de400000 (7.47 GB, by that formula, not measured), still within the 7.75 GB heap region |
 | `app_pool 0x240000000` | `game.tsv` | the Switch 2's 9 GB, as Donkey Kong Bananza (not measured) |
@@ -16,21 +16,33 @@ A Switch 2 game: version 1.8.0, from a dump of one Application content (version 
 
 | Version | Display | Modules (build IDs) | Status |
 |---|---|---|---|
-| `v0` | 1.8.0 | main `d00e4f39…`, subsdk0 `746302f4…` (movie), subsdk1 `8dec9c0b…` (ecli), sdk `7a68b13d…` | registered (`build v0 1.8.0`); rewritten for Android, no cuts; pack in the work folder (`android-pack-1.8.0`, 244.9 MiB) |
-| `v0` (earlier dump) | not known (no control data) | main `9e244438c3d8ef1c703a6a85ef99c4f0`, subsdk0 `d39a7a3d44530bb61b35690e5b0383d5` (ecli), sdk `90ebba182862b9ecdc21fcb87b999012`, SDK 19.3.3 | no longer registered: both dumps are version 0, and a profile has one row a version. It had no build-keyed cuts, gates or host fixes, so nothing is lost; packing it now gives the "not the profile's build" red lines |
+| `v0` | not known (no control data) | main `9e244438c3d8ef1c703a6a85ef99c4f0`, subsdk0 `d39a7a3d44530bb61b35690e5b0383d5` (ecli), sdk `90ebba182862b9ecdc21fcb87b999012`, SDK 19.3.3 | **registered** (`build v0 unknown`, `modules main subsdk0 sdk`): the dump the user supplies on the Android development machine (2026-11-04), so this is the build the work is based on. No build-keyed cuts, gates or host fixes |
+| `v0` (1.8.0) | 1.8.0 | main `d00e4f39…`, subsdk0 `746302f4…` (movie), subsdk1 `8dec9c0b…` (ecli), sdk `7a68b13d…` | **no longer registered** (2026-11-04): a profile has one row a version and one module list, and its dump is not on the machine that works on this profile now. Packing it gives the "not the profile's build" red lines and stops at the missing `subsdk1`. Most of the "Boot (Android; 1.8.0)" findings below were made on it; the code paths they fixed are the host's, not the build's |
 
 The rewriter (`patch_nso.py --target android`) needs no cut on any 1.8.0 module ([Rewrite of 1.8.0](#rewrite-of-180)), and the profile has no `patches.py`: nothing was carried over with `nso_fnmap.py`. The addresses in this note from before 1.8.0 (`main+0x68524c`, `main+0xc10170`) are the earlier build's.
 
 ## Files
 
 - 1.8.0 dump: `ExeFS` (main, main.npdm, rtld, sdk, subsdk0, subsdk1), RomFS of 206,326 files (22.4 GB), `control.nacp` (display version 1.8.0) and the icon. The tools take a dump folder (`base/exefs`, `base/romfs`): links to the extraction in the work folder do.
-- Shaders: `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, as Donkey Kong Bananza. The tables (`shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv`) are from the 1.8.0 split: 11,604 shaders (compute 730, domain 13, pixel 7,301, vertex 3,560; the earlier build had 11,561). The Apple (Metal) libraries have not been built for either build, so the Mac host has no shaders.
+- Shaders: `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, as Donkey Kong Bananza. **Current (2026-11-04):** the tables (`shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv`) are from the split of the registered build (`shader_split.py` on its `base/romfs` and `main`, 37 s on the Linux machine, no `[RED]` line): 11,561 shaders (compute 727, mesh 18, pixel 7,261, task 7, vertex 3,548; sources: `Shader` 4,215, other 4,170, effects 3,136, `main` 40), 752 compute answer rows, 5,171 variation pairs, 4,377 BAHS pairs. Against the 1.8.0 tables they replace (11,604: compute 730, mesh 19, pixel 7,301, task 7, vertex 3,547): 11,451 keys in common, 153 gone (pixel 95, compute 51, mesh 7), 110 new (pixel 55, compute 48, mesh 6, vertex 1); `shader_facts.tsv` 60 rows gone / 56 new, `shader_pairs.tsv` 9 pairs gone, `pso_pairs.tsv` 86 gone / 52 new. The 1.8.0-only compute `078997bf631992c5` (below) is not in this build. The Apple (Metal) libraries have not been built for either build, so the Mac host has no shaders.
 - The shaders switch2mac lists as "run-time shaders" for 1.0.0 (321) are agl BAHS programs and a few BNSH the split already reads: `dm/gfx/tools/runtime_shaders.py` on 1.8.0 finds 11,604 NVN2 shaders in 103 files and `main`, pairs every NVN2 control section, and reproduces 300 of switch2mac's 321 keys (compute 95, pixel 119, vertex 81, and 5 mesh programs filed as domain); the other 21 are `Shader/Drive` shaders 1.8.0 changed. All 11,604 are in the 1.8.0 map ([NVN2 shaders bound at run time from agl's BAHS containers](../../../docs/reference/shaders.md#nvn2-shaders-bound-at-run-time-from-agls-bahs-containers)).
 - No file is missing at boot of the earlier build: the "not found" paths under `DM_FS=1` (`ProductME` heap table, `RSDB/FastTravel.*`, `Extended` performance config, some `Gyml` actor parameters) are probes for files it does not ship.
 
+## Rewrite of the registered build (SDK 19.3.3)
+
+Current (2026-11-04): `scripts/pack_android.py --code-only` on the Linux machine (`patch_nso.py --target android`, 17 s for the three modules), no `[RED]` line, no cut in any module:
+
+| Module | Rewritten sites | Gates | Observations |
+|---|---|---|---|
+| main | plain 28,346, pc-relative 527, conditional 535, `tpidr_el0` reads 502, `blr` 20, `br` 18, spin 101 | 101 | 0 |
+| sdk | plain 15,120, conditional 213, pc-relative 66, `br` 12, `tpidrro_el0` reads 428, `tpidr_el0` 2 reads / 3 writes, `ctr_el0` 5, `cntpct_el0` 40, `svc` 72, spin 5 | 122 | 5 |
+| subsdk0 (ecli) | plain 492, conditional 15, pc-relative 3, spin 10 | 10 | 0 |
+
+As on 1.8.0, the SDK-wide function-matched cuts of `dm/tools/sdk_patches.py` (the node area and the 2 MB alignment) find no matching function in this `sdk` (SDK 19.3.3) and are skipped; the 4 GB alias region holds the 1 GB node area (What it needs).
+
 ## Rewrite of 1.8.0
 
-`scripts/pack_android.py` (rewriter `patch_nso.py --target android`, 2026-11-03, 21 s for the four modules), no `[RED]` line, no cut in any module:
+Previous build, no longer registered. `scripts/pack_android.py` (rewriter `patch_nso.py --target android`, 2026-11-03, 21 s for the four modules), no `[RED]` line, no cut in any module:
 
 | Module | Rewritten sites | Gates | Observations |
 |---|---|---|---|
@@ -41,9 +53,18 @@ The rewriter (`patch_nso.py --target android`) needs no cut on any 1.8.0 module 
 
 The SDK-wide function-matched cuts of `dm/tools/sdk_patches.py` ("AddressRegionManager node area 1 GB → 62 MB" and the 2 MB alignment of large address regions) find no matching function in 1.8.0's `sdk` (SDK 21.4.0) and are skipped, as they should be for a build whose fingerprints they were not checked on. Whether SDK 21.4.0 still reserves a 1 GB node area is open; the 4 GB alias region holds it either way.
 
+## Android shader library (registered build)
+
+Current (2026-11-04, this tree at 5666bf0c, Linux x86_64): `scripts/pack_android.py -J 12` built it from the split above (`vk_android_build.py --target vulkan`, 2 min 52 s for the whole pack run, the code modules kept): library version `v-66d1dd2cd5ff` (chain `eda8d97a233b`, profile inputs `75c93c7d9032`), `dmsh_vk.lib` 167.4 MB (841.2 MB of SPIR-V), SHA-256 `f46430749fcf0bfe704347b26da050f468a4fe267a4cdf6063f04bc68e256685`, in the work folder's `android-shaders/lib/` (394 MB with its result files) and in `android-pack/shaders/` (the pack: 240.3 MiB).
+
+- **11,561 of 11,561 translate**, none fails or is refused: compute 727 / 727, mesh 18 / 18, pixel 7,261 / 7,261, task 7 / 7, vertex 3,548 / 3,548.
+- 12,141 modules (base 11,561, `uint` 558, `uint_mixed` 22), every one valid for `spirv-val --target-env vulkan1.3` at build time and after `--check` (10 s).
+- Flags: `alpha_test` 7,173, `gl_depth` 3,566, `int_out` 448, `subgroup` 329, `hmma` 30, `mesh_prim` 18. Bindings: 168 `shared_spill` (the 48 KiB compute programs), 2 `gmem_map`, no undecoded slot, no unknown kind; no 64-bit float left; `SPV_EXT_mesh_shader` in 32 modules.
+- An APK built before these tables carries the 1.8.0 profile's shader count and inputs digest (`BuildConfig.NX_PROFILES`), so it refuses this library: the APK must be rebuilt from this tree. Not yet run on the phone (open).
+
 ## Android shader library (1.8.0)
 
-Current (2026-11-03, branch `android-mkw-mesh`): library version `v-3022b8cb0290` (chain `9739857652c4`, profile inputs `a2e9850bf2ce`), `dmsh_vk.lib` 167.5 MB, SHA-256 `2ee70b596edec6bb66eb7346d0e2cab0ea215944dc48610dfd9835b2f3f347c5`, in the work folder's `xlate-mesh/lib`. `--check`: 12,193 modules, every one valid.
+Previous build, no longer registered (2026-11-03, branch `android-mkw-mesh`): library version `v-3022b8cb0290` (chain `9739857652c4`, profile inputs `a2e9850bf2ce`), `dmsh_vk.lib` 167.5 MB, SHA-256 `2ee70b596edec6bb66eb7346d0e2cab0ea215944dc48610dfd9835b2f3f347c5`, in the work folder's `xlate-mesh/lib`. `--check`: 12,193 modules, every one valid.
 
 - 11,604 shaders, 11,603 translate. By stage: compute 729 of 730, mesh 19 of 19, pixel 7,301 of 7,301, task 7 of 7, vertex 3,547 of 3,547.
 - The one left is compute `078997bf631992c5` (below).
