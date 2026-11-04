@@ -25,7 +25,7 @@
 enum { OpName = 5, OpMemberName = 6, OpExtension = 10, OpMemoryModel = 14, OpEntryPoint = 15, OpExecutionMode = 16, OpCapability = 17, OpTypeVoid = 19, OpTypeBool = 20,
        OpTypeInt = 21, OpTypeFloat = 22, OpTypeVector = 23, OpTypeArray = 28, OpTypeRuntimeArray = 29, OpTypeStruct = 30, OpTypePointer = 32, OpTypeFunction = 33,
        OpConstant = 43, OpConstantComposite = 44, OpFunction = 54, OpFunctionEnd = 56, OpFunctionCall = 57, OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
-       OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72, OpCompositeConstruct = 80, OpCompositeExtract = 81, OpBitcast = 124, OpIAdd = 128, OpISub = 130,
+       OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72, OpCompositeConstruct = 80, OpCompositeExtract = 81, OpCopyObject = 83, OpBitcast = 124, OpIAdd = 128, OpISub = 130,
        OpIMul = 132, OpUDiv = 134, OpULessThan = 176, OpSelect = 169, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpReturn = 253,
        OpControlBarrier = 224, OpMemoryBarrier = 225, OpDecorateId = 332, OpDecorateString = 5632, OpMemberDecorateString = 5633,
        OpEmitMeshTasksEXT = 5294, OpSetMeshOutputsEXT = 5295 };
@@ -69,7 +69,7 @@ static int lit_operand(uint32_t op, uint32_t k) {   // operand word k of op is a
     }
 }
 typedef struct {   // the module as read: types, constants and the variables the rewrite moves
-    uint32_t bound, *op_of, *a1, *a2, *a3, *cval; uint8_t *is_const;   // per id: the defining opcode and its first operands (types), constant values
+    uint32_t bound, *op_of, *a1, *a2, *a3, *cval, *rtype; uint8_t *is_const;   // rtype: the result type of an id defined in a function   // per id: the defining opcode and its first operands (types), constant values
     uint32_t t_void, t_bool, t_u32, t_f32, t_v3u, t_v4f, t_fn;
     uint32_t model, main_fn, wg_var, nwg_var;
     uint32_t outs[24], nouts; uint32_t pay_var;
@@ -94,20 +94,121 @@ static uint32_t cst_get(ctab_t *ct, vec_t *decl, uint32_t *nb, uint32_t v) {
     return id;
 }
 
+// Opcodes in a function body that have no result type (their second word is not one)
+static int has_result_type(uint32_t op) {
+    switch (op) {
+    case 8: case 317: case OpStore: case 63: case 64: case OpControlBarrier: case OpMemoryBarrier: case 246: case OpSelectionMerge: case OpLabel: case OpBranch:
+    case OpBranchConditional: case 251: case 252: case OpReturn: case 254: case 255: case 99: case 228: case 4416: case OpEmitMeshTasksEXT: case OpSetMeshOutputsEXT:
+    case OpFunctionEnd: case 218: case 219: case 220: case 221: return 0;
+    default: return 1;
+    }
+}
+// id as a 32-bit unsigned value (a constant made unsigned, a signed value bit-cast); 0 when its type is not a 32-bit integer
+static uint32_t as_u32(const rd_t *R, ctab_t *ct, vec_t *decl, vec_t *fn, uint32_t *nb, uint32_t id) {
+    if (id >= R->bound) return 0;
+    uint32_t t = R->rtype[id];
+    if (t == R->t_u32) return id;
+    if (R->is_const[id] && R->op_of[t] == OpTypeInt && R->a1[t] == 32) return cst_get(ct, decl, nb, R->cval[id]);
+    if (R->op_of[t] == OpTypeInt && R->a1[t] == 32) { uint32_t r = (*nb)++; ins(fn, OpBitcast, 3, R->t_u32, r, id); return r; }
+    return 0;
+}
+
+// The translator's mesh_plane_store(word, bits) (SpirvMeshEntry.cs MeshPlaneStore): a plane word lands in an output through a chain of guarded stores, one per plane
+// (27 in mesh shader 8a8b3d10db9e0f10, called 167 times: inlined, some 4,500 guarded stores, which Turnip took over 5 GB to compile). In the compute twin, whose
+// outputs are flat words, the plane picks a word offset (a select chain over the planes the translated function names) and one store writes the bits. Read from the
+// function: the primitive base word (its first unsigned compare), then per section (vertices, primitives) the chunk (OpUMod), the count (the first compare after
+// it), and each plane's output word (the chain in the block its IEqual guards); position z / w also go to the workgroup array the GL depth fix reads. 0 = not that shape
+static int plane_store(const rd_t *R, const uint32_t *w, size_t at, size_t end, const uint32_t *memb, const vka_mesh_info *mi, ctab_t *ct, vec_t *decl, vec_t *fn, uint32_t *nb,
+                       uint32_t v_out, uint32_t v_slot, uint32_t p_sb_u, uint32_t c0, char *why, size_t whyn) {
+    #define NO(...) do { snprintf(why, whyn, __VA_ARGS__); return 0; } while (0)
+    enum { NP = 64 };
+    struct { uint32_t chunk, count, off[NP], zw[NP]; } sec[2]; memset(sec, 0xff, sizeof sec);
+    int ns = -1; uint32_t prim_base = ~0u, params[2] = {0}, np = 0, cur = ~0u, zw_var = 0, p_wg_u = 0;
+    uint32_t *eqv = calloc(R->bound, 4), *guard = calloc(R->bound, 4);
+    if (!eqv || !guard) { free(eqv); free(guard); NO("out of memory"); }
+    for (uint32_t k = 0; k < R->bound; k++) eqv[k] = guard[k] = ~0u;
+    int bad = 0;
+    for (size_t i = at; i < end && !bad; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
+        if (op == 55 && np < 2) params[np++] = in[2];   // OpFunctionParameter
+        else if (op == OpULessThan && len == 5 && R->is_const[in[4]]) { if (ns < 0 && prim_base == ~0u) prim_base = R->cval[in[4]]; else if (ns >= 0 && sec[ns].count == ~0u) sec[ns].count = R->cval[in[4]]; }
+        else if (op == 137 && len == 5 && R->is_const[in[4]]) { if (++ns > 1) bad = 1; else sec[ns].chunk = R->cval[in[4]]; }   // OpUMod
+        else if (op == 170 && len == 5 && R->is_const[in[4]] && in[2] < R->bound) eqv[in[2]] = R->cval[in[4]];               // OpIEqual
+        else if (op == OpBranchConditional && len >= 4 && in[1] < R->bound && eqv[in[1]] != ~0u && in[2] < R->bound) guard[in[2]] = eqv[in[1]];
+        else if (op == OpLabel) cur = in[1] < R->bound ? guard[in[1]] : ~0u;
+        else if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 5 && in[3] < R->bound && memb[in[3]] && cur != ~0u) {
+            if (ns < 0 || cur >= NP) { bad = 1; break; }
+            uint32_t mb = memb[in[3]], comp = in[len - 1];
+            if (!R->is_const[comp] || len != ((mb >> 31) ? 7u : 6u)) { bad = 1; break; }
+            sec[ns].off[cur] = (mb & 0x7fffffffu) + R->cval[comp];
+        }
+        else if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len == 5 && cur != ~0u && ns == 0 && cur < NP && in[3] < R->bound && R->a3[in[3]] == 0) {
+            // a workgroup word array (the GL depth fix's z / w): its pointer type is kept
+            zw_var = in[3]; p_wg_u = in[1];
+            if (sec[0].off[cur] == ~0u || (mi->pos_off / 4 > sec[0].off[cur]) || sec[0].off[cur] - mi->pos_off / 4 < 2 || sec[0].off[cur] - mi->pos_off / 4 > 3) { bad = 1; break; }
+            sec[0].zw[cur] = sec[0].off[cur] - mi->pos_off / 4 - 2;
+        }
+    }
+    free(eqv); free(guard);
+    if (bad) NO("an unexpected instruction");
+    if (np != 2 || prim_base == ~0u || ns < 0) NO("no parameters, primitive base or section");
+    for (int k = 0; k <= ns; k++) if (sec[k].chunk == ~0u || !sec[k].chunk || sec[k].count == ~0u || sec[k].chunk / 32 > NP) NO("section %d without chunk or count", k);
+    // The new function: the original header and parameters, then the computed store
+    const uint32_t *h = w + at; put_n(fn, h, h[0] >> 16);
+    for (size_t i = at + (h[0] >> 16), k = 0; k < 2; k++) { put_n(fn, w + i, w[i] >> 16); i += w[i] >> 16; }
+    uint32_t U = R->t_u32, B = R->t_bool, wd = params[0], val = params[1], none = cst_get(ct, decl, nb, ~0u);
+    #define C(v) cst_get(ct, decl, nb, (v))
+    #define I3(o, a, b) ({ uint32_t r_ = (*nb)++; ins(fn, (o), 4, U, r_, (a), (b)); r_; })
+    #define CMP(o, a, b) ({ uint32_t r_ = (*nb)++; ins(fn, (o), 4, B, r_, (a), (b)); r_; })
+    #define SEL(t, c, a, b) ({ uint32_t r_ = (*nb)++; ins(fn, OpSelect, 5, (t), r_, (c), (a), (b)); r_; })
+    ins(fn, OpLabel, 1, (*nb)++);
+    uint32_t isv = CMP(OpULessThan, wd, C(prim_base)), wp = I3(OpISub, wd, C(prim_base)), wv = SEL(U, isv, wd, wp);
+    uint32_t chunk = SEL(U, isv, C(sec[0].chunk), C(ns > 0 ? sec[1].chunk : 32)), cnt = SEL(U, isv, C(sec[0].count), C(ns > 0 ? sec[1].count : 0));
+    uint32_t rem = I3(137, wv, chunk), plane = I3(194, rem, C(5)), q = I3(OpUDiv, wv, chunk), q32 = I3(OpIMul, q, C(32)), lo = I3(199, rem, C(31)), idx = I3(OpIAdd, q32, lo);   // UMod, ShiftRightLogical, BitwiseAnd
+    uint32_t off = none, notv = (*nb)++; ins(fn, 168, 3, B, notv, isv);   // LogicalNot
+    for (int k = 0; k <= ns; k++) for (uint32_t n = 0; n < NP; n++) if (sec[k].off[n] != ~0u)   // LogicalAnd of the section and the plane
+        off = SEL(U, CMP(167, k == 0 ? isv : notv, CMP(170, plane, C(n))), C(sec[k].off[n]), off);
+    uint32_t inr = CMP(OpULessThan, idx, cnt), has = CMP(171, off, none), ok = CMP(167, inr, has);   // INotEqual
+    uint32_t Ls = (*nb)++, Le = (*nb)++;
+    ins(fn, OpSelectionMerge, 2, Le, 0); ins(fn, OpBranchConditional, 3, ok, Ls, Le);
+    ins(fn, OpLabel, 1, Ls);
+    { uint32_t sl = (*nb)++, p = (*nb)++; ins(fn, OpLoad, 3, U, sl, v_slot);
+      uint32_t word = I3(OpIAdd, I3(OpIAdd, I3(OpIMul, sl, C(mi->rec_bytes / 4)), off), I3(OpIMul, idx, C(4)));
+      ins(fn, OpAccessChain, 5, p_sb_u, p, v_out, c0, word); ins(fn, OpStore, 2, p, val); }
+    ins(fn, OpBranch, 1, Le); ins(fn, OpLabel, 1, Le);
+    if (zw_var) {   // position z / w of a vertex: also into the workgroup words the GL depth fix reads (zw[2 vertex + 0 / 1])
+        uint32_t zsel = none;
+        for (uint32_t n = 0; n < NP; n++) if (sec[0].zw[n] != ~0u) zsel = SEL(U, CMP(170, plane, C(n)), C(sec[0].zw[n]), zsel);
+        uint32_t zok = CMP(167, CMP(167, isv, inr), CMP(171, zsel, none)), Lz = (*nb)++, Lz2 = (*nb)++, p = (*nb)++;
+        ins(fn, OpSelectionMerge, 2, Lz2, 0); ins(fn, OpBranchConditional, 3, zok, Lz, Lz2);
+        ins(fn, OpLabel, 1, Lz);
+        uint32_t zi = I3(OpIAdd, I3(OpIMul, idx, C(2)), zsel);
+        ins(fn, OpAccessChain, 4, p_wg_u, p, zw_var, zi); ins(fn, OpStore, 2, p, val);
+        ins(fn, OpBranch, 1, Lz2); ins(fn, OpLabel, 1, Lz2);
+    }
+    ins(fn, OpReturn, 0); ins(fn, OpFunctionEnd, 0);
+    #undef C
+    #undef I3
+    #undef CMP
+    #undef SEL
+    return 1;
+    #undef NO
+}
+
 uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_binding, uint32_t pay_binding, vka_mesh_info *mi, size_t *out_nw, char *err, size_t errn) {
 #define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
     rd_t R; memset(&R, 0, sizeof R); memset(mi, 0, sizeof *mi);
     vec_t head = {0}, ann = {0}, decl = {0}, fn = {0}, o = {0};
-    uint8_t *gone = NULL; uint32_t *memb = NULL, *ptee = NULL;   // gone[id]: a moved variable (1 output, 2 payload, 3 the mesh's WorkgroupId), memb[var]: its member in the record
+    uint8_t *gone = NULL, *chn = NULL, *chf = NULL; uint32_t *memb = NULL, *ptee = NULL, *chw = NULL, *chv = NULL;   // gone[id]: a moved variable (1 output, 2 payload, 3 the mesh's WorkgroupId), memb[var]: its member in the record
     ptab_t *pt = calloc(1, sizeof *pt); ctab_t ct; memset(&ct, 0, sizeof ct);
     if (!pt) { snprintf(err, errn, "out of memory"); return NULL; }
     if (nw < 5 || w[0] != 0x07230203) FAIL("not SPIR-V");
     R.bound = w[3];
     R.op_of = calloc(R.bound, 4); R.a1 = calloc(R.bound, 4); R.a2 = calloc(R.bound, 4); R.a3 = calloc(R.bound, 4); R.cval = calloc(R.bound, 4); R.is_const = calloc(R.bound, 1);
-    gone = calloc(R.bound, 1); memb = calloc(R.bound, 4); ptee = calloc(R.bound, 4);
-    if (!R.op_of || !R.a1 || !R.a2 || !R.a3 || !R.cval || !R.is_const || !gone || !memb || !ptee) FAIL("out of memory");
+    gone = calloc(R.bound, 1); memb = calloc(R.bound, 4); ptee = calloc(R.bound, 4); chw = calloc(R.bound, 4); chn = calloc(R.bound, 1); chf = calloc(R.bound, 1); chv = calloc(R.bound, 4); R.rtype = calloc(R.bound, 4);
+    if (!R.op_of || !R.a1 || !R.a2 || !R.a3 || !R.cval || !R.is_const || !gone || !memb || !ptee || !chw || !chn || !chf || !chv || !R.rtype) FAIL("out of memory");
     size_t first_fn = nw, first_type = nw;
-    uint32_t local[3] = {1, 1, 1}, maxv = 0, maxp = 0;
+    uint32_t local[3] = {1, 1, 1}, maxv = 0, maxp = 0, plane_fn = 0;
     // Pass 1: what the module declares
     for (size_t i = 5; i < nw;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
@@ -127,6 +228,7 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
         else if (op == OpTypePointer) { if (pt->n < 256) pt->p[pt->n++] = (ptr_t){in[2], in[3], in[1]}; ptee[in[1]] = in[3]; }
         else if (op == OpConstant && len == 4 && in[2] < R.bound) { R.is_const[in[2]] = 1; R.cval[in[2]] = in[3]; if (in[1] == R.t_u32 && ct.n < 64) ct.c[ct.n++] = (cst_t){in[3], in[2]}; }
         else if (op == OpEntryPoint) { if (R.model) FAIL("more than one entry point"); R.model = in[1]; R.main_fn = in[2]; }
+        else if (op == OpName && len >= 3 && str_eq(in + 2, len - 2, "mesh_plane_store")) plane_fn = in[1];
         else if (op == OpExecutionMode && len >= 3) {
             if (in[2] == ModeLocalSize && len >= 6) { local[0] = in[3]; local[1] = in[4]; local[2] = in[5]; }
             else if (in[2] == ModeOutputVertices && len >= 4) maxv = in[3];
@@ -141,6 +243,8 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
             if (in[3] == SCInput || in[3] == SCOutput || in[3] == SCTaskPayload) R.a3[in[2]] = in[1];   // (variables: their pointer type)
         }
         else if (op == OpFunction && first_fn == nw) first_fn = i;
+        if (first_fn != nw && len >= 3 && has_result_type(op) && in[2] < R.bound) R.rtype[in[2]] = in[1];
+        if (op == OpConstant && len == 4 && in[2] < R.bound) R.rtype[in[2]] = in[1];
         i += len;
     }
     if (R.model != EMMesh && R.model != EMTask) FAIL("not a task or mesh entry point (execution model %u)", R.model);
@@ -162,42 +266,36 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
         }
         i += len;
     }
-    uint32_t rec_types[25], off = 16, new_arr[24], new_struct_pos = 0;
-    // New types (in decl; their decorations in ann): the record of the outputs, the payload record
+    // The output record as 32-bit words (flat: Turnip's nir_opt_copy_prop_vars crashed on mesh shader 8a8b3d10db9e0f10 rewritten as nested arrays of vectors, with
+    // whole-vector and component stores into the same elements): nprim, then each output array at 16-byte stride. memb[var]: its first word; pos[var]: the position block
+    uint32_t off = 16; uint8_t is_pos[24] = {0};
     uint32_t c0 = 0, t_out_blk = 0, v_out = 0, t_pay_blk = 0, v_pay = 0, v_wg = 0, v_nwg = 0, v_slot = 0, v_task = 0;
     for (uint32_t k = 0; k < R.nouts; k++) {
         uint32_t pty = R.a3[R.outs[k]], arr = ptee[pty];
         if (!arr || R.op_of[arr] != OpTypeArray) FAIL("output %u is not an array", R.outs[k]);
         uint32_t el = R.a1[arr], lenc = R.a2[arr], n = R.is_const[lenc] ? R.cval[lenc] : 0;
         if (!n) FAIL("output %u: an array without a constant length", R.outs[k]);
-        uint32_t nel = el;
         if (R.op_of[el] == OpTypeStruct) {   // the gl_MeshPerVertexEXT block: Position only
             if (R.a1[el] != R.t_v4f || R.a2[el]) FAIL("output %u: a per-vertex block other than { vec4 Position }", R.outs[k]);
-            if (!new_struct_pos) { new_struct_pos = nb++; ins(&decl, OpTypeStruct, 2, new_struct_pos, R.t_v4f); ins(&ann, OpMemberDecorate, 4, new_struct_pos, 0, DecOffset, 0); }
-            nel = new_struct_pos; mi->pos_off = off; bi_of[k] = BIPosition;
+            mi->pos_off = off; is_pos[k] = 1;
         } else if (el == R.t_v3u && bi_of[k] == BIPrimIndices) { mi->idx_off = off; if (n != maxp) FAIL("primitive indices for %u primitives, %u declared", n, maxp); }
         else if (el == R.t_v4f && loc_of[k] != ~0u) {
             if (mi->nloc == 16) FAIL("too many output locations");
             mi->locs[mi->nloc].loc = (uint8_t)loc_of[k]; mi->locs[mi->nloc].prim = (uint8_t)prim_of[k]; mi->locs[mi->nloc].off = off; mi->nloc++;
             if (n != (prim_of[k] ? maxp : maxv)) FAIL("output location %u holds %u, %u declared", loc_of[k], n, prim_of[k] ? maxp : maxv);
         } else FAIL("output %u: not a vec4 location, the primitive indices or the position", R.outs[k]);
-        new_arr[k] = nb++; ins(&decl, OpTypeArray, 3, new_arr[k], nel, lenc); ins(&ann, OpDecorate, 3, new_arr[k], DecArrayStride, 16);
-        rec_types[k + 1] = new_arr[k]; memb[R.outs[k]] = k + 1;
-        ins(&ann, OpMemberDecorate, 4, 0, k + 1, DecOffset, off);   // (the record's id is filled below)
+        memb[R.outs[k]] = off / 4 | (is_pos[k] ? 0x80000000u : 0);
         off += 16 * n;
     }
     if (mesh && (!mi->pos_off || !mi->idx_off)) FAIL("a mesh entry point without position or primitive indices");
     if (mesh) {
         mi->rec_bytes = off;
-        uint32_t rec = nb++, rta = nb++; t_out_blk = nb++; v_out = nb++;
-        for (size_t i = 0; i < ann.n;) { uint32_t len = ann.w[i] >> 16; if ((ann.w[i] & 0xffff) == OpMemberDecorate && ann.w[i + 1] == 0) ann.w[i + 1] = rec; i += len; }
-        put(&decl, (uint32_t)(R.nouts + 3) << 16 | OpTypeStruct); put(&decl, rec); put(&decl, R.t_u32); for (uint32_t k = 0; k < R.nouts; k++) put(&decl, new_arr[k]);
-        ins(&decl, OpTypeRuntimeArray, 2, rta, rec); ins(&decl, OpTypeStruct, 2, t_out_blk, rta);
-        ins(&ann, OpMemberDecorate, 4, rec, 0, DecOffset, 0); ins(&ann, OpDecorate, 3, rta, DecArrayStride, off);
+        uint32_t rta = nb++; t_out_blk = nb++; v_out = nb++;
+        ins(&decl, OpTypeRuntimeArray, 2, rta, R.t_u32); ins(&decl, OpTypeStruct, 2, t_out_blk, rta);
+        ins(&ann, OpDecorate, 3, rta, DecArrayStride, 4);
         ins(&ann, OpDecorate, 2, t_out_blk, DecBlock); ins(&ann, OpMemberDecorate, 4, t_out_blk, 0, DecOffset, 0);
         ins(&ann, OpDecorate, 3, v_out, DecDescriptorSet, 0); ins(&ann, OpDecorate, 3, v_out, DecBinding, out_binding);
     }
-    (void)rec_types;
     if (R.pay_var) {
         uint32_t arr = ptee[R.a3[R.pay_var]];
         if (!arr || R.op_of[arr] != OpTypeArray || R.a1[arr] != R.t_u32 || !R.is_const[R.a2[arr]]) FAIL("a payload that is not a uint array");
@@ -230,6 +328,12 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
             uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
             if (op == OpFunction) cur_fn = in[2];
             (void)cur_fn;
+            if (op == OpFunction && mesh && in[2] == plane_fn && plane_fn) {   // the translator's plane store: one computed store (plane_store)
+                size_t end = i; while (end < nw && (w[end] & 0xffff) != OpFunctionEnd) end += w[end] >> 16;
+                char why[160] = "";
+                if (end < nw && plane_store(&R, w, i, end, memb, mi, &ct, &decl, &fn, &nb, v_out, v_slot, p_sb_u, c0, why, sizeof why)) { i = end + (w[end] >> 16); continue; }
+                snprintf(mi->note, sizeof mi->note, "plane store kept as translated: %s", why);
+            }
             if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 4 && in[3] < R.bound && gone[in[3]]) {
                 uint32_t g = gone[in[3]], rt = in[1], pe = rt < R.bound ? ptee[rt] : 0;
                 if (!pe || (R.op_of[pe] != OpTypeVector && R.op_of[pe] != OpTypeInt && R.op_of[pe] != OpTypeFloat)) FAIL("an access chain to an aggregate of a moved variable (id %u)", in[3]);
@@ -238,6 +342,23 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
                     i += len; continue;
                 }
                 uint32_t s = nb++;
+                if (g == 1) {   // an output: the word index of its first component, kept for the loads and stores through it (chw / chn / chf)
+                    uint32_t mb = memb[in[3]], ispos = mb >> 31, nidx = len - 4, comp = 0;
+                    if (nidx < 1 || nidx > (ispos ? 3u : 2u) || (ispos && nidx >= 2 && !(R.is_const[in[5]] && R.cval[in[5]] == 0))) FAIL("an access chain of %u indexes into output %u", nidx, in[3]);
+                    if (nidx == (ispos ? 3u : 2u)) comp = in[len - 1];
+                    uint32_t t1 = nb++, t2 = nb++, t3 = nb++, word = nb++;
+                    ins(&fn, OpLoad, 3, R.t_u32, s, v_slot);
+                    ins(&fn, OpIMul, 4, R.t_u32, t1, s, cst_get(&ct, &decl, &nb, mi->rec_bytes / 4)); ins(&fn, OpIAdd, 4, R.t_u32, t2, t1, cst_get(&ct, &decl, &nb, mb & 0x7fffffffu));
+                    uint32_t iu = as_u32(&R, &ct, &decl, &fn, &nb, in[4]); if (!iu) FAIL("an output index of an unknown type (id %u)", in[4]);
+                    ins(&fn, OpIMul, 4, R.t_u32, t3, iu, cst_get(&ct, &decl, &nb, 4));
+                    if (comp) { uint32_t t4 = nb++, cu = as_u32(&R, &ct, &decl, &fn, &nb, comp); if (!cu) FAIL("an output component of an unknown type (id %u)", comp);
+                                ins(&fn, OpIAdd, 4, R.t_u32, t4, t2, t3); ins(&fn, OpIAdd, 4, R.t_u32, word, t4, cu); }
+                    else ins(&fn, OpIAdd, 4, R.t_u32, word, t2, t3);
+                    uint32_t r = in[2];
+                    chw[r] = word; chn[r] = R.op_of[pe] == OpTypeVector ? R.a2[pe] : 1; chf[r] = (R.op_of[pe] == OpTypeVector ? R.a1[pe] : pe) == R.t_f32 ? 1 : 0; chv[r] = pe;
+                    if (chn[r] > 4) FAIL("an output vector of %u components", chn[r]);
+                    i += len; continue;
+                }
                 if (mesh) ins(&fn, OpLoad, 3, R.t_u32, s, g == 1 ? v_slot : v_task);
                 else { uint32_t a = nb++; ins(&fn, OpLoad, 3, R.t_v3u, a, v_wg); ins(&fn, OpCompositeExtract, 4, R.t_u32, s, a, 0); }
                 put(&fn, (len + 3) << 16 | op); put(&fn, ptr_get(pt, &decl, &nb, SCStorageBuffer, pe)); put(&fn, in[2]); put(&fn, g == 1 ? v_out : v_pay);
@@ -245,8 +366,32 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
                 i += len; continue;
             }
             if (op == OpSetMeshOutputsEXT && len == 3) {
-                uint32_t s = nb++, p = nb++;
-                ins(&fn, OpLoad, 3, R.t_u32, s, v_slot); ins(&fn, OpAccessChain, 6, p_sb_u, p, v_out, c0, s, c0); ins(&fn, OpStore, 2, p, in[2]);
+                uint32_t s = nb++, t = nb++, p = nb++;
+                ins(&fn, OpLoad, 3, R.t_u32, s, v_slot); ins(&fn, OpIMul, 4, R.t_u32, t, s, cst_get(&ct, &decl, &nb, mi->rec_bytes / 4));
+                ins(&fn, OpAccessChain, 5, p_sb_u, p, v_out, c0, t); ins(&fn, OpStore, 2, p, in[2]);
+                i += len; continue;
+            }
+            if (op == OpStore && len >= 3 && in[1] < R.bound && chw[in[1]]) {   // a store through an output chain: one word per component
+                uint32_t pr = in[1], n = chn[pr], st = chf[pr] ? R.t_f32 : R.t_u32;
+                for (uint32_t c = 0; c < n; c++) {
+                    uint32_t v = in[2], wd = chw[pr], p = nb++;
+                    if (n > 1) { uint32_t e = nb++, w2 = nb++; ins(&fn, OpCompositeExtract, 4, st, e, in[2], c); v = e; ins(&fn, OpIAdd, 4, R.t_u32, w2, wd, cst_get(&ct, &decl, &nb, c)); wd = w2; }
+                    if (chf[pr]) { uint32_t b2 = nb++; ins(&fn, OpBitcast, 3, R.t_u32, b2, v); v = b2; }
+                    ins(&fn, OpAccessChain, 5, p_sb_u, p, v_out, c0, wd); ins(&fn, OpStore, 2, p, v);
+                }
+                i += len; continue;
+            }
+            if (op == OpLoad && len >= 4 && in[3] < R.bound && chw[in[3]]) {   // a load through one: its words
+                uint32_t pr = in[3], n = chn[pr], parts[4];
+                for (uint32_t c = 0; c < n; c++) {
+                    uint32_t wd = chw[pr], p = nb++, v = nb++;
+                    if (n > 1) { uint32_t w2 = nb++; ins(&fn, OpIAdd, 4, R.t_u32, w2, wd, cst_get(&ct, &decl, &nb, c)); wd = w2; }
+                    ins(&fn, OpAccessChain, 5, p_sb_u, p, v_out, c0, wd); ins(&fn, OpLoad, 3, R.t_u32, v, p);
+                    if (chf[pr]) { uint32_t f = nb++; ins(&fn, OpBitcast, 3, R.t_f32, f, v); v = f; }
+                    parts[c] = v;
+                }
+                if (n == 1) { ins(&fn, OpCopyObject, 3, in[1], in[2], parts[0]); }
+                else { put(&fn, (3 + n) << 16 | OpCompositeConstruct); put(&fn, in[1]); put(&fn, in[2]); put_n(&fn, parts, n); }
                 i += len; continue;
             }
             if (op == OpEmitMeshTasksEXT && len >= 4) {
@@ -262,6 +407,7 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
                 put_n(&fn, in, len); fn.w[fn.n - len + si] = cst_get(&ct, &decl, &nb, R.cval[in[si]] | MemUniform);
                 i += len; continue;
             }
+            for (uint32_t k = 1; k < len; k++) if (in[k] < R.bound && chw[in[k]] && !lit_operand(op, k)) FAIL("opcode %u uses an output access chain (id %u) other than to load or store", op, in[k]);
             for (uint32_t k = 1; k < len; k++) if (in[k] < R.bound && gone[in[k]] && gone[in[k]] != 3 && !lit_operand(op, k)) FAIL("opcode %u uses a moved variable (id %u) other than through an access chain", op, in[k]);
             if (op == OpLoad && len >= 4 && gone[in[3]] == 3) { put_n(&fn, in, len); i += len; continue; }
             put_n(&fn, in, len);
@@ -284,7 +430,8 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
             ins(&fn, OpAccessChain, 6, p_sb_u, pc, v_pay, c0, y, c0); ins(&fn, OpLoad, 3, R.t_u32, cnt, pc); ins(&fn, OpULessThan, 4, R.t_bool, ok, x, cnt);
             ins(&fn, OpSelectionMerge, 2, Lend, 0); ins(&fn, OpBranchConditional, 3, ok, Lrun, Lskip);
             ins(&fn, OpLabel, 1, Lrun); ins(&fn, OpFunctionCall, 3, R.t_void, call, R.main_fn); ins(&fn, OpBranch, 1, Lend);
-            ins(&fn, OpLabel, 1, Lskip); ins(&fn, OpAccessChain, 6, p_sb_u, pz, v_out, c0, s, c0); ins(&fn, OpStore, 2, pz, c0); ins(&fn, OpBranch, 1, Lend);
+            uint32_t sw = nb++; ins(&fn, OpLabel, 1, Lskip); ins(&fn, OpIMul, 4, R.t_u32, sw, s, cst_get(&ct, &decl, &nb, mi->rec_bytes / 4));
+            ins(&fn, OpAccessChain, 5, p_sb_u, pz, v_out, c0, sw); ins(&fn, OpStore, 2, pz, c0); ins(&fn, OpBranch, 1, Lend);
             ins(&fn, OpLabel, 1, Lend); ins(&fn, OpReturn, 0);
         } else { ins(&fn, OpFunctionCall, 3, R.t_void, call, R.main_fn); ins(&fn, OpReturn, 0); }
         ins(&fn, OpFunctionEnd, 0);
@@ -325,11 +472,11 @@ uint32_t *vka_spv_mesh_compute(const uint32_t *w, size_t nw, uint32_t out_bindin
     if (head.oom || ann.oom || decl.oom || fn.oom || o.oom) FAIL("out of memory");
     o.w[3] = nb;
     free(head.w); free(ann.w); free(decl.w); free(fn.w);
-    free(R.op_of); free(R.a1); free(R.a2); free(R.a3); free(R.cval); free(R.is_const); free(gone); free(memb); free(ptee); free(pt);
+    free(R.op_of); free(R.a1); free(R.a2); free(R.a3); free(R.cval); free(R.is_const); free(R.rtype); free(gone); free(memb); free(ptee); free(chw); free(chn); free(chf); free(chv); free(pt);
     *out_nw = o.n; return o.w;
 fail:
     free(head.w); free(ann.w); free(decl.w); free(fn.w); free(o.w);
-    free(R.op_of); free(R.a1); free(R.a2); free(R.a3); free(R.cval); free(R.is_const); free(gone); free(memb); free(ptee); free(pt);
+    free(R.op_of); free(R.a1); free(R.a2); free(R.a3); free(R.cval); free(R.is_const); free(R.rtype); free(gone); free(memb); free(ptee); free(chw); free(chn); free(chf); free(chv); free(pt);
     return NULL;
 #undef FAIL
 }

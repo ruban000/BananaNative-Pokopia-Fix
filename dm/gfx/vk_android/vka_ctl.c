@@ -57,7 +57,7 @@ double vka_env_slow(vka_envc *c, const char *key, double def) {
 }
 
 // Switches read once (at start, or when a device object is made): a live change is logged as taking effect at the next start
-static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_SUBGROUP_GS", "DM_VK_ADPF", "DM_VK_NANSCAN",
+static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_MESH_CS", "DM_VK_SUBGROUP_GS", "DM_VK_ADPF", "DM_VK_NANSCAN",
                                         "DM_VK_NANSCAN_STEP", "DM_VK_NANSCAN_DRAWS", "DM_VK_NANSCAN_SERIAL", "DM_VK_NANSCAN_FS", "DM_VK_WORKER",
                                         "DM_VK_WORKER_FRAMES", "DM_VK_TEST_HANG", "DM_LSFG_DLL", "DM_FPS", "NXHOST_VK_SELFTEST", "DM_CTL", "DM_VK_PREWARM", "DM_VK_PREWARM_MAX", "DM_VK_PREWARM_FILE", "DM_VK_LC_GLOBAL", NULL};
 // Switches the replay reads again after a change (VKA_ENV, or at use); a table, so the log line can say which kind a key is
@@ -108,14 +108,15 @@ void vka_ctl_sub(void) {   // mtl_sub_begin: the submit lock is held, no submiss
 // ---------- Frame statistics: capture and stats ----------
 extern uint64_t vka_n_rp, vka_n_bar;   // vka_draw.c, vka_tex.c
 void vka_exec_counts(uint64_t *ops, uint64_t *subs, uint64_t *rec_ns);   // vka_exec.c
+void vka_mesh_cs_stats(uint64_t *draws, uint64_t *records);   // vka_draw.c
 double mtl_gpu_ms(uint64_t f);
 enum { NREC = 128 };
-typedef struct { uint64_t frame, t, draws, skipped, disp, rp, bar, ops, subs, rec_ns; } frec;   // counters at the start of frame
+typedef struct { uint64_t frame, t, draws, skipped, disp, rp, bar, ops, subs, rec_ns, mcs; } frec;   // counters at the start of frame
 static frec g_rec[NREC];
 static _Atomic long g_capture; static uint64_t g_cap_from, g_cap_to; static _Atomic int g_stats;
 static void snap(frec *r, uint64_t f) {
     r->frame = f; r->t = now_ns(); uint64_t pipes; vka_draw_stats(&r->draws, &r->skipped, &r->disp, &pipes);
-    r->rp = vka_n_rp; r->bar = vka_n_bar; vka_exec_counts(&r->ops, &r->subs, &r->rec_ns);
+    r->rp = vka_n_rp; r->bar = vka_n_bar; vka_exec_counts(&r->ops, &r->subs, &r->rec_ns); vka_mesh_cs_stats(&r->mcs, NULL);
 }
 static void cap_line(uint64_t f) {   // frame f, once its GPU time is in (8 frames on)
     const frec *a = &g_rec[f % NREC], *b = &g_rec[(f + 1) % NREC];
@@ -135,9 +136,9 @@ static void stats_line(uint64_t f) {
     pthread_mutex_lock(&g_emu);
     for (int i = 0; i < g_novr && sn < sizeof sw; i++) sn += (size_t)snprintf(sw + sn, sizeof sw - sn, " %s=%s", g_ovr[i].key, g_ovr[i].set ? g_ovr[i].val : "(unset)");
     pthread_mutex_unlock(&g_emu);
-    VLOG("ctl: stats at frame %llu, last %d frames: %.1f fps (%.1f presented), %.2f ms a frame; per frame %.0f draws (%.0f skipped), %.0f dispatches, %.0f render passes, %.0f full barriers, "
+    VLOG("ctl: stats at frame %llu, last %d frames: %.1f fps (%.1f presented), %.2f ms a frame; per frame %.0f draws (%.0f skipped, %.0f mesh draws as compute), %.0f dispatches, %.0f render passes, %.0f full barriers, "
          "%.0f clears / copies, %.1f submissions, recording %.2f ms, GPU %.2f ms (%d frames); placed memory %.0f MB (peak %.0f); images %.0f MB (%d; GPU-written %.0f MB, from storage %.0f MB); switches set live:%s",
-         (unsigned long long)f, n, fps[0], fps[1], (b->t - a->t) / 1e6 / k, (b->draws - a->draws) / k, (b->skipped - a->skipped) / k, (b->disp - a->disp) / k, (b->rp - a->rp) / k,
+         (unsigned long long)f, n, fps[0], fps[1], (b->t - a->t) / 1e6 / k, (b->draws - a->draws) / k, (b->skipped - a->skipped) / k, (b->mcs - a->mcs) / k, (b->disp - a->disp) / k, (b->rp - a->rp) / k,
          (b->bar - a->bar) / k, (b->ops - a->ops) / k, (b->subs - a->subs) / k, (b->rec_ns - a->rec_ns) / 1e6 / k, ng ? gpu / ng : -1.0, ng, placed / 1e6, peak / 1e6, img / 1e6, img_n, img_gw / 1e6, (img - img_gw) / 1e6, sn ? sw : " none");
     { char ab[400]; vka_tex_alias_stats(ab, sizeof ab); VLOG("ctl: %s", ab); }
     { char im[400]; vka_imem_stats(im, sizeof im); VLOG("ctl: %s", im); }

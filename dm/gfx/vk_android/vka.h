@@ -291,6 +291,7 @@ VkSampler vka_samp_default(void);                   // the sampler an unbound sa
 // A shader is one library entry with its module made; it lives as long as the process
 #include "vka_shlib.h"
 #include "vka_bind.h"
+#include "vka_spvpatch.h"
 typedef struct vka_shader {
     uint64_t key; const dmsh_vk_entry *e; const dmsh_vk_bind *b;
     const vka_shlib *lib;               // the library the entry is in (its header's translator answers; its other modules)
@@ -301,7 +302,19 @@ typedef struct vka_shader {
     int bad;                            // refused: no module, an unknown binding, an NV-only capability (logged once with its key)
     int gs_fx;                          // a geometry shader's memory writes (vka_spv_gs_claim): above 0, its draws bind a claim buffer at VKA_GS_CLAIM_BINDING
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
+    // Mesh draws as compute (a device without VK_EXT_mesh_shader, vka_draw.c mesh_cs): a task / mesh shader's twin runs it as a compute shader (xform VKA_XF_TASK / _MESH,
+    // e = &ecopy with the compute stage, mi its layout, vs the vertex shader that draws a mesh twin's records); a pixel shader's twin has its per-primitive inputs flat
+    // (VKA_XF_UNPRIM). The twins share the library entry's bindings and c1; they stay out of the prewarm list
+    int xform; vka_mesh_info *mi; struct vka_shader *twin, *vs; dmsh_vk_entry ecopy;
 } vka_shader;
+enum { VKA_XF_MESH = 1, VKA_XF_TASK = 2, VKA_XF_UNPRIM = 3, VKA_XF_MESH_VS = 4 };
+// The records' storage buffers in set 0: in the mesh shader's binding range (its library bindings are the vertex stage's, a task shader's the tess control stage's), at its end
+#define VKA_MESH_OUT_BINDING (DMSH_VK_STAGE_VS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 2)
+#define VKA_MESH_PAY_BINDING (DMSH_VK_STAGE_VS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)
+#define VKA_TASK_PAY_BINDING (DMSH_VK_STAGE_TCS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)
+#define VKA_MESH_VS_BINDING 0
+vka_shader *vka_shader_mesh_twin(vka_shader *s);   // the twin of a task / mesh shader or of a pixel shader with per-primitive inputs (made once); NULL: not made (logged)
+int vka_mesh_cs_on(void);                           // mesh draws as compute: no VK_EXT_mesh_shader (or DM_VK_MESH=0) and DM_VK_MESH_CS not 0 (restart only)
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
 int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program

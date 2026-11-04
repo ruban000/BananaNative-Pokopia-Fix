@@ -716,6 +716,7 @@ static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
     if (g_dwn) { g_pd_delta_w += g_dwn; g_pd_delta_all += g_w.n; return 2; }
     return 0;
 }
+static struct { uint32_t n, binding[3]; VkDescriptorBufferInfo bi[3]; } g_xw;   // storage buffers bind_sets adds (mesh_cs), cleared by its caller
 static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, VkPipelineBindPoint bp, c0_at *c0) {
     g_w.n = 0;
     int any_pool = 0;
@@ -737,6 +738,11 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         uint32_t k = g_w.n++;
         g_w.bi[k] = (VkDescriptorBufferInfo){cs.buf, cs.off, n};
         g_w.w[k] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = VKA_GS_CLAIM_BINDING, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &g_w.bi[k]};
+    }
+    for (uint32_t x = 0; x < g_xw.n; x++) {   // a mesh draw's record buffers (mesh_cs)
+        if (g_w.n == 512) { VRED_ONCE("more than 512 descriptors in one draw"); return 0; }
+        uint32_t k = g_w.n++; g_w.bi[k] = g_xw.bi[x];
+        g_w.w[k] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = g_xw.binding[x], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &g_w.bi[k]};
     }
     uint64_t t2_ = g_prof ? cntvct() : 0;
     if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
@@ -908,6 +914,61 @@ void vka_draw_prof(char *b, size_t n, double draws) {
     memset(g_ps, 0, sizeof g_ps);
     memset(g_pt, 0, sizeof g_pt);
 }
+// ---------- Mesh draws as compute (no VK_EXT_mesh_shader: vka_mesh_cs_on) ----------
+// An NVN2 mesh draw on a device without mesh shading: the task shader's compute twin (vka_spvmesh.c) runs over the draw's workgroups and writes one payload record each (the
+// mesh workgroups it launches, its payload); the mesh shader's twin runs over (K, task workgroups), K the task's workgroup size, each mesh workgroup x < its task's count
+// writing one record of vertices and primitives (the others an empty one); without a task, over (count, 1). Then the pass reopens and the records are drawn as
+// non-indexed triangles by their vertex shader (3 * max_p vertices a record) with the program's pixel shader (its per-primitive inputs made flat). K bounds the mesh
+// workgroups a task workgroup may launch: Mario Kart World's 7 task programs launch the popcount of a 32-lane ballot, at most their 32 threads (more are dropped)
+static uint64_t g_mcs_draws, g_mcs_slots;
+static int mesh_cs_run(const vka_dstate *d, int st, vka_shader *tw, uint32_t x, uint32_t y) {   // one twin's dispatch (outside a pass), its records' buffers in g_xw
+    vka_shader *s2[VKA_NSTAGE] = {0}; s2[st] = tw;
+    vka_layout lay; if (!vka_layout_of(s2, 1, &lay)) return 0;
+    VkPipeline p = vka_cs_pipeline(tw, &lay); if (!p) return 0;
+    walk_all(d, s2);
+    if (make_images(d, s2, 1)) make_images(d, s2, 0);
+    if (!bind_sets(d, s2, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, NULL)) return 0;
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    vk.vkCmdDispatch(g_cb, x, y, 1);
+    vka_barrier(g_cb);
+    return 1;
+}
+// 1 = the dispatches are recorded and sh holds the draw's vertex and pixel shaders (*nvert vertices, the records in *rec); 0 = skipped (counted, logged)
+static int mesh_cs(const vka_dstate *d, const p_draw *dw, vka_shader *sh[VKA_NSTAGE], uint32_t *nvert, VkDescriptorBufferInfo *rec) {
+    #define MSKIP(...) do { g_skipped++; static _Atomic int n_; if (atomic_fetch_add(&n_, 1) < 4) VRED(__VA_ARGS__); return 0; } while (0)
+    vka_shader *tt = sh[6] ? vka_shader_mesh_twin(sh[6]) : NULL, *mt = vka_shader_mesh_twin(sh[7]), *fs = sh[1];
+    if ((sh[6] && !tt) || !mt || !mt->vs) { g_skipped++; return 0; }   // (logged when the twin was made)
+    if (fs && (fs->e->flags & DMSH_VK_F_MESH_PRIM) && !(fs = vka_shader_mesh_twin(fs))) { g_skipped++; return 0; }
+    const vka_mesh_info *mi = mt->mi;
+    uint32_t cnt = (uint32_t)dw->count, gx, gy, kmax = tt ? tt->mi->local[0] * tt->mi->local[1] * tt->mi->local[2] : 0;
+    if (tt) { gx = (uint32_t)VKA_ENV("DM_VK_MESH_CS_K", (double)kmax); if (!gx) gx = kmax; gy = cnt; } else { gx = cnt; gy = 1; }
+    uint32_t lim = V.props.limits.maxComputeWorkGroupCount[0] < V.props.limits.maxComputeWorkGroupCount[1] ? V.props.limits.maxComputeWorkGroupCount[0] : V.props.limits.maxComputeWorkGroupCount[1];
+    if (gx > lim || gy > lim || (tt && cnt > V.props.limits.maxComputeWorkGroupCount[0])) MSKIP("mesh draw of %u x %u workgroups as compute: more than the device's %u; skipped", gx, gy, lim);
+    uint64_t slots = (uint64_t)gx * gy, ob = slots * mi->rec_bytes;
+    uint32_t prec = tt ? tt->mi->pay_rec_bytes : mi->pay_rec_bytes; uint64_t pb = tt ? (uint64_t)cnt * prec : prec;
+    if (slots * 3 * mi->max_p > 0xffffffffull || ob > (512ull << 20)) MSKIP("mesh draw as compute: %llu records of %u bytes is too much; skipped", (unsigned long long)slots, mi->rec_bytes);
+    vka_span os, ps = {0};
+    if (!vka_scratch(ob, V.sb_align, &os) || (pb && !vka_scratch(pb, V.sb_align, &ps))) MSKIP("mesh draw as compute: no scratch memory for %llu + %llu bytes; skipped", (unsigned long long)ob, (unsigned long long)pb);
+    if (pb && !tt) { memset(ps.ptr, 0, (size_t)pb); uint32_t all = ~0u; memcpy(ps.ptr, &all, 4); }   // a mesh shader with a payload drawn without a task: every workgroup runs, payload zeros
+    vka_rp_end();
+    VkDescriptorBufferInfo ob_i = {os.buf, os.off, ob}, pb_i = {ps.buf, ps.off, pb ? pb : VK_WHOLE_SIZE};
+    if (tt) { g_xw.n = 1; g_xw.binding[0] = VKA_TASK_PAY_BINDING; g_xw.bi[0] = pb_i;
+              int ok = mesh_cs_run(d, 6, tt, cnt, 1); g_xw.n = 0; if (!ok) MSKIP("mesh draw as compute: task shader %016llx not dispatched; skipped", (unsigned long long)tt->key); }
+    g_xw.n = 0; g_xw.binding[g_xw.n] = VKA_MESH_OUT_BINDING; g_xw.bi[g_xw.n++] = ob_i;
+    if (mi->pay_words) { g_xw.binding[g_xw.n] = VKA_MESH_PAY_BINDING; g_xw.bi[g_xw.n++] = pb_i; }
+    int ok = mesh_cs_run(d, 7, mt, gx, gy); g_xw.n = 0;
+    if (!ok) MSKIP("mesh draw as compute: mesh shader %016llx not dispatched; skipped", (unsigned long long)mt->key);
+    { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("mesh draw as compute: task %016llx mesh %016llx pixel %016llx, %u x %u mesh workgroups, %llu bytes of records, %u vertices drawn",
+          tt ? (unsigned long long)tt->key : 0ull, (unsigned long long)mt->key, fs ? (unsigned long long)fs->key : 0ull, gx, gy, (unsigned long long)ob, (uint32_t)(slots * 3 * mi->max_p)); }
+    for (int st = 0; st < VKA_NSTAGE; st++) sh[st] = NULL;
+    sh[0] = mt->vs; sh[1] = fs;
+    *nvert = (uint32_t)(slots * 3 * mi->max_p); *rec = ob_i;
+    g_mcs_draws++; g_mcs_slots += slots;
+    return 1;
+    #undef MSKIP
+}
+void vka_mesh_cs_stats(uint64_t *draws, uint64_t *records) { if (draws) *draws = g_mcs_draws; if (records) *records = g_mcs_slots; }
+
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++; return; }
     if (!d->inited) vka_dstate_reset(d);
@@ -919,9 +980,9 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     PT(0);
     // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks, hle_nvn.c): the task (optional) and mesh shaders of one program, the fragment stage's shader, in a mesh pipeline
     // (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasksEXT: no vertex input, primitive type or index buffer
-    const int mesh = dw && dw->prim == NVN_PRIM_MESH;
+    int mesh = dw && dw->prim == NVN_PRIM_MESH, mcs = 0; uint32_t mcs_nv = 0; VkDescriptorBufferInfo mcs_rec = {0};
     if (mesh) {
-        if (!V.mesh) SKIP("mesh draw (nvnCommandBufferDrawMeshTasks) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0): skipped");
+        if (!V.mesh && !vka_mesh_cs_on()) SKIP("mesh draw (nvnCommandBufferDrawMeshTasks) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0) and DM_VK_MESH_CS=0: skipped");
         // The program whose task and mesh shaders run: the fragment stage's when it has a mesh shader (a program's stages are bound together), else the one bound at the
         // mesh stage bit. Task and mesh come from the same program (a program's task shader feeds its own mesh shader)
         const prog_t *mp = d->bst[7];
@@ -940,6 +1001,11 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (dw->first) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("mesh draw with first workgroup %d (count %d): drawn from 0 (the translated task / mesh shaders read their workgroup index with no base; open)", dw->first, dw->count); }
         if (dw->count <= 0) return;
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
+        if (!V.mesh) {   // no mesh shading: compute twins, then their records drawn with a vertex shader (mesh_cs); from here on an ordinary non-indexed triangle list draw
+            if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) return;
+            if (!mesh_cs(d, dw, sh, &mcs_nv, &mcs_rec)) return;
+            mesh = 0; mcs = 1;
+        }
     } else {
         for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: no shader library");
         if (bad) { g_skipped++; return; }   // a refused or missing shader (logged when it was made)
@@ -951,7 +1017,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) return;
     int prim = dw ? dw->prim : di->prim, expand = 0;
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // (a mesh pipeline's: every translated mesh shader outputs triangles)
-    if (!mesh) {
+    if (!mesh && !mcs) {
         topo = topology(prim, &expand);
         if (expand < 0) SKIP("primitive type %d not on Vulkan: the draw is skipped", prim);
         if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) SKIP("tessellation patches are not on Vulkan yet (no patch size is recorded): the draw is skipped");
@@ -1057,7 +1123,8 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (!DY.valid || !g_dyn_filter || DY.pipe != p) { vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); DY.pipe = p; VB.vin_stale = 1; }
     if (vka_nan_on()) vka_nan_draw(mesh ? sh[7]->key : sh[0]->key, fs ? fs->key : 0);
     PT(5);
-    if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL)) { g_skipped++; return; }
+    if (mcs) { g_xw.n = 1; g_xw.binding[0] = VKA_MESH_VS_BINDING; g_xw.bi[0] = mcs_rec; }
+    { int ok = bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL); g_xw.n = 0; if (!ok) { g_skipped++; return; } }
     PT(6);
     if (!mesh) vin_bind(d);
 
@@ -1138,7 +1205,8 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         free(src);
         ib_bind(s.buf, s.off, VK_INDEX_TYPE_UINT32);
         vk.vkCmdDrawIndexed(g_cb, nout, inst, 0, di ? di->base_vertex : 0, binst);
-    } else if (dw) {
+    } else if (mcs) vk.vkCmdDraw(g_cb, mcs_nv, 1, 0, 0);
+    else if (dw) {
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 16, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
                    VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's"); vk.vkCmdDrawIndirect(g_cb, b, o, 1, 16); }
         else vk.vkCmdDraw(g_cb, (uint32_t)dw->count, inst, (uint32_t)dw->first, binst);

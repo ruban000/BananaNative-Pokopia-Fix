@@ -130,9 +130,16 @@ static const char *refusal(const vka_shlib *L, const dmsh_vk_entry *e) {
     if (e->stage == DMSH_VK_STAGE_GS && !V.geom) return "a geometry shader on a device without geometryShader";
     if ((e->stage == DMSH_VK_STAGE_TCS || e->stage == DMSH_VK_STAGE_TES) && !V.tess) return "a tessellation shader on a device without tessellationShader";
     // NVN2 task and mesh programs, and the pixel shaders that read their per-primitive outputs (valid only in a mesh pipeline): only with VK_EXT_mesh_shader (vka_dev.c)
-    if ((e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS || (e->flags & DMSH_VK_F_MESH_PRIM)) && !V.mesh) return "a task / mesh shader (or a pixel shader of their per-primitive outputs) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0)";
-    if (e->stage == DMSH_VK_STAGE_TS && !V.task) return "a task shader on a device with mesh shaders but without taskShader";
-    if (e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS) {   // the workgroup (the entry's local) within the device's limit
+    // Without it (and DM_VK_MESH_CS not 0) they run through their compute twins and a vertex shader (vka_draw.c mesh_cs), within the device's compute workgroup
+    if (!V.mesh) {
+        if ((e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS || (e->flags & DMSH_VK_F_MESH_PRIM)) && !vka_mesh_cs_on())
+            return "a task / mesh shader (or a pixel shader of their per-primitive outputs) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0), with DM_VK_MESH_CS=0";
+        if (e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS) {
+            uint64_t inv = (uint64_t)e->local[0] * e->local[1] * e->local[2];
+            if (!inv || inv > V.props.limits.maxComputeWorkGroupInvocations) return "a task / mesh workgroup larger than the device's compute workgroup (drawn as compute: no VK_EXT_mesh_shader)";
+        }
+    } else if (e->stage == DMSH_VK_STAGE_TS && !V.task) return "a task shader on a device with mesh shaders but without taskShader";
+    else if (e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS) {   // the workgroup (the entry's local) within the device's limit
         uint64_t inv = (uint64_t)e->local[0] * e->local[1] * e->local[2];
         if (!inv || inv > (e->stage == DMSH_VK_STAGE_TS ? V.task_inv : V.mesh_inv)) return "a task / mesh workgroup larger than the device's (maxTaskWorkGroupInvocations / maxMeshWorkGroupInvocations)";
     }
@@ -153,15 +160,30 @@ static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
                                                             stage == DMSH_VK_STAGE_GS && V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? "Turnip's geometry stage (DM_VK_SUBGROUP_GS)" : V.subgroup_stages & g_stage_bit[stage] ? "the device's subgroup size in this stage is not the library's and cannot be pinned" : "the device has none in this stage");
     free(*w); *w = o; *nb = on * 4;
 }
-static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn) {
+// A twin's rewrite of its library words (vka_shader.xform): a task / mesh module as compute (its layout into mi), a pixel module's per-primitive inputs made flat. 0 = failed (err)
+static int xform_words(int xform, vka_mesh_info *mi, uint32_t **w, size_t *nb, char *err, size_t errn) {
+    if (!xform) return 1;
+    size_t on = 0; uint32_t *o = NULL; vka_mesh_info tmp;
+    if (xform == VKA_XF_MESH || xform == VKA_XF_TASK)
+        o = vka_spv_mesh_compute(*w, *nb / 4, VKA_MESH_OUT_BINDING, xform == VKA_XF_MESH ? VKA_MESH_PAY_BINDING : VKA_TASK_PAY_BINDING, mi ? mi : &tmp, &on, err, errn);
+    else if (xform == VKA_XF_UNPRIM) o = vka_spv_unprim(*w, *nb / 4, &on, err, errn);
+    else { snprintf(err, errn, "no rewrite %d", xform); return 0; }
+    if (!o) return 0;
+    free(*w); *w = o; *nb = on * 4; return 1;
+}
+static VkShaderModule spv_module_x(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, int xform, vka_mesh_info *mi, const char **why, char *err, size_t errn) {
     size_t nb = 0; uint32_t *w = vka_shlib_spirv(L, m, &nb, err, errn);
     if (!w) { *why = err; return VK_NULL_HANDLE; }
-    if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, e->stage, &w, &nb);
+    if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, xform == VKA_XF_MESH ? DMSH_VK_STAGE_MS : xform == VKA_XF_TASK ? DMSH_VK_STAGE_TS : e->stage, &w, &nb);
+    if (!xform_words(xform, mi, &w, &nb, err, errn)) { free(w); *why = err; return VK_NULL_HANDLE; }
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod);
     free(w);
     if (r) { snprintf(err, errn, "vkCreateShaderModule %d (variant %u of %016llx)", r, m->variant, (unsigned long long)key); *why = err; return VK_NULL_HANDLE; }
     return mod;
+}
+static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn) {
+    return spv_module_x(L, e, m, key, 0, NULL, why, err, errn);
 }
 VkShaderModule vka_shader_module(vka_shader *s, int variant) {
     if (variant < 0 || variant > 3) return VK_NULL_HANDLE;
@@ -169,7 +191,7 @@ VkShaderModule vka_shader_module(vka_shader *s, int variant) {
     const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, variant);
     if (!m) return VK_NULL_HANDLE;
     const char *why = NULL; char err[256];
-    VkShaderModule mod = spv_module(s->lib, s->e, m, s->key, &why, err, sizeof err);
+    VkShaderModule mod = spv_module_x(s->lib, s->e, m, s->key, s->xform, s->mi, &why, err, sizeof err);
     if (!mod) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("shader %016llx variant %d: %s", (unsigned long long)s->key, variant, why); return VK_NULL_HANDLE; }
     pthread_mutex_lock(&g_mu);
     if (s->mods[variant]) { pthread_mutex_unlock(&g_mu); vk.vkDestroyShaderModule(V.dev, mod, NULL); return s->mods[variant]; }
@@ -238,6 +260,7 @@ VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t sm
     const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
     size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
     if (w && (s->e->flags & DMSH_VK_F_SUBGROUP)) single_lane(s->key, s->e->stage, &w, &nb);
+    if (w && !xform_words(s->xform, s->mi, &w, &nb, err, sizeof err)) { free(w); w = NULL; }
     size_t on = 0; uint32_t *o = w ? vka_spv_fout_retype(w, nb / 4, umask, smask, &on, err, sizeof err) : NULL;
     if (o) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
              VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod); if (r) { snprintf(err, sizeof err, "vkCreateShaderModule %d", r); mod = VK_NULL_HANDLE; } else own = 1; }
@@ -273,7 +296,9 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
         why = refusal(L, e);
         const dmsh_vk_module *m = why ? NULL : vka_shlib_module(L, e, DMSH_VK_MOD_BASE);
         if (!why && !m) why = "no base module";
-        if (m) s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err);
+        // (a task / mesh module, or a pixel one with per-primitive inputs, on a device without mesh shading: never made as it is, only its twin's rewrite)
+        int mesh_only = !V.mesh && (e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS || (e->flags & DMSH_VK_F_MESH_PRIM));
+        if (m && !mesh_only) s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err);
         if (!why && e->stage == DMSH_VK_STAGE_GS && VKA_ENV("DM_VK_GS_CLAIM", 1)) {   // memory writes: made once per primitive (vka_spv_gs_claim)
             char e2[256] = ""; s->gs_fx = gs_words(s, NULL, NULL, e2, sizeof e2);
             if (s->gs_fx < 0) VRED("geometry shader %016llx: memory writes not put under a claim (%s): drawn as it is, its writes repeated by the device's runs of each primitive", (unsigned long long)key, e2);
@@ -375,3 +400,38 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
     return 1;
 }
 #endif
+
+// ---------- Mesh draws as compute (vka_draw.c mesh_cs) ----------
+int vka_mesh_cs_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_MESH_CS"); on = !V.mesh && !(e && !strcmp(e, "0")); } return on; }
+// The twin of a task / mesh shader (its compute rewrite and, for a mesh shader, the vertex shader of its records) or of a pixel shader with per-primitive inputs (made flat).
+// Made once; a twin that cannot be made is remembered as bad (logged once per key)
+vka_shader *vka_shader_mesh_twin(vka_shader *s) {
+    if (!s) return NULL;
+    pthread_mutex_lock(&g_mu); vka_shader *t = s->twin; pthread_mutex_unlock(&g_mu);
+    if (t) return t->bad ? NULL : t;
+    int xf = s->e->stage == DMSH_VK_STAGE_MS ? VKA_XF_MESH : s->e->stage == DMSH_VK_STAGE_TS ? VKA_XF_TASK : (s->e->flags & DMSH_VK_F_MESH_PRIM) ? VKA_XF_UNPRIM : 0;
+    t = calloc(1, sizeof *t); if (!t) return NULL;
+    t->key = s->key; t->lib = s->lib; t->b = s->b; t->c1 = s->c1; t->c1_len = s->c1_len; t->ecopy = *s->e; t->e = &t->ecopy; t->xform = xf;
+    t->ecopy.flags &= (uint16_t)~DMSH_VK_F_MESH_PRIM;
+    if (xf == VKA_XF_MESH || xf == VKA_XF_TASK) { t->ecopy.stage = DMSH_VK_STAGE_CS; t->mi = calloc(1, sizeof *t->mi); }
+    const char *why = !xf ? "not a task, mesh or per-primitive pixel shader" : (xf != VKA_XF_UNPRIM && !t->mi) ? "out of memory" : NULL;
+    if (!why && !vka_shader_module(t, DMSH_VK_MOD_BASE)) why = "its rewrite or module failed (logged above)";
+    if (!why && xf == VKA_XF_MESH) {   // the vertex shader that draws its records: no library bindings of its own (the records' buffer is bound by the draw)
+        vka_shader *v = calloc(1, sizeof *v); size_t on = 0; uint32_t *w = v ? vka_spv_mesh_vs(t->mi, VKA_MESH_VS_BINDING, &on) : NULL;
+        if (w) {
+            v->key = s->key; v->lib = s->lib; v->b = s->b; memset(&v->ecopy, 0, sizeof v->ecopy); v->ecopy.stage = DMSH_VK_STAGE_VS; v->e = &v->ecopy; v->xform = VKA_XF_MESH_VS;
+            VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = w};
+            if (vk.vkCreateShaderModule(V.dev, &ci, NULL, &v->mods[DMSH_VK_MOD_BASE])) v->mods[DMSH_VK_MOD_BASE] = VK_NULL_HANDLE;
+        }
+        free(w);
+        if (v && v->mods[DMSH_VK_MOD_BASE]) t->vs = v; else { free(v); why = "no vertex shader for its records"; }
+    }
+    if (why) { t->bad = 1; VRED("%s shader %016llx: no compute twin for mesh draws without VK_EXT_mesh_shader: %s; its draws are skipped", stage_name(s->e->stage), (unsigned long long)s->key, why); }
+    else if (xf == VKA_XF_MESH) VLOG("mesh shader %016llx as compute: %u threads, records of %u bytes (%u vertices, %u primitives, %u locations), payload %u words", (unsigned long long)s->key,
+                                     t->mi->local[0] * t->mi->local[1] * t->mi->local[2], t->mi->rec_bytes, t->mi->max_v, t->mi->max_p, t->mi->nloc, t->mi->pay_words);
+    pthread_mutex_lock(&g_mu);
+    if (s->twin) { vka_shader *o = s->twin; pthread_mutex_unlock(&g_mu); return o->bad ? NULL : o; }   // (another thread made it: this one leaks its module, once)
+    s->twin = t;
+    pthread_mutex_unlock(&g_mu);
+    return t->bad ? NULL : t;
+}

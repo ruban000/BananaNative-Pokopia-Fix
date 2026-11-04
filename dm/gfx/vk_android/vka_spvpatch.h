@@ -22,6 +22,7 @@ typedef struct {
     uint32_t role, local[3], max_v, max_p, rec_bytes, pos_off, idx_off, nloc;
     struct { uint8_t loc, prim; uint32_t off; } locs[16];
     uint32_t pay_words, pay_rec_bytes;
+    char note[200];   // what the rewrite left as translated (empty: nothing)
 } vka_mesh_info;
 // A TaskEXT / MeshEXT module as a GLCompute one: the mesh's records in the storage buffer at set 0 out_binding, the payload records at pay_binding. malloc'd (*out_nw words),
 // NULL with the reason in err
