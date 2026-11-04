@@ -67,6 +67,16 @@ int main(void) {
     CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
     unsetenv("DM_ROMFS_OVERLAY");
+    {   // a folder missing from the RomFS folder is named once ([RED] line), a missing file in a folder that is there is not; the answers stay "not found"
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the RomFS folder alone");
+        uint64_t h; int32_t t;
+        CHECK(h_fs_OpenFile(&h, "rom:/data/none", MODE_READ) == RES_PATH_NOT_FOUND && g_nrom_dir_missing == 0, "a missing file in a folder that is there names no folder");
+        CHECK(h_fs_OpenFile(&h, "rom:/Tex/a.bntx.zs", MODE_READ) == RES_PATH_NOT_FOUND && g_nrom_dir_missing == 1 && !strcmp(g_rom_dir_missing[0], "Tex"), "a file in a missing folder is not found, and names the folder Tex");
+        CHECK(h_fs_GetEntryType(&t, "rom:/Tex/b/c") == RES_PATH_NOT_FOUND && h_fs_OpenFile(&h, "rom:\\Tex\\d", MODE_READ) == RES_PATH_NOT_FOUND && g_nrom_dir_missing == 1, "the same folder again (deeper, with backslashes) is not named twice");
+        CHECK(h_fs_OpenFile(&h, "rom:/data/sub/x", MODE_READ) == RES_PATH_NOT_FOUND && g_nrom_dir_missing == 2 && !strcmp(g_rom_dir_missing[1], "data/sub"), "a missing folder below one that is there is named by its whole path");
+        CHECK(h_fs_GetEntryType(&t, "rom:/Tex") == RES_PATH_NOT_FOUND && g_nrom_dir_missing == 2, "the missing folder itself, as the last component, is a plain probe");
+        g_nmnt = 0;
+    }
     {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
         char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);
         mkfifo(fifo, 0644);

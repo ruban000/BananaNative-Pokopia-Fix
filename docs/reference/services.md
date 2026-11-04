@@ -138,6 +138,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Note:** only a missing file followed by a failure matters.
 - **Found on:** every game (general).
 
+### A RomFS folder that is not complete
+
+- **Symptom:** a null read in the game's own code a few seconds into `nnMain`, with no `[RED]` line before it, on a device whose copy of the game files is not complete (a folder not yet copied). Mario Kart World: `CRASH sig=11 addr=0x1c pc=main+0x476180` on the Prepare Thread. Now the first lookup through a missing folder logs `[RED] fs: rom:/<folder> is not a folder in <RomFS folder> (<path> not found): a probe for a folder the game does not ship, or a copy of the game files that is not complete`.
+- **Cause:** not the host's. On hardware the RomFS is complete, and games treat their own resident files as always there: Mario Kart World looks its noise texture up by name in the texture manager and builds a texture from the entry without a null check, and the entry is made only when `Tex/<name>.bntx` loads. The host answers the missing file correctly (`ResultPathNotFound`), but logged it only under `DM_FS=1`, because games probe for optional files all the time ([File-not-found noise from optional paths](#file-not-found-noise-from-optional-paths)), so the crash came with nothing pointing at the files.
+- **Fix:** a diagnostic only (`hle_fs.c` `rom_dir_missing`): a lookup on a read-only folder mount that fails at a folder, not at the last component of its path, logs a `[RED]` line naming the folder, once a folder and up to 8 folders a run. Nothing is answered differently. A missing file in a folder that is there, and an image mount (its identity is checked at startup), are not covered. The remedy is to copy the game files again, completely. A game that does probe for a folder it does not ship gets one such line for it.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#boot-android-registered-build) (phone, `Tex/` and `TerrainArc/` not yet copied).
+- **Check:** `t_fs` (the Mac host tests): a missing folder is named once (also deeper and with backslashes), a missing file in a folder that is there and the missing folder as the last component are not, and every answer stays "not found". Not yet run (written on Linux, where the host tests do not build).
+
 ### Directory, file data cache and save-thumbnail calls
 
 - **Symptom:** a missing `fs::DeleteDirectory`; undefined `nn::fs::` / `nn::account::` imports with no hook, found from the import list ([Listing a game's unhooked imports before they are met](#listing-a-games-unhooked-imports-before-they-are-met)) before they were met.
