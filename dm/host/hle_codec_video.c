@@ -14,6 +14,7 @@
 #include "hle.h"
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_yuv.h"
@@ -442,6 +443,19 @@ HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERK
     if (k == 64) { LOG("[RED] nn::syncpt: more than 64 armed events: signalled at once"); hle_signal_system_event(e); return 0; }
     if (sync_reached(s)) { spt_unarm(e); hle_signal_system_event(e); }
     return 0;
+}
+// The SDK dispatches this through the graphics backend's table, which the host replaces.
+// Poll the SystemEvent bound by CreateSyncPointEvent: its clear mode owns consumption,
+// so manual-clear events remain signalled until Cancel or the next Request.
+HLE_FORCE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", "polls the host-bound SystemEvent", bool, h_spt_trywait, const void *e) {
+    static _Atomic(bool (*)(void *)) cached;
+    bool (*poll)(void *) = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (!poll) {
+        poll = guest_sym("_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE");
+        if (!poll) die("nn::os::TryWaitSystemEvent missing");
+        atomic_store_explicit(&cached, poll, memory_order_relaxed);
+    }
+    return poll((void *)e);
 }
 HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms the event", void, h_spt_cancel, void *e) { spt_unarm(e); hle_clear_system_event(e); }
 HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", "destroys the event's SystemEvent", void, h_spt_destroy, void *e) {
