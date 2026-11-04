@@ -280,6 +280,8 @@ void vka_ctl_shot_done(VkFence fence);
 
 VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // texture ID id as a view of shape dim (DMSH_VK_DIM_*); VK_NULL_HANDLE = none fits
 void vka_tex_id_desc(int id, char *b, size_t n);   // texture ID id described for a [RED] line
+typedef struct { uint64_t serial; int texture_format, view_format; VkFormat requested, actual; uint32_t width, height, depth; uint8_t kind; } vka_numeric_info;
+int vka_tex_id_numeric_info(int id, VkImageView view, vka_numeric_info *out);   // integer descriptor evidence; actual is UNDEFINED when no matching view was made
 void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n);   // the open pass's attachments and their levels (n 0: none), for vka_tex_id_view
 int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (vka_tex_feedback's set)
 int vka_tex_id_target(int id);                      // the NVN target texture ID id stands for (its view's), -1 = not registered

@@ -7,6 +7,7 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/nvn_hmap.h"
 #include "../../host/plat/plat.h"
 #include <math.h>
 #include <stdio.h>
@@ -582,6 +583,50 @@ static inline uint64_t cntvct(void) { uint64_t v; __asm__ volatile("mrs %0, cntv
 typedef struct { VkWriteDescriptorSet w[512]; VkDescriptorBufferInfo bi[512]; VkDescriptorImageInfo ii[512]; VkBufferView bv[512]; uint32_t n; } writes_t;
 static writes_t g_w;
 static vka_res g_res[512];   // the NaN scan's own walk (DM_VK_NANSCAN_FS)
+// Opt-in evidence for offline image format facts. Replay owns this cache; each
+// shader binding/element reports its first descriptor and every later change,
+// including re-registration of the same texture ID with another serial/format.
+static void storage_binding_note(int st, const vka_shader *sh, const vka_res *r, int tid) {
+    if (!VKA_ENV("DM_VK_STORAGE_TRACE", 0)) return;
+    typedef struct { uint64_t key; int st, tid; uint16_t binding, elem; char desc[320]; } seen_t;
+    static seen_t *seen; static size_t nseen, cseen;
+    char desc[320]; vka_tex_id_desc(tid, desc, sizeof desc);
+    size_t k = 0;
+    while (k < nseen && (seen[k].key != sh->key || seen[k].st != st || seen[k].binding != r->binding || seen[k].elem != r->elem)) k++;
+    if (k < nseen && seen[k].tid == tid && !strcmp(seen[k].desc, desc)) return;
+    const dmsh_vk_bind *b = NULL;
+    for (uint32_t j = 0; j < sh->e->bind_count; j++)
+        if (sh->b[j].set == 0 && sh->b[j].binding == r->binding) { b = &sh->b[j]; break; }
+    VLOG("storage binding: shader %016llx stage %d binding %u[%u] dim %#x source kind %d reg %d off %#x texture ID %d: %s",
+         (unsigned long long)sh->key, st, r->binding, r->elem, r->dim, b ? b->kind : -1, b ? b->reg : -1, b ? b->off : 0, tid, desc);
+    if (k == nseen) {
+        if (nseen == cseen) { size_t cap = cseen ? cseen * 2 : 32; seen_t *p = realloc(seen, cap * sizeof *p); if (!p) return; seen = p; cseen = cap; }
+        seen[k] = (seen_t){.key = sh->key, .st = st, .binding = r->binding, .elem = r->elem}; nseen++;
+    }
+    seen[k].tid = tid; memcpy(seen[k].desc, desc, sizeof desc);
+}
+// Each integer format at a shader binding is evidence once, even if texture IDs
+// or serials change every frame. Keep requested and actually created view formats
+// separate: a numeric mismatch can reject the view before a placeholder is used.
+static void numeric_binding_note(int st, const vka_shader *sh, const vka_res *r, int tid, VkImageView view) {
+    if (!VKA_ENV("DM_VK_NUMERIC_TRACE", 0)) return;
+    vka_numeric_info f; if (!vka_tex_id_numeric_info(tid, view, &f)) return;
+    const dmsh_vk_bind *b = NULL;
+    for (uint32_t j = 0; j < sh->e->bind_count; j++)
+        if (sh->b[j].set == 0 && sh->b[j].binding == r->binding) { b = &sh->b[j]; break; }
+    // All fields are whole words, without struct padding in the byte-keyed map.
+    uint64_t key[] = {sh->key, (uint64_t)st, r->binding, r->elem, r->desc, r->dim,
+                      b ? b->kind : UINT64_MAX, b ? b->reg : UINT64_MAX, b ? b->off : UINT64_MAX,
+                      (uint64_t)f.view_format, f.requested, f.actual};
+    static nvn_hmap seen = {.klen = sizeof key};
+    if (nvn_hm_get(&seen, key)) return;
+    nvn_hm_put(&seen, key, (void *)1);
+    VLOG("numeric binding: shader %016llx stage %d binding %u[%u] desc %u dim %#x source kind %d reg %d off %#x class %s texture-format %#x view-format %#x requested-VkFormat %u actual-VkFormat %u texture ID %d serial %llu shape %ux%ux%u",
+         (unsigned long long)sh->key, st, r->binding, r->elem, r->desc, r->dim,
+         b ? b->kind : -1, b ? b->reg : -1, b ? b->off : 0, f.kind == 1 ? "uint" : "sint",
+         f.texture_format, f.view_format, (unsigned)f.requested, (unsigned)f.actual, tid,
+         (unsigned long long)f.serial, f.width, f.height, f.depth);
+}
 // One stage's results as descriptor writes. 0 = the draw cannot run (logged)
 static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const vka_res *r, int n, int pool, c0_at *c0) {
     for (int i = 0; i < n; i++) {
@@ -626,6 +671,8 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) {
                 int tid = r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG ? r[i].tid : 0;
                 if (tid) v = vka_tex_id_view_rec(tid, g_cb, r[i].dim, storage, &lay);
+                if (tid) numeric_binding_note(st, sh, &r[i], tid, v);
+                if (storage) storage_binding_note(st, sh, &r[i], tid);
                 // A 2D texture in a 3D or cube slot: what the game leaves bound where a shader's branch does not sample (DKB's materials keep a 1x1 2D texture in their volume slot 12).
                 // It reads as unbound, zeros, as nvn_mtl.m's zero 3D / zero cube fallback does; noted once. Other mismatches are reported
                 int dd = r[i].dim & DMSH_VK_DIM_MASK, tt = tid && !v ? vka_tex_id_target(tid) : -1;

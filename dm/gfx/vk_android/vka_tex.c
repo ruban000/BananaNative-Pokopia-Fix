@@ -1963,6 +1963,25 @@ void vka_tex_id_desc(int id, char *b, size_t n) {
              v && v->set_target ? v->target : -1, v && v->set_layers ? v->min_layer : 0, v && v->set_layers ? v->nlayers : 0, v && v->set_format ? v->format : 0,
              im ? "made" : m ? (lz ? "deferred" : "refused") : "not made", im ? im->w : 0, im ? im->h : 0, im ? im->depth : 0, im ? im->layers : 0, im ? im->usage : 0);
 }
+int vka_tex_id_numeric_info(int id, VkImageView view, vka_numeric_info *out) {
+    int ok = 0; memset(out, 0, sizeof *out);
+    pthread_mutex_lock(&g_tmu);
+    if (id > 0 && id < g_ntreg && g_treg[id].t.serial) {
+        const treg_ent *e = &g_treg[id];
+        int fmt = e->has_v && e->v.set_format ? e->v.format : e->t.d.format;
+        vka_fmt f;
+        if (vka_fmt_of(fmt, &f) && (f.kind == 1 || f.kind == 2)) {
+            *out = (vka_numeric_info){e->t.serial, e->t.d.format, fmt, f.view, VK_FORMAT_UNDEFINED,
+                                      e->t.d.width, e->t.d.height, e->t.d.depth, f.kind};
+            smap_ent *m = map_get(e->t.serial);
+            if (view && m && m->im) for (view_ent *v = VIEWS(m->im); v; v = v->next)
+                if (v->v == view) { out->actual = v->f; break; }
+            ok = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_tmu);
+    return ok;
+}
 int vka_tex_id_target(int id) {
     pthread_mutex_lock(&g_tmu);
     int t = id > 0 && id < g_ntreg && g_treg[id].t.serial ? (g_treg[id].has_v && g_treg[id].v.set_target ? g_treg[id].v.target : g_treg[id].t.d.target) : -1;
