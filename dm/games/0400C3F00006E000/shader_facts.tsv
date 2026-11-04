@@ -94,7 +94,7 @@
 1fcaa13071f5cf29	{"local":[32,1,1],"shared":0}
 2012eefdfbdcd70d	{"local":[32,1,1],"shared":0}
 20aee644c41d44ea	{"local":[64,1,1],"shared":49152}
-20cedaf80534819b	{"local":[64,1,1],"shared":0}
+20cedaf80534819b	{"local":[64,1,1],"shared":0,"img":{"0":{"fmt":"R32Uint"}}}
 20d9a19b4fb2435b	{"local":[64,1,1],"shared":49152}
 217950fdb660b1a9	{"local":[64,1,1],"shared":0}
 218fd01d22823879	{"local":[64,1,1],"shared":49152}
@@ -142,7 +142,7 @@
 2aef8b0902fe8c63	{"local":[64,1,1],"shared":49152}
 2b10b92460889358	{"local":[16,16,1],"shared":0}
 2b679e13b1ce70a4	{"local":[64,1,1],"shared":49152}
-2c04affed9c64d35	{"local":[8,8,1],"shared":0}
+2c04affed9c64d35	{"local":[8,8,1],"shared":0,"img":{"0":{"fmt":"R8Uint"}}}
 2ce9071c2f22d74f	{"local":[64,1,1],"shared":0}
 2d71cb21ee97204e	{"local":[32,1,1],"shared":0}
 2dcd0bbc43a686dc	{"local":[32,1,1],"shared":0}

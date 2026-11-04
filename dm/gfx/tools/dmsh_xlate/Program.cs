@@ -145,8 +145,10 @@ static class SwshXlate
         {
             int slot = Slot(handle, cbufSlot, true);
             string f = _job["img"] is JsonObject t && slot >= 0 && t[slot.ToString()] is JsonObject o ? (string)o["fmt"] : null;
-            if (f == null) { Notes.Add($"image handle {handle:X} slot {slot} has no format in the answer table, using R8G8B8A8Unorm"); return TextureFormat.R8G8B8A8Unorm; }
-            return Enum.TryParse(f, true, out TextureFormat tf) ? tf : TextureFormat.R8G8B8A8Unorm;
+            if (f == null) return TextureFormat.Unknown;   // formatless access is allowed, but a known integer format must keep its numeric type
+            if (Enum.TryParse(f, true, out TextureFormat tf)) return tf;
+            Notes.Add($"image handle {handle:X} slot {slot} has an unknown format in the answer table: {f}");
+            return TextureFormat.Unknown;
         }
         int Local(int i) => _job["local"] is JsonArray a && a.Count > i ? (int)a[i] : 1;
         public int QueryComputeLocalSizeX() => Local(0);

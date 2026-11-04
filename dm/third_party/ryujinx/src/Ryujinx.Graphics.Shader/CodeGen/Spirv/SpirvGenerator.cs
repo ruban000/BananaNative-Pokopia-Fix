@@ -66,6 +66,22 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             context.AddCapability(Capability.ImageQuery);
             context.AddCapability(Capability.SampledBuffer);
 
+            // SPIR-V's Image Format operand requires this capability for the
+            // formats beyond its core R32 and RGBA float/integer set.
+            foreach (TextureDefinition image in context.Properties.Images.Values)
+            {
+                if (image.Format is not (TextureFormat.Unknown or
+                    TextureFormat.R32Float or TextureFormat.R32Sint or TextureFormat.R32Uint or
+                    TextureFormat.R8G8B8A8Unorm or TextureFormat.R8G8B8A8Snorm or
+                    TextureFormat.R8G8B8A8Sint or TextureFormat.R8G8B8A8Uint or
+                    TextureFormat.R16G16B16A16Float or TextureFormat.R16G16B16A16Sint or TextureFormat.R16G16B16A16Uint or
+                    TextureFormat.R32G32B32A32Float or TextureFormat.R32G32B32A32Sint or TextureFormat.R32G32B32A32Uint))
+                {
+                    context.AddCapability(Capability.StorageImageExtendedFormats);
+                    break;
+                }
+            }
+
             if (parameters.HostCapabilities.SupportsShaderFloat64)
             {
                 context.AddCapability(Capability.Float64);
