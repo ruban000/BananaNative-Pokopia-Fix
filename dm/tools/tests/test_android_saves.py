@@ -19,7 +19,10 @@ public final class BuildConfig {
     public static final String NX_PROFILES = "040074A01BF12000\\tDonkey Kong Bananza\\t22852\\tabcdef012345\\t458752 main=aa";
 }
 '''
-HARNESS = '''#include <dirent.h>
+HARNESS = '''#ifndef _GNU_SOURCE
+#define _GNU_SOURCE   // glibc's nftw flags (FTW_DEPTH); plat_android.c defines it itself, and the Android build for every file
+#endif
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
