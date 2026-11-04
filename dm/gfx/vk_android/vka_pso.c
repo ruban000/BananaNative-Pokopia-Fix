@@ -64,7 +64,7 @@ static kmap g_lshort = {.klen = sizeof(skey)};
 static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out);
 int vka_layout_of(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout *out) {
     skey sk; memset(&sk, 0, sizeof sk);
-    for (int st = 0; st < VKA_NSTAGE; st++) if ((st == 5) == (compute != 0)) sk.sh[st] = sh[st];
+    for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && (sh[st]->e->stage == DMSH_VK_STAGE_CS) == (compute != 0)) sk.sh[st] = sh[st];   // (a mesh draw's compute twins sit at their NVN stage)
     sk.compute = compute != 0;
     uint64_t h = fnv(&sk, sizeof sk, 1469598103934665603ull);
     pthread_mutex_lock(&g_mu);
@@ -84,13 +84,22 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
     uint32_t ndesc = 0;
     for (int st = 0; st < VKA_NSTAGE; st++) {
         const vka_shader *s = sh[st];
-        if (!s || (st == 5) != (compute != 0)) continue;
+        if (!s || (s->e->stage == DMSH_VK_STAGE_CS) != (compute != 0)) continue;
         for (unsigned i = 0; i < s->e->bind_count; i++) {
             const dmsh_vk_bind *b = &s->b[i];
             if (b->set != DMSH_VK_SET_DRAW || b->kind == DMSH_VK_KIND_TEX_POOL || b->kind == DMSH_VK_KIND_SAMP_POOL) continue;
             if (k.n == MAXB) { VRED_ONCE("more than %d set-0 bindings in one pipeline", MAXB); return 0; }
             k.b[k.n].binding = b->binding; k.b[k.n].desc = b->desc; k.b[k.n].count = b->count ? b->count : 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage);
             ndesc += k.b[k.n].count; k.n++;
+        }
+        // A mesh draw's records (vka_draw.c mesh_cs): the compute twins' output and payload buffers, the drawing vertex shader's input
+        uint32_t xb[2], nx = 0;
+        if (s->xform == VKA_XF_MESH) { xb[nx++] = VKA_MESH_OUT_BINDING; if (s->mi && s->mi->pay_words) xb[nx++] = VKA_MESH_PAY_BINDING; }
+        else if (s->xform == VKA_XF_TASK) xb[nx++] = VKA_TASK_PAY_BINDING;
+        else if (s->xform == VKA_XF_MESH_VS) xb[nx++] = VKA_MESH_VS_BINDING;
+        for (uint32_t x = 0; x < nx; x++) {
+            if (k.n == MAXB) { VRED_ONCE("more than %d set-0 bindings in one pipeline", MAXB); return 0; }
+            k.b[k.n].binding = xb[x]; k.b[k.n].desc = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; k.b[k.n].count = 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage); ndesc++; k.n++;
         }
         if (s->gs_fx > 0 && k.n < MAXB) {   // the claim words of a geometry shader that writes memory (vka_spv_gs_claim)
             k.b[k.n].binding = VKA_GS_CLAIM_BINDING; k.b[k.n].desc = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; k.b[k.n].count = 1; k.b[k.n].stages = (uint16_t)stage_bit(s->e->stage); ndesc++; k.n++;
@@ -663,6 +672,7 @@ static void pw_append(const pwrec *r, const void *kb) {   // caller holds g_pw_m
 }
 static void pw_note(int kind, vka_shader *const sh[5], const void *kb, uint32_t klen) {   // a pipeline the frame path made: into the list unless it is there
     if (!g_pw_path[0]) return;
+    for (int i = 0; i < 5; i++) if (sh[i] && sh[i]->xform) return;   // a mesh draw's twins: made from a rewrite the list's keys cannot name
     pwrec r; memset(&r, 0, sizeof r); r.kind = (uint8_t)kind; r.klen = klen;
     for (int i = 0; i < 5; i++) r.key[i] = sh[i] ? sh[i]->key : 0;
     uint64_t h = fnv(kb, klen, fnv(&r, sizeof r, 1469598103934665603ull));
@@ -913,8 +923,12 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rsg = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin};
     int spill = 0;   // shared memory in the spill buffer (vka_draw.c spill_dispatch): dispatched in parts with a base workgroup
     for (unsigned i = 0; i < cs->e->bind_count; i++) if (cs->b[i].kind == DMSH_VK_KIND_SHARED_SPILL) spill = 1;
+    // A mesh shader's compute twin writes positions with the GL depth constant of the mesh stage (vka_pso.c pstate_fill sets it on a mesh pipeline)
+    VkBool32 gl_true = VK_TRUE; VkSpecializationMapEntry me = {DMSH_VK_SPEC_GL_DEPTH, 0, sizeof(VkBool32)}; VkSpecializationInfo spec = {1, &me, sizeof gl_true, &gl_true};
+    int gl = cs->xform == VKA_XF_MESH && (cs->e->flags & DMSH_VK_F_GL_DEPTH) && !vka_depth_zero();
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = spill ? VK_PIPELINE_CREATE_DISPATCH_BASE_BIT : 0, .layout = lay->layout,
-        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main"}};
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs->mods[DMSH_VK_MOD_BASE], .pName = "main",
+                  .pSpecializationInfo = gl ? &spec : NULL}};
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
     // DMSH_VK_SHARED_MAX in a storage buffer (DMSH_VK_KIND_SHARED_SPILL), and e->shared is then what stays in workgroup memory; a program still over this device's
@@ -924,7 +938,11 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     if (smax && cs->e->shared > smax && !VKA_ENV("DM_VK_CS_SHARED_OVER", 0)) {
         r = VK_ERROR_FEATURE_NOT_PRESENT; over = 1;
         static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute program %016llx takes %u bytes of shared memory, the device at most %u: not made, its dispatches are skipped (the first 16 are logged; the count is in the pipeline line)", (unsigned long long)cs->key, cs->e->shared, smax);
-    } else r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p);
+    } else {
+        if (cs->xform) VLOG("mesh draws as compute: making the pipeline of %s shader %016llx's compute twin", cs->xform == VKA_XF_TASK ? "task" : "mesh", (unsigned long long)cs->key);
+        r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p);
+        if (cs->xform) VLOG("mesh draws as compute: %016llx's pipeline %s in %.1f ms", (unsigned long long)cs->key, r ? "failed" : "made", (now_ns() - t0) / 1e6);
+    }
     pthread_mutex_lock(&g_mu);
     if (over) { p = VK_NULL_HANDLE; g_ncs_over++; } else if (r) { p = VK_NULL_HANDLE; g_nfail++; } else { g_ncs++; g_made++; if (!prewarm) g_frame_made++; }
     { uint64_t dns = now_ns() - t0; g_create_ms += dns / 1e6; if (!prewarm) g_create_ns += dns; }
