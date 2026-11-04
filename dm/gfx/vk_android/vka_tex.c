@@ -649,6 +649,12 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
     return want;
 }
 static uint64_t mem_hash(const uint8_t *p, uint64_t n) { uint64_t h = 1469598103934665603ull, v; uint64_t i = 0; for (; i + 8 <= n; i += 8) { memcpy(&v, p + i, 8); h = (h ^ v) * 1099511628211ull; } for (; i < n; i++) h = (h ^ p[i]) * 1099511628211ull; return h; }
+// Diagnostics cannot hash unavailable bytes. Caller holds the mapping/pool read
+// lease through the check and read; false means no comparable observation.
+static int mem_hash_mapped(const uint8_t *p, uint64_t n, uint64_t *hash) {
+    if (dm_guest_unmapped((uintptr_t)p, n)) return 0;
+    *hash = mem_hash(p, n); return 1;
+}
 // GPU writes into guest memory. On the Switch a texture is its storage, so a copy, fill or inline update into that memory (or a shader's store into a storage buffer over it)
 // changes what the texture reads from then on, in GPU order. Here a texture is an image of its own, which the CPU uploads from the storage when the replay records its first use
 // (or again after a CPU write the dirty tracker saw). A GPU write is not a CPU write: it does not fault, and the CPU sees its bytes only when the submission holding it completes.
@@ -775,7 +781,8 @@ static void watch_scan(VkCommandBuffer cb) {   // caller holds g_tmu and nvn_poo
     for (int i = 0; i < g_nlive && nlog < 24; i++) {
         vka_img *im = g_live[i];
         if (!im->track || im->gpu_owned || !im->mem || !im->up_fence || img_pool_dead(im)) continue;
-        uint64_t h = mem_hash(im->mem, im->L.size < 64 ? im->L.size : 64);
+        uint64_t h; if (!mem_hash_mapped(im->mem, im->L.size < 64 ? im->L.size : 64, &h)) { im->head_valid = 0; continue; }
+        if (!im->head_valid) { im->head = h; im->head_valid = 1; continue; }
         if (h == im->head) continue;
         im->head = h;
         if (nvn_dirty_since_span(im->span, im->mem, im->L.size, im->stamp)) continue;   // a CPU write the tracker saw
@@ -786,7 +793,7 @@ static void watch_scan(VkCommandBuffer cb) {   // caller holds g_tmu and nvn_poo
         { FILE *f = fopen("/proc/self/maps", "re"); char ln[512]; uintptr_t a = (uintptr_t)im->mem; int nv = 0;
           while (f && fgets(ln, sizeof ln, f)) { nv++; unsigned long lo, hi; if (!mp_[0] && sscanf(ln, "%lx-%lx", &lo, &hi) == 2 && a >= lo && a < hi) { ln[strcspn(ln, "\n")] = 0; snprintf(mp_, sizeof mp_, "%.100s", ln); } }
           if (f) fclose(f); size_t k = strlen(mp_); snprintf(mp_ + k, sizeof mp_ - k, " (%d mappings)", nv); }
-        char df[200] = ""; if (im->snap) { size_t n = im->L.size < 256 ? im->L.size : 256, k = 0; while (k < n && im->snap[k] == im->mem[k]) k++; k &= ~(size_t)15;
+        char df[200] = ""; if (im->snap && !dm_guest_unmapped((uintptr_t)im->mem, im->L.size < 256 ? im->L.size : 256)) { size_t n = im->L.size < 256 ? im->L.size : 256, k = 0; while (k < n && im->snap[k] == im->mem[k]) k++; k &= ~(size_t)15;
             size_t o = (size_t)snprintf(df, sizeof df, "first change at +%#zx: ", k); for (size_t j = k; j < k + 16 && j < n; j++) o += (size_t)snprintf(df + o, sizeof df - o, "%02x", im->snap[j]);
             o += (size_t)snprintf(df + o, sizeof df - o, " -> "); for (size_t j = k; j < k + 16 && j < n; j++) o += (size_t)snprintf(df + o, sizeof df - o, "%02x", im->mem[j]);
             memcpy(im->snap, im->mem, n); }
@@ -811,7 +818,7 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
         if (w->fence && w->fence <= done) continue;   // landed: memory has it
         if (w->hi <= a || w->lo >= b) continue;
         if (w->kind == GW_OPAQUE) { if (w->seq - 1 < cap) cap = w->seq - 1; continue; }
-        if (!c) { if (!(c = malloc(n))) { cap = 0; break; } dm_guest_read_mapped(c, (uintptr_t)mem, n); }
+        if (!c) { if (!(c = malloc(n))) die("pending texture write snapshot allocation failed (%llu bytes)", (unsigned long long)n); dm_guest_read_mapped(c, (uintptr_t)mem, n); }
         uint64_t lo = w->lo > a ? w->lo : a, hi = w->hi < b ? w->hi : b;
         if (w->kind == GW_FILL) { for (uint64_t k = lo; k < hi; k++) { uint32_t v = w->value; c[k - a] = ((const uint8_t *)&v)[(k - w->lo) & 3]; } }
         else if (w->kind == GW_UPDATE) memcpy(c + (lo - a), w->data + (lo - w->lo), hi - lo);
@@ -834,7 +841,7 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
 static uint8_t *unmapped_content(const tex_t *t) {
     uint64_t nbytes = nvn_tex_data_size(&t->d);
     uint64_t u = dm_guest_unmapped((uintptr_t)t->mem, nbytes); if (!u) return NULL;
-    uint8_t *c = malloc(nbytes); if (!c) return NULL;
+    uint8_t *c = malloc(nbytes); if (!c) die("unmapped texture snapshot allocation failed (serial %llu, %llu bytes)", (unsigned long long)t->serial, (unsigned long long)nbytes);
     dm_guest_read_mapped(c, (uintptr_t)t->mem, nbytes);
     static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("texture serial %llu: %llu of its %llu storage pages at %p are not mapped by the guest: read as zeros", (unsigned long long)t->serial,
                                                               (unsigned long long)u, (unsigned long long)((nbytes + 4095) >> 12), (const void *)t->mem);
@@ -842,12 +849,14 @@ static uint8_t *unmapped_content(const tex_t *t) {
 }
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
     im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
-    if (vka_nan_on()) im->hash = mem_hash(t->mem, nvn_tex_data_size(&t->d));
+    if (vka_nan_on()) im->hash_valid = mem_hash_mapped(t->mem, nvn_tex_data_size(&t->d), &im->hash);
     uint8_t *c = im->vpool ? NULL : gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
     if (!c && !im->vpool) c = unmapped_content(t);
     if (c) { tex_t tc = *t; tc.mem = c; upload(im, &tc, cb); free(c); g_gw_over++; } else upload(im, t, cb);
-    if (vka_nan_on()) { im->head = mem_hash(t->mem, t->L.size < 64 ? t->L.size : 64); im->up_fence = vka_fence_last() + 1;
-        if (!im->snap) im->snap = malloc(256); if (im->snap) memcpy(im->snap, t->mem, t->L.size < 256 ? t->L.size : 256); }
+    if (vka_nan_on()) { im->head_valid = mem_hash_mapped(t->mem, t->L.size < 64 ? t->L.size : 64, &im->head); im->up_fence = vka_fence_last() + 1;
+        size_t n = t->L.size < 256 ? t->L.size : 256;
+        if (dm_guest_unmapped((uintptr_t)t->mem, n)) { free(im->snap); im->snap = NULL; }
+        else { if (!im->snap) im->snap = malloc(256); if (im->snap) memcpy(im->snap, t->mem, n); } }
 }
 static void upload_fill(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // the same without tracking (ST_FILL)
     uint8_t *c = im->vpool ? NULL : gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);
@@ -1917,7 +1926,7 @@ void vka_tex_id_dump(int id) {
     vka_fmt f; if (!e.t.mem || !vka_fmt_of(e.t.d.format, &f)) return;
     uint32_t bx = (e.t.d.width + f.bw - 1) / f.bw, by = (e.t.d.height + f.bh - 1) / f.bh; size_t pitch = (size_t)bx * f.bpb, n = pitch * by;
     uint8_t *buf = malloc(n); if (!buf) return;
-    nvn_pool_use(1); int bad = treg_dead(id, &e) || (e.t.pool && !nvn_pool_live(e.t.pool, NULL, NULL)) || nvn_deswizzle(&e.t.d, 0, 0, e.t.mem, buf, pitch); nvn_pool_use(0);   // (a finalized pool's storage is not read)
+    nvn_pool_use(1); int bad = treg_dead(id, &e) || (e.t.pool && !nvn_pool_live(e.t.pool, NULL, NULL)) || dm_guest_unmapped((uintptr_t)e.t.mem, nvn_tex_data_size(&e.t.d)) || nvn_deswizzle(&e.t.d, 0, 0, e.t.mem, buf, pitch); nvn_pool_use(0);   // (a finalized pool's storage is not read)
     if (!bad) {
         char fn[512]; snprintf(fn, sizeof fn, "%s/nan-now-%llu.blk", getenv("DM_TEMP") ? getenv("DM_TEMP") : "/data/local/tmp", (unsigned long long)e.t.serial);
         FILE *fo = fopen(fn, "wb"); if (fo) { fwrite(buf, 1, n, fo); fclose(fo); VLOG("NaN scan: texture ID %d serial %llu storage %p (pool flags %#x, layout %d): level 0 as it is now written to %s", id, (unsigned long long)e.t.serial, (void *)e.t.mem, pool_flags(e.t.pool), e.t.has_layout, fn); }
@@ -1929,8 +1938,9 @@ void vka_tex_id_check(int id) {
     nvn_pool_use(1); pthread_mutex_lock(&g_tmu);
     if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return; }
     smap_ent *e = map_get(g_treg[id].t.serial); vka_img *im = e ? e->im : NULL;
-    if (im && im->track && !im->gpu_owned && im->mem && im->hash && !img_pool_dead(im)) {
-        uint64_t h = mem_hash(im->mem, nvn_tex_data_size(&im->d)); int dirty = nvn_dirty_since_span(im->span, im->mem, im->L.size, im->stamp);
+    if (im && im->track && !im->gpu_owned && im->mem && im->hash_valid && !img_pool_dead(im)) {
+        uint64_t h; if (!mem_hash_mapped(im->mem, nvn_tex_data_size(&im->d), &h)) { pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return; }
+        int dirty = nvn_dirty_since_span(im->span, im->mem, im->L.size, im->stamp);
         static _Atomic int n; if (h != im->hash && atomic_fetch_add(&n, 1) < 32) { char why[600]; nvn_dirty_debug(im->span, im->mem, im->L.size, im->stamp, why, sizeof why);
             {   // the mapping's protection as the kernel has it (diagnostic)
                 FILE *f = fopen("/proc/self/maps", "re"); char ln[512]; uintptr_t a = (uintptr_t)im->mem;
