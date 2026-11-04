@@ -115,3 +115,5 @@ int main(void) {
     printf("graphics suspend: %d checks, %d failed\n", checks, failures);
     return failures != 0;
 }
+
+void dm_guest_mapping_use(int on) { (void)on; }   // no SVC-managed mappings in this fixture

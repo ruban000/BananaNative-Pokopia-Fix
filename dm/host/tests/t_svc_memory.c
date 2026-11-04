@@ -12,6 +12,7 @@
 static int memory_mprotect(void *addr, size_t size, int prot);
 static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset);
 static _Noreturn void memory_abort(void);
+static int memory_rwlock_wrlock(pthread_rwlock_t *lock);
 static int memory_getpagesize(void) {
 #ifdef TEST_PAGE_16K
     assert(getpagesize() <= 0x4000);
@@ -24,12 +25,15 @@ static int memory_getpagesize(void) {
 #define mprotect memory_mprotect
 #define mmap memory_mmap
 #define abort memory_abort
+#define dm_host_rwlock_wrlock memory_rwlock_wrlock
 #include "../hle_svc.c"
+#undef dm_host_rwlock_wrlock
 #undef abort
 #undef mprotect
 #undef mmap
 #undef getpagesize
 
+__thread _Atomic int dm_host_work;   // scheduler accounting normally defined by hle_nvn.c
 static module_t test_modules[2];
 module_t *g_mod = test_modules;
 int g_nmod;
@@ -366,7 +370,7 @@ static void lazy_commit(void) {
     size_t n = DM_GAME_APP_POOL - DM_GAME_MEM_USED, pg = memory_getpagesize();
     char *resident = malloc(n / pg); assert(resident);
     assert(!pages(1, alias, n));
-    assert(!mincore((void *)alias, n, resident));
+    assert(!mincore((void *)alias, n, (void *)resident));   // char on Darwin, unsigned char on Bionic
     size_t count = 0;
     for (size_t i = 0; i < n / pg; ++i) count += !!(resident[i] & MINCORE_INCORE);
     assert(count < 32); // metadata scans must not fault the anonymous backing in
@@ -503,6 +507,86 @@ static void guest_helper(void) {
     assert(resize(0) == BAD);
     dm_guest_thread_join(tt); assert(helper_freed && !g_nmap && !g_heap_cur);
 }
+// A replay reader must retain the same host mapping from its all-mapped check
+// through a direct upload read. The writer reaches the production SVC's map
+// mutex, then waits on the read transaction; no timing delay is used to pretend
+// an unmap cannot overlap. Nested read_mapped also must work with that writer
+// queued (recursive rwlock acquisition is not portable).
+static _Atomic int release_probe_on, release_probe_entered, release_probe_complete;
+// Linked from t_svc_memory_release.c as the graphics hook. Model a reserved
+// GPU fence whose replay must still read the mapping before it can complete.
+int test_svc_memory_release(uintptr_t lo, uintptr_t hi) {
+    (void)lo; (void)hi;
+    if (!atomic_load(&release_probe_on)) return 0;
+    assert(dm_host_work > 0);
+    atomic_store(&release_probe_entered, 1);
+    while (!atomic_load(&release_probe_complete)) sched_yield();
+    return 0;
+}
+static _Atomic int lease_writer_done, lease_writer_entered;
+static _Atomic(_Atomic int *) lease_writer_host_work;
+static int memory_rwlock_wrlock(pthread_rwlock_t *lock) {
+    if (lock == &g_mapping_use) { atomic_store(&lease_writer_host_work, &dm_host_work); atomic_store(&lease_writer_entered, 1); }
+    return dm_host_rwlock_wrlock(lock);
+}
+static void *lease_unmap(void *arg) {
+    int nested = arg != NULL;
+    assert(!dm_host_work); dm_host_work += nested;
+    if (arg) assert(!resize(0)); else assert(!pages(0, alias, memory_getpagesize()));
+    assert(dm_host_work == nested); dm_host_work -= nested;
+    atomic_store(&lease_writer_done, 1);
+    return NULL;
+}
+static void mapping_lease(int is_heap) {
+    size_t n = memory_getpagesize(); uintptr_t a = is_heap ? heap : alias;
+    if (is_heap) assert(!resize(0x200000)); else assert(!pages(1, a, n));
+    memset((void *)a, 0x5a, n);
+    dm_guest_mapping_use(1);
+    assert(!dm_guest_unmapped(a, n));
+    atomic_store(&lease_writer_done, 0);
+    atomic_store(&lease_writer_entered, 0);
+    pthread_t writer; assert(!pthread_create(&writer, NULL, lease_unmap, is_heap ? &writer : NULL));
+    while (!atomic_load(&lease_writer_entered)) {
+        assert(!atomic_load(&lease_writer_done));
+        sched_yield();
+    }
+    // The guest scheduler must see a blocked native lease as host work.
+    while (atomic_load(atomic_load(&lease_writer_host_work)) != 1 + is_heap) { assert(!atomic_load(&lease_writer_done)); sched_yield(); }
+    assert(!atomic_load(&lease_writer_done));
+    uint8_t *copy = malloc(n); assert(copy);
+    assert(!dm_guest_read_mapped(copy, a, n));
+    for (size_t j = 0; j < n; j++) assert(copy[j] == 0x5a && ((uint8_t *)a)[j] == 0x5a);
+    dm_guest_mapping_use(0);
+    assert(!pthread_join(writer, NULL) && atomic_load(&lease_writer_done));
+    assert(dm_guest_read_mapped(copy, a, n) == n / P);
+    for (size_t j = 0; j < n; j++) assert(!copy[j]);
+    // A new mapping is fresh storage, never a surviving piece of the old read.
+    if (is_heap) assert(!resize(0x200000)); else assert(!pages(1, a, n));
+    assert(!dm_guest_read_mapped(copy, a, n));
+    for (size_t j = 0; j < n; j++) assert(!copy[j]);
+    if (is_heap) assert(!resize(0)); else assert(!pages(0, a, n));
+    free(copy);
+}
+static void release_before_lease(int is_heap) {
+    size_t n = memory_getpagesize(); uintptr_t a = is_heap ? heap : alias;
+    if (is_heap) assert(!resize(0x200000)); else assert(!pages(1, a, n));
+    memset((void *)a, 0x6c, n);
+    atomic_store(&release_probe_on, 1); atomic_store(&release_probe_entered, 0); atomic_store(&release_probe_complete, 0);
+    pthread_t writer; assert(!pthread_create(&writer, NULL, lease_unmap, is_heap ? &writer : NULL));
+    while (!atomic_load(&release_probe_entered)) sched_yield();
+    // If graphics draining held the writer, this replay read would deadlock
+    // with the drain's completion. A process alarm bounds that regression.
+    alarm(5);
+    dm_guest_mapping_use(1);
+    assert(!dm_guest_unmapped(a, n));
+    for (size_t j = 0; j < n; j++) assert(((uint8_t *)a)[j] == 0x6c);
+    dm_guest_mapping_use(0);
+    atomic_store(&release_probe_complete, 1);
+    assert(!pthread_join(writer, NULL));
+    alarm(0);
+    atomic_store(&release_probe_on, 0);
+    assert(dm_guest_unmapped(a, n) == n / P);
+}
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
@@ -516,7 +600,13 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
+    if (argc == 2 && !strcmp(argv[1], "--mapping-lease")) {
+        mapping_lease(0); mapping_lease(1); release_before_lease(0); release_before_lease(1);
+        puts("mapping read lifetime passed (alias release, heap shrink, nested snapshot, remap, drain before writer, blocked scheduler accounting)");
+        return 0;
+    }
     lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
+    mapping_lease(0); mapping_lease(1); release_before_lease(0); release_before_lease(1);
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

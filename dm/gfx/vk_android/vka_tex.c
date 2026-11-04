@@ -1039,8 +1039,33 @@ static void sparse_bind(vka_img *im, VkCommandBuffer cb, int all) {
 }
 static void dirty(int **list, int *n, int *cap, uint8_t **flag, int nslots, int id);
 static int *g_tdirty, g_ntd, g_tdcap; static uint8_t *g_tdflag;
-typedef struct { tex_t t; view_t v; uint8_t has_v, img; uint64_t pgen; } treg_ent;   // pgen: the texture's pool's Initialize serial at registration (nvn_pool_live)
+typedef struct { tex_t t; view_t v; uint8_t has_v, img, finalized; uint64_t pgen, release_seq; } treg_ent;   // pgen: the texture's pool's Initialize serial at registration (nvn_pool_live)
 static treg_ent *g_treg; static int g_ntreg;   // indexed by host texture ID
+static uint64_t g_storage_release_seq;   // diagnostic release ordering, under g_tmu
+// Opt-in ownership evidence at the actual SVC release, before its host mapping
+// changes. No guest bytes are read. The mapping writer excludes upload readers,
+// so the table snapshot can be correlated with registration/finalization and
+// submission progress without another check/copy race.
+void dm_gfx_guest_unmap_note(uintptr_t lo, uintptr_t hi) {
+    if (!VKA_ENV("DM_VK_STORAGE_TRACE", 0)) return;
+    pthread_mutex_lock(&g_tmu);
+    unsigned matches = 0; uint64_t seq = ++g_storage_release_seq;
+    for (int id = 1; id < g_ntreg; id++) {
+        treg_ent *e = &g_treg[id]; uintptr_t a = (uintptr_t)e->t.mem;
+        if (!e->t.serial || !a || a >= hi || e->t.L.size <= lo - (a < lo ? a : lo)) continue;
+        uint64_t gen = nvn_pool_live(e->t.pool, NULL, NULL);
+        if (!gen || gen != e->pgen) continue;
+        e->release_seq = seq;   // remember recycled backing even when a later remap has no holes
+        smap_ent *m = map_get(e->t.serial); vka_img *im = m ? m->im : NULL;
+        if (matches++ < 8) VLOG("storage lifetime: release #%llu %p+%#llx overlaps ID %d serial %llu storage %p+%#llx pool %p gen %llu image %d dirty %d finalized %d gpu %d recorded %llu done %llu",
+            (unsigned long long)seq, (void *)lo, (unsigned long long)(hi - lo), id, (unsigned long long)e->t.serial, (void *)a, (unsigned long long)e->t.L.size,
+            e->t.pool, (unsigned long long)gen, im != NULL, g_tdflag ? g_tdflag[id] : 0, e->finalized, im ? im->gpu_owned : 0,
+            (unsigned long long)vka_fence_last(), (unsigned long long)vka_done());
+    }
+    if (matches > 8) VLOG("storage lifetime: release %p+%#llx overlaps %u registered textures of live pools (first 8 above)", (void *)lo, (unsigned long long)(hi - lo), matches);
+    pthread_mutex_unlock(&g_tmu);
+}
+
 // The image made again from texture level base (caller holds g_tmu): the old image, its memory and views go when the GPU is done with them, and the texture IDs that name it
 // are written again at this submission (vka_tex_prepare); then everything is uploaded
 static uint64_t g_rebase;
@@ -1206,11 +1231,12 @@ void vka_tex_top(char *b, size_t n) {
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     g_lazy_hit = 0;
     if (!t || !t->serial || !vka_ok()) return NULL;
+    nvn_pool_use(1);   // direct attachment/copy callers need the same lifetime as descriptor lookups
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = map_get(t->serial); int made_lazy = 0;
     if (e) {
-        if (e->im || !g_nlazy || lazy_find(t->serial) < 0) { vka_img *im = e->im; pthread_mutex_unlock(&g_tmu); return im; }
-        if (g_first_sampled) { g_lazy_hit = 1; pthread_mutex_unlock(&g_tmu); return NULL; }   // still nothing but zeros
+        if (e->im || !g_nlazy || lazy_find(t->serial) < 0) { vka_img *im = e->im; pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return im; }
+        if (g_first_sampled) { g_lazy_hit = 1; pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return NULL; }   // still nothing but zeros
         lazy_drop(t->serial); made_lazy = 1;   // its first use that is not a sample: the image is made now
     }
     vka_fmt f; vka_img *im = NULL; int throttle = 0, publish = 0;
@@ -1229,6 +1255,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
                 VLOG("texture serial %llu %ux%u layers %u format %#x flags %#x pool flags %#x (%.1f MiB of storage): GPU content first sampled before anything wrote it: no image until the GPU writes it (DM_VK_LAZY)",
                      (unsigned long long)t->serial, t->d.width, t->d.height, t->L.layers, t->d.format, t->d.flags, pool_flags(t->pool), t->L.size / 1048576.0);
             pthread_mutex_unlock(&g_tmu);
+            nvn_pool_use(0);
             return NULL;
         }
         if (!im && (im = img_create(t, &f, base))) {
@@ -1253,6 +1280,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     map_put(t->serial, im);
     pthread_mutex_unlock(&g_tmu);
     if (publish) lazy_publish(im);
+    nvn_pool_use(0);
     if (throttle) vka_up_throttle();
     return im;
 }
@@ -1442,6 +1470,10 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
 void mtl_tex_init(const tex_t *t) { (void)t; }
 void mtl_tex_release(tex_t *t) {
     pthread_mutex_lock(&g_tmu);
+    // Diagnostic only: NVN descriptors contain their own texture description,
+    // so finalizing the source object alone is not a reason to invalidate them.
+    if (VKA_ENV("DM_VK_STORAGE_TRACE", 0))
+        for (int id = 1; id < g_ntreg; id++) if (g_treg[id].t.serial == t->serial) g_treg[id].finalized = 1;
     smap_ent *e = map_get(t->serial); vka_img *im = e ? e->im : NULL;
     if (e) map_del(t->serial);
     cpuw_take(t->serial, 0);
@@ -1560,7 +1592,7 @@ static void treg(int id, const tex_t *t, const view_t *v, int img) {
     if (id < 0 || id >= (1 << 20)) return;
     pthread_mutex_lock(&g_tmu);
     if (id >= g_ntreg) { int n = g_ntreg ? g_ntreg : 1024; while (n <= id) n *= 2; g_treg = realloc(g_treg, (size_t)n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (size_t)(n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
-    treg_ent *e = &g_treg[id]; e->t = *t; e->has_v = v != NULL; if (v) e->v = *v; e->img = (uint8_t)img; e->pgen = nvn_pool_live(t->pool, NULL, NULL);
+    treg_ent *e = &g_treg[id]; e->t = *t; e->has_v = v != NULL; if (v) e->v = *v; e->img = (uint8_t)img; e->finalized = 0; e->release_seq = 0; e->pgen = nvn_pool_live(t->pool, NULL, NULL);
     dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id);
     if (!g_tver) g_tver = calloc(1 << 20, sizeof *g_tver);
     if (g_tver) atomic_fetch_add_explicit(&g_tver[id], 1, memory_order_release);
@@ -1707,6 +1739,19 @@ static int write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDesc
     nvn_pool_use(1);
     g_first_sampled = !e->img;   // (a texture ID in the sampled table: a first use here is a sample, nvn2_sampled_content)
     g_lazy_hit = 0;
+    if (VKA_ENV("DM_VK_STORAGE_TRACE", 0) && e->t.mem) {
+        uint64_t holes = dm_guest_unmapped((uintptr_t)e->t.mem, e->t.L.size), released = e->release_seq;
+        // The local descriptor copy can predate a release while it waits for
+        // the lease. Read its diagnostic marker again under the table lock.
+        pthread_mutex_lock(&g_tmu);
+        int replaced = g_treg[id].t.serial != e->t.serial || g_treg[id].pgen != e->pgen;
+        if (!replaced) released = g_treg[id].release_seq;
+        pthread_mutex_unlock(&g_tmu);
+        if (holes || released || replaced) VLOG("storage lifetime: descriptor ID %d serial %llu storage %p+%#llx pool %p registered-gen %llu current-gen %llu finalized %d holes %llu release #%llu replaced %d recorded %llu done %llu",
+            id, (unsigned long long)e->t.serial, e->t.mem, (unsigned long long)e->t.L.size, e->t.pool, (unsigned long long)e->pgen,
+            (unsigned long long)nvn_pool_live(e->t.pool, NULL, NULL), e->finalized, (unsigned long long)holes, (unsigned long long)released, replaced,
+            (unsigned long long)vka_fence_last(), (unsigned long long)vka_done());
+    }
     vka_img *im = treg_dead(id, e) ? NULL : vka_tex_get(&e->t, cb);
     int lazy = !im && g_lazy_hit && !e->img;   // deferred (Deferred images): a null descriptor, zeros, until the image is made
     g_first_sampled = 0;

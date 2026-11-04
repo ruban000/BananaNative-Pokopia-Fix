@@ -19,6 +19,24 @@ static inline int dm_host_mutex_lock(pthread_mutex_t *mutex) {
     dm_host_work--;
     return r;
 }
+// Reader/writer leases can block guest HLE calls behind replay or completion
+// work too. Only contention leaves guest scheduling; nested host work survives.
+static inline int dm_host_rwlock_rdlock(pthread_rwlock_t *lock) {
+    int r = pthread_rwlock_tryrdlock(lock);
+    if (r != EBUSY && r != EAGAIN) return r;
+    dm_host_work++;
+    r = pthread_rwlock_rdlock(lock);
+    dm_host_work--;
+    return r;
+}
+static inline int dm_host_rwlock_wrlock(pthread_rwlock_t *lock) {
+    int r = pthread_rwlock_trywrlock(lock);
+    if (r != EBUSY) return r;
+    dm_host_work++;
+    r = pthread_rwlock_wrlock(lock);
+    dm_host_work--;
+    return r;
+}
 // Joining a native helper releases the guest core while that helper finishes; preserve any enclosing host-work scope.
 static inline int dm_host_thread_join(pthread_t thread, void **result) {
     dm_host_work++;
@@ -156,6 +174,7 @@ void dm_guest_write_prepare(void *addr, size_t len);
 void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the guest heap's base and opened length (guest addresses), 0 / 0 when none
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: hole-free guest heap read for the cheat VM (under the memory lock); 0 = ok, 1 = a byte outside the opened span
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)
+void dm_guest_mapping_use(int on);   // pin heap/alias mappings across host reads (nestable per thread); do not call SVCs or heap_read/write while held
 uint64_t dm_guest_unmapped(uintptr_t a, size_t n);   // hle_svc.c: 4 KiB pages of [a, a+n) the guest has not mapped (alias region pages not mapped, heap past its opened size); 0 outside those regions
 uint64_t dm_guest_read_mapped(void *dst, uintptr_t a, size_t n);   // hle_svc.c: [a, a+n) into dst, pages the guest has not mapped as zeros (they are inaccessible: never read); → those pages
 // Cheats (hle_cheats.c): Atmosphère-format cheat code files applied to the running game (docs/development.md "Cheats")

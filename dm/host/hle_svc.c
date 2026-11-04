@@ -40,6 +40,7 @@ int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_
 // each page range before it is opened, and the give-back (1 = done there). No-ops on the Apple builds
 __attribute__((weak)) void dm_gfx_guest_region(void *base, size_t size, const char *name) { (void)base; (void)size; (void)name; }
 __attribute__((weak)) void dm_gfx_guest_open(void *lo, size_t n) { (void)lo; (void)n; }
+__attribute__((weak)) void dm_gfx_guest_unmap_note(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; }
 __attribute__((weak)) int dm_gfx_guest_release(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; return 0; }
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
@@ -114,19 +115,31 @@ static uint8_t g_seen[256];
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
 static int g_nmap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+// Replay may scan and deswizzle mapped storage long after a guest call returned.
+// Keep the mapping (including its bitmap) stable over that whole read, not just
+// the permission query. Writers hold g_map_lock first, then this lock, through
+// both the host mapping change and metadata publication. Readers never acquire
+// g_map_lock. Nesting permits read_mapped inside a larger upload transaction
+// without recursively acquiring a rwlock when a writer is waiting.
+static pthread_rwlock_t g_mapping_use = PTHREAD_RWLOCK_INITIALIZER;
+static _Thread_local unsigned g_mapping_reads;
+void dm_guest_mapping_use(int on) {
+    if (on) { if (!g_mapping_reads++) dm_host_rwlock_rdlock(&g_mapping_use); }
+    else { if (!g_mapping_reads) die("unbalanced guest mapping read transaction"); if (!--g_mapping_reads) pthread_rwlock_unlock(&g_mapping_use); }
+}
 // A hole-free read / write of guest heap bytes for the cheat VM (hle_cheats.c): under g_map_lock no concurrent SetHeapSize
 // can mprotect the span away between the bounds check and the copy (both hold this same lock), so a live heap address cannot
 // turn into a fault while the cheat VM touches it. Both return 0 when every byte was inside the currently opened (readable
 // and writable) span, 1 otherwise. The address is the guest heap address the cheat VM computed (heap base + rel + offset register)
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len) {
-    pthread_mutex_lock(&g_map_lock);
+    dm_host_mutex_lock(&g_map_lock);
     int out = !dm_guest_heap_readable(addr, len);
     if (!out) { dm_guest_write_prepare((void *)(uintptr_t)addr, len); memcpy((void *)(uintptr_t)addr, src, len); }
     pthread_mutex_unlock(&g_map_lock);
     return out;
 }
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len) {
-    pthread_mutex_lock(&g_map_lock);
+    dm_host_mutex_lock(&g_map_lock);
     int bad = !dm_guest_heap_readable(addr, len);
     if (!bad) memcpy(out, (void *)(uintptr_t)addr, len);
     pthread_mutex_unlock(&g_map_lock);
@@ -165,7 +178,8 @@ static int64_t alias_unmapped(uint64_t off, uint64_t n) {
 }
 static _Atomic int64_t g_alias_mapped;   // bytes mapped in the alias region (page bitmap)
 // Readers of guest memory on the host's behalf that the guest names by address (the Vulkan replay's texture uploads from pool storage): a page the guest has not mapped
-// is inaccessible here (PROT_NONE), so it is read as zeros instead. No lock: the bitmap is read atomically, and a page unmapped during the copy is the guest's race
+// is inaccessible here (PROT_NONE), so it is read as zeros instead. A standalone query is only a snapshot; callers dereferencing
+// after it must hold dm_guest_mapping_use across the query and the complete read. read_mapped takes that transaction itself.
 static int guest_page_mapped(uintptr_t p) {   // p: a guest address (page aligned)
     uintptr_t al = (uintptr_t)g_alias, hp = (uintptr_t)g_heap;
     if (g_alias && p >= al && p - al < g_alias_cap) { uint64_t i = (p - al) >> 12; return (int)(atomic_load(&g_alias_bits[i >> 6]) >> (i & 63) & 1); }
@@ -179,11 +193,13 @@ uint64_t dm_guest_unmapped(uintptr_t a, size_t n) {
 }
 uint64_t dm_guest_read_mapped(void *dst, uintptr_t a, size_t n) {
     uint64_t c = 0; uint8_t *d = dst;
+    dm_guest_mapping_use(1);
     for (uintptr_t p = a; p < a + n; ) {
         uintptr_t e = (p & ~(uintptr_t)0xFFF) + 0x1000; if (e > a + n) e = a + n;
         if (guest_page_mapped(p & ~(uintptr_t)0xFFF)) memcpy(d + (p - a), (const void *)p, e - p); else { memset(d + (p - a), 0, e - p); c++; }
         p = e;
     }
+    dm_guest_mapping_use(0);
     return c;
 }
 
@@ -216,8 +232,20 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // out of phys_footprint, and madvise(MADV_FREE) does nothing to pages that are not writable, though it returns 0 (1 GiB on the Mac: 1,024 MiB still resident and dirty; this: 0).
 // A memory pool's no-copy buffer over the range keeps the old pages for the GPU work still using it until the buffer goes. Returns 1 when the range now holds zero pages;
 // on failure the range is only inaccessible, with its old bytes
-static int guest_release(uintptr_t lo, uintptr_t hi) {
-    if (dm_gfx_guest_release(lo, hi)) return 1;
+// Graphics teardown is a separate, byte-preserving phase before the mapping
+// writer: it may wait for a reserved GPU fence whose replay still needs readers.
+// g_map_lock keeps the SVC transaction serialized while graphics drains. Backend
+// placed-map swaps use their existing swap hooks; this lease covers the final
+// destructive SVC mapping change and bitmap publication, not Vulkan allocation.
+static int guest_release_prepare(uintptr_t lo, uintptr_t hi) {
+    dm_host_work++;
+    int zero = dm_gfx_guest_release(lo, hi);
+    dm_host_work--;
+    return zero;
+}
+static int guest_release(uintptr_t lo, uintptr_t hi, int zero) {
+    dm_gfx_guest_unmap_note(lo, hi);   // mapping writer held: no upload can overlap this notification
+    if (zero) return 1;
     if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) return 1;
     static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), errno);
     if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
@@ -294,7 +322,7 @@ static int map_source_backed(uint64_t src, uint64_t size) {
     return perm == 3 && hi >= lo && memory_contains(lo, hi - lo, off, size);
 }
 int svc_nro_deactivate(module_t *m) {
-    pthread_mutex_lock(&g_map_lock);
+    dm_host_mutex_lock(&g_map_lock);
     uint64_t base = (uintptr_t)m->base;
     for (int i = 0; i < g_nmap; i++)
         if (g_map[i].src < base + m->size && base < g_map[i].src + g_map[i].size) {
@@ -327,7 +355,7 @@ static void *alias_windows_thread(void *arg) {
     for (;;) {
         sleep(30);
         char line[8192] = {0}; size_t o = 0; uint64_t tot = 0;
-        pthread_mutex_lock(&g_map_lock);
+        dm_host_mutex_lock(&g_map_lock);
         for (uint64_t w = a0 & ~(win - 1); w < a1 && o < sizeof line - 64; w += win) {
             uint64_t n = 0, p0 = (w > a0 ? w - a0 : 0) >> 12, p1 = ((w + win < a1 ? w + win : a1) - a0) >> 12;
             for (uint64_t p = p0; p < p1; p++) n += atomic_load(&g_alias_bits[p >> 6]) >> (p & 63) & 1;
@@ -461,7 +489,7 @@ static void *regions_thread(void *arg) {
         if (f) {
             fprintf(f, "# alias region %#llx; offset\tsize\treturns to\tmapped\tfirst opened\tend of the last opened (region-relative; - = none)\tvia (sdk offset)\n", (unsigned long long)g_alias_cap);
             pthread_mutex_lock(&g_rgn_lock); int n = g_nrgn; region_t *t = malloc(sizeof *t * (size_t)(n ? n : 1)); if (t && n) memcpy(t, g_rgn, sizeof *t * (size_t)n); pthread_mutex_unlock(&g_rgn_lock);
-            pthread_mutex_lock(&g_map_lock);
+            dm_host_mutex_lock(&g_map_lock);
             for (int i = 0; t && i < n; i++) {
                 uint64_t lo = t[i].off, hi = t[i].off + t[i].size > g_alias_cap ? g_alias_cap : t[i].off + t[i].size, mapped = bits_set(g_alias_bits, lo >> 12, hi >> 12);
                 int64_t first, last; bits_span(g_alias_exposed, lo / hpg, (hi + hpg - 1) / hpg, &first, &last);
@@ -491,7 +519,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // Larger than the heap region: ResultOutOfMemory (0xD001), as Horizon's KPageTable::SetHeapSize returns. nn::os::SetMemoryHeapSize turns only that, 103 and LimitReached into
         // os::ResultOutOfMemory and aborts on anything else; Donkey Kong Country: Tropical Freeze finds its heap size by a binary search between 3 and 6 GB, which needs the error back
         if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD001; return 0; }
-        pthread_mutex_lock(&g_map_lock);
+        dm_host_mutex_lock(&g_map_lock);
         size_t previous = g_heap_cur, image = image_bytes();
         if (size < previous && map_source_busy((uintptr_t)g_heap + size, previous - size)) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0;
@@ -507,19 +535,22 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (DM_GAME_MEM_MAP_LIMIT && (charged > APP_POOL || size > APP_POOL - charged)) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
+        int released = size < g_heap_cur ? guest_release_prepare((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur) : 0;
+        dm_host_rwlock_wrlock(&g_mapping_use);
         int rc = 0;
         if (size > g_heap_cur) { dm_gfx_guest_open(g_heap + g_heap_cur, size - g_heap_cur); rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE); }
-        else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur);
+        else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur, released);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         else if (size > g_heap_cur) LOG("[mem] heap %.2f GB (heap region %.2f GB)", size / 1073741824.0, g_heap_cap / 1073741824.0);
         g_heap_cur = size;
+        pthread_rwlock_unlock(&g_mapping_use);
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = 0; regs[1] = (uint64_t)g_heap; return 0;
     }
     case 0x02: case 0x03: { // Permission/attribute stubs must not modify a borrowed source.
         uint64_t addr = regs[0], size = regs[1];
-        pthread_mutex_lock(&g_map_lock);
+        dm_host_mutex_lock(&g_map_lock);
         int busy = size > UINT64_MAX - addr || (size && map_source_busy(addr, size));
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = busy ? 0xD401 : 0; return 0;
@@ -528,7 +559,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint64_t dst = regs[0], src = regs[1], size = regs[2];
         uint32_t result = map_arguments(dst, src, size);
         if (result) { regs[0] = result; return 0; }
-        pthread_mutex_lock(&g_map_lock);
+        dm_host_mutex_lock(&g_map_lock);
         if (map_find(dst, size) || map_source_busy(src, size) || !map_source_backed(src, size)) result = 0xD401;
         else if (g_nmap == MAX_MAP) result = 0xCE01;
         if (result) { pthread_mutex_unlock(&g_map_lock); regs[0] = result; LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); return 0; }
@@ -547,7 +578,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint64_t dst = regs[0], src = regs[1], size = regs[2];
         uint32_t result = map_arguments(dst, src, size);
         if (result) { regs[0] = result; return 0; }
-        pthread_mutex_lock(&g_map_lock);
+        dm_host_mutex_lock(&g_map_lock);
         int k = map_find(dst, size);
         if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) {
             pthread_mutex_unlock(&g_map_lock); LOG("UnmapMemory does not match a mapping %#llx+%#llx", dst, size); regs[0] = 0xD401; return 0; }
@@ -564,7 +595,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint64_t base, size, state, perm;
         uint32_t attr = 0;
         int k;
-        pthread_mutex_lock(&g_map_lock);   // the registry branches read g_map; the other branches are cheap, so the lock simply spans the whole chain
+        dm_host_mutex_lock(&g_map_lock);   // the registry branches read g_map; the other branches are cheap, so the lock simply spans the whole chain
         uint64_t ab = (uintptr_t)g_alias, ae = ab + g_alias_cap, rb = 0, rn = 0;
         int mapped = 0, in_alias = addr >= ab && addr < ae;
         if (in_alias) alias_query(addr, &rb, &rn, &mapped);
@@ -636,7 +667,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (!size || ((a | size) & 0xfff) || !memory_contains((uintptr_t)g_alias, g_alias_cap, a, size)) {
             LOG("SVC %#x outside the alias region %p+%#zx", num, (void *)a, size); regs[0] = 0xD401; return 0;
         }
-        pthread_mutex_lock(&g_map_lock);
+        dm_host_mutex_lock(&g_map_lock);
         // The SDK extends committed windows across borrowed stack sources
         // (Raging Loop, StandardAllocator). Recommit preserves every live byte;
         // only decommit can invalidate backing required for eventual copyback.
@@ -667,13 +698,15 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             if ((lo - mlo) / 4096 != (uint64_t)alias_unmapped(mlo - (uintptr_t)g_alias, lo - mlo)) mlo += pg;
             if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
         }
+        int released = !commit && changed && mhi > mlo ? guest_release_prepare(mlo, mhi) : 0;
+        dm_host_rwlock_wrlock(&g_mapping_use);
         if (changed && mhi > mlo) {
             if (commit) {
                 dm_gfx_guest_open((void *)mlo, mhi - mlo);
                 if (mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE))
                     die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
                 dm_guest_write_prepare((void *)mlo, mhi - mlo);
-            } else if (guest_release(mlo, mhi)) {   // fresh zero pages: alias_initialize has nothing to clear when they are mapped again
+            } else if (guest_release(mlo, mhi, released)) {   // fresh zero pages: alias_initialize has nothing to clear when they are mapped again
                 for (uint64_t h = (mlo - (uintptr_t)g_alias) / pg, last = (mhi - 1 - (uintptr_t)g_alias) / pg; h <= last; ++h)
                     g_alias_exposed[h >> 6] &= ~(UINT64_C(1) << (h & 63));
             }
@@ -687,6 +720,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // Total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing. Counted with a page bitmap, only pages whose state really changed --
         // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
         { int64_t d = alias_pages(off, size, commit) * 4096, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
+          pthread_rwlock_unlock(&g_mapping_use);
           pthread_mutex_unlock(&g_map_lock);
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
@@ -715,7 +749,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;   break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
-        case I_UsedMem:  case I_UsedNonSys:  pthread_mutex_lock(&g_map_lock);
+        case I_UsedMem:  case I_UsedNonSys:  dm_host_mutex_lock(&g_map_lock);
                                              v = g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes();   // profile mem_used, 64 MB unless the game needs more (see mem_used in dm/games/README.md)
                                              // with mem_map_limit, the pages mapped in the alias region count too, as on Horizon (the limit in MapPhysicalMemory is the pool less this)
                                              if (DM_GAME_MEM_MAP_LIMIT) v += (uint64_t)atomic_load(&g_alias_mapped);

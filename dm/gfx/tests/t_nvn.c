@@ -929,3 +929,5 @@ int main(void) {
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }
+
+void dm_guest_mapping_use(int on) { (void)on; }   // no SVC-managed mappings in this fixture

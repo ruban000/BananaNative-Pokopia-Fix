@@ -344,7 +344,14 @@ typedef struct { const pool_t *p; uint64_t gen; } plive;
 static plive *g_pl; static uint32_t g_npl, g_cpl; static uint64_t g_plgen;   // open addressing, g_cpl a power of two; p == (void *)1: a deleted slot; g_npl: used slots, deleted ones included
 static pthread_mutex_t g_pl_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t g_pl_use = PTHREAD_RWLOCK_INITIALIZER;
-void nvn_pool_use(int on) { if (on) pthread_rwlock_rdlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); }   // (never taken twice by one thread: a waiting writer would block the second)
+static _Thread_local unsigned g_pl_reads;
+void nvn_pool_use(int on) {
+    // Pool liveness alone cannot pin its storage: SVC UnmapPhysicalMemory and
+    // SetHeapSize can release it without finalizing the pool. Mapping lifetime
+    // precedes pool and texture locks; nested texture lookups share the lease.
+    if (on) { if (!g_pl_reads++) { dm_guest_mapping_use(1); dm_host_rwlock_rdlock(&g_pl_use); } }
+    else { if (!g_pl_reads) die("unbalanced NVN pool read transaction"); if (!--g_pl_reads) { pthread_rwlock_unlock(&g_pl_use); dm_guest_mapping_use(0); } }
+}
 static uint32_t pl_hash(const pool_t *p) { uint64_t h = (uint64_t)(uintptr_t)p * 0x9E3779B97F4A7C15ull; return (uint32_t)(h >> 32); }
 static _Atomic uint64_t g_plfin;   // pools finalized (or initialized again at a live pool's address) so far: nvn_pool_fin
 uint64_t nvn_pool_fin(void) { return atomic_load_explicit(&g_plfin, memory_order_acquire); }
@@ -379,9 +386,11 @@ uint64_t nvn_pool_live(const void *pool, unsigned *flags, int *sparse) {
 }
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
+    dm_host_rwlock_wrlock(&g_pl_use);   // reinitialization must exclude existing storage readers too
     pthread_mutex_lock(&g_pl_mu);   // (a pool initialized again without a Finalize: readers see its new fields only with its new serial)
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     pl_put(o, ++g_plgen); pthread_mutex_unlock(&g_pl_mu);
+    pthread_rwlock_unlock(&g_pl_use);   // placement may wait for a fence whose replay needs this lease
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); pc_add(o); }
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
@@ -390,7 +399,7 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     return 1;
 }
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
-NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { pthread_rwlock_wrlock(&g_pl_use); pl_del((const pool_t *)p); pthread_rwlock_unlock(&g_pl_use); pc_del((const pool_t *)p); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
+NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { dm_host_rwlock_wrlock(&g_pl_use); pl_del((const pool_t *)p); pthread_rwlock_unlock(&g_pl_use); pc_del((const pool_t *)p); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); } mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0; }
 static void ft_flush(const uint8_t *a, uint64_t n);

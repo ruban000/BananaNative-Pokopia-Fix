@@ -262,17 +262,17 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
-MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
+MEM_DEPS = t_svc_memory.c t_svc_memory_release.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
 $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_unlimited: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=0 -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=0 -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_16k: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=address,undefined -DTEST_PAGE_16K -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=address,undefined -DTEST_PAGE_16K -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_tsan: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=thread -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=thread -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_dirty: $(MEM_DEPS) ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h | $(B)
-	$(CLANG) $(MEM_FLAGS) -DTEST_REAL_DIRTY -o $@ t_svc_memory.c ../../gfx/nvn/nvn_dirty.c
+	$(CLANG) $(MEM_FLAGS) -DTEST_REAL_DIRTY -o $@ t_svc_memory.c t_svc_memory_release.c ../../gfx/nvn/nvn_dirty.c
 .PHONY: memory memory-tsan memory-dirty memory-profile
 memory: $(B)/t_svc_memory $(B)/t_svc_memory_unlimited $(B)/t_svc_memory_16k
 	$(B)/t_svc_memory
