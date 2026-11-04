@@ -141,6 +141,7 @@ static void stats_line(uint64_t f) {
          (b->bar - a->bar) / k, (b->ops - a->ops) / k, (b->subs - a->subs) / k, (b->rec_ns - a->rec_ns) / 1e6 / k, ng ? gpu / ng : -1.0, ng, placed / 1e6, peak / 1e6, img / 1e6, img_n, img_gw / 1e6, (img - img_gw) / 1e6, sn ? sw : " none");
     { char ab[400]; vka_tex_alias_stats(ab, sizeof ab); VLOG("ctl: %s", ab); }
     { char im[400]; vka_imem_stats(im, sizeof im); VLOG("ctl: %s", im); }
+    { char tp[1400]; vka_tex_top(tp, sizeof tp); VLOG("ctl: %s", tp); }
 }
 void vka_ctl_frame(uint64_t f) {   // mtl_set_frame: frame f begins
     snap(&g_rec[f % NREC], f);

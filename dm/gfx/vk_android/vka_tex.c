@@ -147,13 +147,13 @@ uint64_t vka_tex_mem(int *n, uint64_t *gpu_written) {
 // its storage would overwrite the guest's block-linear bytes with the driver's layout, so a texture the CPU rewrites in part (streamed mip levels) would re-upload garbage;
 // only content no CPU write follows is a candidate (docs/reference/rendering.md "Images filled from pool storage hold texture bytes twice on the Vulkan replay")
 void vka_tex_alias_stats(char *b, size_t n) {
-    uint64_t by[3][2] = {{0}}, gw = 0; int cnt[3] = {0};
+    uint64_t by[4][2] = {{0}}, gw = 0; int cnt[4] = {0};   // [mode]: ST_ZERO, ST_FILL, ST_TRACK, ST_SPARSE
     pthread_mutex_lock(&g_tmu);
     for (int i = 0; i < g_nlive; i++) { const vka_img *im = g_live[i]; if (im->gpu_owned) { gw += im->bytes; continue; }
-        int m = im->mode < 3 ? im->mode : 0; by[m][0] += im->bytes; cnt[m]++; if (im->pool_fit) by[m][1] += im->bytes; }
+        int m = im->mode < 4 ? im->mode : 0; by[m][0] += im->bytes; cnt[m]++; if (im->pool_fit) by[m][1] += im->bytes; }
     pthread_mutex_unlock(&g_tmu);
-    snprintf(b, n, "images not GPU-written: cleared %.0f MB (%d, %.0f MB would fit their storage), filled once %.0f MB (%d, %.0f MB fit), tracked %.0f MB (%d, %.0f MB fit); GPU-written %.0f MB",
-             by[0][0] / 1e6, cnt[0], by[0][1] / 1e6, by[1][0] / 1e6, cnt[1], by[1][1] / 1e6, by[2][0] / 1e6, cnt[2], by[2][1] / 1e6, gw / 1e6);
+    snprintf(b, n, "images not GPU-written: cleared %.0f MB (%d, %.0f MB would fit their storage), sparse from their mapped pages %.0f MB (%d), filled once %.0f MB (%d, %.0f MB fit), tracked %.0f MB (%d, %.0f MB fit); GPU-written %.0f MB",
+             by[0][0] / 1e6, cnt[0], by[0][1] / 1e6, by[3][0] / 1e6, cnt[3], by[1][0] / 1e6, cnt[1], by[1][1] / 1e6, by[2][0] / 1e6, cnt[2], by[2][1] / 1e6, gw / 1e6);
 }
 static size_t hslot(uint64_t s, size_t cap) { return (size_t)((s * 0x9E3779B97F4A7C15ull) >> 20) & (cap - 1); }
 static smap_ent *map_get(uint64_t s) { if (!g_mapcap) return NULL; for (size_t i = hslot(s, g_mapcap);; i = (i + 1) & (g_mapcap - 1)) { if (g_map[i].serial == s) return &g_map[i]; if (!g_map[i].serial) return NULL; } }
@@ -586,7 +586,7 @@ static int nvn2_sampled_content(const tex_t *t, const vka_fmt *f, unsigned pf, i
     if (d->flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
     return !gpu_image_over(t->mem);
 }
-static uint64_t g_nvn2_first[2];   // textures taken from their storage at a first sample (nvn2_sampled_content): [0] with data, [1] storage all zero (tracked from zeros)
+static uint64_t g_nvn2_first[2], g_nvn2_zero_bytes;   // textures taken from their storage at a first sample (nvn2_sampled_content): [0] with data, [1] storage all zero (tracked from zeros)
 static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int cpuw, int sampled) {   // c: the storage's content as the GPU will see it (t->mem or gw_content's copy)
     const nvn_texdesc *d = &t->d;
     if (!t->mem || d->samples > 1 || f->kind >= 3 || d->target == NVN_TEXTURE_TARGET_BUFFER) return ST_ZERO;
@@ -601,7 +601,7 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
     else if (linear && t->pool) want = ST_TRACK;
     else if (comp && !(d->flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_SPARSE)) && mem_any_mapped(c, t)) want = ST_TRACK;
     else if (nvn2_sampled_content(t, f, pf, sampled)) {
-        int any = mem_any_mapped(c, t); uint64_t k = g_nvn2_first[!any]++; want = ST_TRACK;
+        int any = mem_any_mapped(c, t); uint64_t k = g_nvn2_first[!any]++; want = ST_TRACK; if (!any) g_nvn2_zero_bytes += t->L.size;
         if (any && k < 4) VLOG("texture serial %llu %ux%ux%u format %#x pool flags %#x: written by the CPU before its first use, a sample (NVN2): uploaded from its storage, re-uploaded when it changes (%llu so far, %llu more with empty storage)",
                                (unsigned long long)t->serial, d->width, d->height, d->depth, d->format, pf, (unsigned long long)k + 1, (unsigned long long)g_nvn2_first[1]);
     }
@@ -1091,18 +1091,116 @@ static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int c
     if (cb) vka_barrier(cb);
 }
 
+// ---------- Deferred images: GPU content nothing has written yet ----------
+// The texture pool's descriptors are written for every registered texture ID at the next submission (vka_tex_prepare → write_tex), so every texture the game registers got an
+// image of its whole size at once, whether or not anything ever draws into it or samples it. A texture whose content is the GPU's (storage_mode ST_ZERO: a render target, a
+// shader image, a GPU-written sparse texture) starts as zero texels, and until the GPU writes it a sample reads zeros whatever its size. Mario Kart World registers its ten
+// sparse terrain render targets (four 16384² R8, four 8192² RG16, two 8192² R16; 3.0 GB dense on a device without sparse residency, the Adreno 740 with Turnip) at its world map
+// and draws none of them there. So a texture whose first use is a sample (the sampled table or a draw's sampled binding, g_first_sampled) and whose content would be ST_ZERO gets
+// no image: its descriptor is a null descriptor (robustness2 nullDescriptor: reads return zeros), its serial is in the map with no image, and the texture is kept here. Its
+// first use of any other kind (a render target, a copy or clear destination, a shader image, a capture) makes the image as before (cleared), and the texture IDs that name
+// it are written at once (lazy_publish): the descriptors are update-after-bind, so the draws already recorded in this submission read the new image, which is zeros until the
+// GPU's first write in submission order, as the null descriptor did. Textures of the same storage and shape share the image as before. A CPU write to a deferred texture's
+// storage (WriteTexels) makes it storage content again (mtl_tex_cpu_written). Not deferred: depth / stencil formats (a depth comparison against a null descriptor is not the
+// comparison against a cleared depth texture), compressed formats (their first content is their storage, upload_fill), multisampled textures, textures under DM_VK_LAZY_MB
+// (default 1 MiB). Differences from a cleared image while deferred: a size query reads 0, and the alpha of a format without alpha reads 0 instead of 1. DM_VK_LAZY=0 turns it off
+typedef struct { tex_t t; vka_fmt f; } lazy_ent;
+static VkDescriptorSet g_set; static uint32_t g_ntex_slots;   // (Descriptor tables, below)
+static VkImageView view_of(const treg_ent *e, vka_img *im, int vt_want, int storage);
+static lazy_ent *g_lazy; static int g_nlazy, g_lazycap; static uint64_t g_lazy_made, g_lazy_made_bytes, g_lazy_total;   // (under g_tmu)
+static _Thread_local int g_lazy_hit;   // vka_tex_get returned no image because the texture is deferred
+static int lazy_find(uint64_t serial) { for (int i = 0; i < g_nlazy; i++) if (g_lazy[i].t.serial == serial) return i; return -1; }
+static int lazy_drop(uint64_t serial) { int i = lazy_find(serial); if (i >= 0) g_lazy[i] = g_lazy[--g_nlazy]; return i >= 0; }
+static int cpuw_has(uint64_t s) {
+    if (!g_cpuwcap) return 0;
+    for (size_t i = hslot(s, g_cpuwcap);; i = (i + 1) & (g_cpuwcap - 1)) { if (g_cpuw[i] == s) return 1; if (!g_cpuw[i]) return 0; }
+}
+static int lazy_ok(const tex_t *t, const vka_fmt *f) {   // caller holds g_tmu (and nvn_pool_use, as for the first use)
+    static int on = -1; if (on < 0) on = V.null_desc && VKA_ENV("DM_VK_LAZY", 1) != 0;
+    const nvn_texdesc *d = &t->d;
+    if (!on || !t->mem || f->kind >= 3 || compressed(f) || d->samples > 1 || d->target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if ((double)t->L.size < VKA_ENVF("DM_VK_LAZY_MB", 1.0) * 1048576.0 || cpuw_has(t->serial)) return 0;
+    uint64_t seen; uint8_t *c = !(t->pool && pool_sparse(t->pool)) ? gw_content(t->mem, t->L.size, &seen) : NULL;
+    int mode = storage_mode(t, c ? c : t->mem, f, 0, 1);
+    free(c);
+    return mode == ST_ZERO;
+}
+// The texture IDs whose texture is im's, written now with im's views (sampled table; see above). Called without g_tmu
+static void lazy_publish(vka_img *im) {
+    if (!g_set) return;
+    int *ids = NULL, n = 0, cap = 0;
+    pthread_mutex_lock(&g_tmu);
+    for (int id = 1; id < g_ntreg && id < (int)g_ntex_slots; id++) {
+        if (!g_treg[id].t.serial || g_treg[id].img) continue;
+        smap_ent *e = map_get(g_treg[id].t.serial); if (!e || e->im != im) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 16; ids = realloc(ids, (size_t)cap * sizeof *ids); }
+        ids[n++] = id;
+    }
+    pthread_mutex_unlock(&g_tmu);
+    for (int k = 0; k < n; k++) {
+        pthread_mutex_lock(&g_tmu); treg_ent e = g_treg[ids[k]]; pthread_mutex_unlock(&g_tmu);
+        VkImageView v = view_of(&e, im, -1, 0); if (!v) continue;
+        VkDescriptorImageInfo ii = {VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_set, .dstBinding = 0, .dstArrayElement = (uint32_t)ids[k], .descriptorCount = 1,
+                                  .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &ii};
+        vk.vkUpdateDescriptorSets(V.dev, 1, &w, 0, NULL);
+    }
+    static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 16)
+        VLOG("deferred texture serial %llu %ux%u layers %u format %#x flags %#x: first written by the GPU, its image made (%.1f MiB), %d texture IDs written", (unsigned long long)im->serial,
+             im->d.width, im->d.height, im->layers, im->d.format, im->d.flags, im->bytes / 1048576.0, n);
+    free(ids);
+}
+int vka_tex_id_lazy(int id) {   // texture ID id's texture is deferred (no image yet: reads zeros)
+    pthread_mutex_lock(&g_tmu);
+    int r = id > 0 && id < g_ntreg && g_treg[id].t.serial && lazy_find(g_treg[id].t.serial) >= 0;
+    pthread_mutex_unlock(&g_tmu);
+    return r;
+}
+
+// The largest live images and the deferred textures (ctl stats): what the image memory is
+void vka_tex_top(char *b, size_t n) {
+    enum { K = 12 }; const vka_img *t[K] = {0}; size_t o = 0; uint64_t lz = 0;
+    pthread_mutex_lock(&g_tmu);
+    for (int i = 0; i < g_nlive; i++) { const vka_img *im = g_live[i]; int k = K;
+        while (k > 0 && (!t[k - 1] || t[k - 1]->bytes < im->bytes)) k--;
+        if (k < K) { memmove(&t[k + 1], &t[k], (size_t)(K - 1 - k) * sizeof *t); t[k] = im; } }
+    for (int i = 0; i < g_nlazy; i++) lz += g_lazy[i].t.L.size;
+    o += (size_t)snprintf(b + o, n - o, "deferred textures: %d now (%.0f MB of storage), %llu so far, %llu made later (%.0f MB); first sampled from storage: %llu with data, %llu all zero (%.0f MB); largest images:", g_nlazy, lz / 1e6,
+                          (unsigned long long)g_lazy_total, (unsigned long long)g_lazy_made, g_lazy_made_bytes / 1e6, (unsigned long long)g_nvn2_first[0], (unsigned long long)g_nvn2_first[1], g_nvn2_zero_bytes / 1e6);
+    static const char *const mn[4] = {"zero", "fill", "track", "sparse"};
+    for (int k = 0; k < K && t[k] && o < n; k++) { const vka_img *im = t[k];
+        o += (size_t)snprintf(b + o, n - o, " %llu %ux%ux%u+%u fmt %#x fl %#x %s%s%s %.0f MB;", (unsigned long long)im->serial, im->w, im->h, im->layers, im->base, im->d.format, im->d.flags,
+                              mn[im->mode & 3], im->gpu_owned ? " gpu" : "", im->rs ? " res" : "", im->bytes / 1e6); }
+    pthread_mutex_unlock(&g_tmu);
+}
+
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
+    g_lazy_hit = 0;
     if (!t || !t->serial || !vka_ok()) return NULL;
     pthread_mutex_lock(&g_tmu);
-    smap_ent *e = map_get(t->serial);
-    if (e) { vka_img *im = e->im; pthread_mutex_unlock(&g_tmu); return im; }
-    vka_fmt f; vka_img *im = NULL; int throttle = 0;
+    smap_ent *e = map_get(t->serial); int made_lazy = 0;
+    if (e) {
+        if (e->im || !g_nlazy || lazy_find(t->serial) < 0) { vka_img *im = e->im; pthread_mutex_unlock(&g_tmu); return im; }
+        if (g_first_sampled) { g_lazy_hit = 1; pthread_mutex_unlock(&g_tmu); return NULL; }   // still nothing but zeros
+        lazy_drop(t->serial); made_lazy = 1;   // its first use that is not a sample: the image is made now
+    }
+    vka_fmt f; vka_img *im = NULL; int throttle = 0, publish = 0;
     if (vka_fmt_of(t->d.format, &f)) {
         // (not an image whose pool was finalized: a new pool over the same memory has new content. Shared with a texture of another live pool, the image follows the newest one's)
         for (int i = 0; i < g_nlive && !im; i++) if (t->mem && same_shape(g_live[i], t, &f, 1) && !img_pool_dead(g_live[i]) && !(g_live[i]->base && sparse_gpu(t, &f))) {   // (drawn into at level 0)
             im = g_live[i]; im->refs++;
             if (t->pool && im->pool != t->pool) { uint64_t fin = nvn_pool_fin(), g = nvn_pool_live(t->pool, NULL, NULL); if (g) { im->pool = t->pool; im->pfin = fin; im->pgen = g; } } }
         uint32_t vmin = 0, base = sparse_sampled(t, &f) ? sparse_base(t->pool, t->mem, &t->d, &t->L, &vmin) : 0;
+        if (!im && !made_lazy && g_first_sampled && lazy_ok(t, &f)) {   // deferred (above): no image until the GPU writes it
+            if (g_nlazy == g_lazycap) { g_lazycap = g_lazycap ? g_lazycap * 2 : 64; g_lazy = realloc(g_lazy, (size_t)g_lazycap * sizeof *g_lazy); }
+            g_lazy[g_nlazy++] = (lazy_ent){*t, f}; g_lazy_total++;
+            map_put(t->serial, NULL); g_lazy_hit = 1;
+            static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 16)
+                VLOG("texture serial %llu %ux%u layers %u format %#x flags %#x pool flags %#x (%.1f MiB of storage): GPU content first sampled before anything wrote it: no image until the GPU writes it (DM_VK_LAZY)",
+                     (unsigned long long)t->serial, t->d.width, t->d.height, t->L.layers, t->d.format, t->d.flags, pool_flags(t->pool), t->L.size / 1048576.0);
+            pthread_mutex_unlock(&g_tmu);
+            return NULL;
+        }
         if (!im && (im = img_create(t, &f, base))) {
             im->vmin = vmin;
             if (g_nlive == g_livecap) { g_livecap = g_livecap ? g_livecap * 2 : 256; g_live = realloc(g_live, (size_t)g_livecap * sizeof *g_live); }
@@ -1112,10 +1210,19 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
             img_first_use(im, t, ucb ? ucb : cb, cpuw_take(t->serial, 0));
             if (ucb) { vka_up_point(vka_up_cur(ucb)); vka_up_end(); }   // (an upload of many pieces, upload_mt, checks the batch budget only here)
             throttle = ucb != VK_NULL_HANDLE;
+            publish = made_lazy;
+            // Deferred textures of the same storage and shape share it from now on (vka_tex_get's sharing, done for them here: they were asked for before it existed)
+            for (int i = 0; i < g_nlazy; ) {
+                if (!same_shape(im, &g_lazy[i].t, &g_lazy[i].f, 0) || g_lazy[i].t.serial == t->serial) { i++; continue; }
+                map_put(g_lazy[i].t.serial, im); im->refs++; g_lazy[i] = g_lazy[--g_nlazy]; publish = 1;
+            }
+            if (publish) { g_lazy_made++; g_lazy_made_bytes += im->bytes; atomic_fetch_add_explicit(&g_tgen, 1, memory_order_release); }
         }
     }
+    if (made_lazy && im) publish = 1;   // (made, or shared with a live image of the same storage and shape)
     map_put(t->serial, im);
     pthread_mutex_unlock(&g_tmu);
+    if (publish) lazy_publish(im);
     if (throttle) vka_up_throttle();
     return im;
 }
@@ -1308,6 +1415,7 @@ void mtl_tex_release(tex_t *t) {
     smap_ent *e = map_get(t->serial); vka_img *im = e ? e->im : NULL;
     if (e) map_del(t->serial);
     cpuw_take(t->serial, 0);
+    if (g_nlazy) lazy_drop(t->serial);
     if (im) unref_locked(im);
     pthread_mutex_unlock(&g_tmu);
 }
@@ -1355,6 +1463,10 @@ void mtl_tex_cpu_written(const tex_t *t) {
     pthread_mutex_lock(&g_tmu);
     smap_ent *e = map_get(t->serial);
     if (!e) cpuw_take(t->serial, 1);
+    else if (!e->im && g_nlazy && lazy_drop(t->serial)) {   // a deferred texture (Deferred images): its content is its storage now, made at its next use; its IDs written again
+        map_del(t->serial); cpuw_take(t->serial, 1);
+        for (int id = 1; id < g_ntreg; id++) if (g_treg[id].t.serial == t->serial) dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id);
+    }
     else if (e->im && !e->im->gpu_owned && !e->im->cpu_dirty) {
         e->im->cpu_dirty = 1;
         if (g_nredo == g_redocap) { g_redocap = g_redocap ? g_redocap * 2 : 64; g_redo = realloc(g_redo, (size_t)g_redocap * sizeof *g_redo); }
@@ -1369,8 +1481,8 @@ void mtl_tex_cpu_written(const tex_t *t) {
 static samp_par *g_sreg; static int g_nsreg;
 static int *g_sdirty; static int g_nsd, g_sdcap;
 static uint8_t *g_sdflag;
-static VkDescriptorSetLayout g_dsl; static VkDescriptorPool g_dpool; static VkDescriptorSet g_set;
-static uint32_t g_ntex_slots, g_nsamp_slots, g_nimg_slots;
+static VkDescriptorSetLayout g_dsl; static VkDescriptorPool g_dpool;
+static uint32_t g_nsamp_slots, g_nimg_slots;
 typedef struct { samp_par p; VkSampler s; } samp_ent; static samp_ent *g_samp; static int g_nsamp;
 static VkSampler *g_sres; static int g_nsres;   // the sampler of each registered ID, found once per registration (sampler_of searches every distinct sampler)
 static VkImageView g_null_view;
@@ -1558,13 +1670,15 @@ static int treg_dead(int id, const treg_ent *e) {
     if (dead) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("texture ID %d (serial %llu, storage %p): its pool %p was finalized after the registration: null view", id, (unsigned long long)e->t.serial, (void *)e->t.mem, (const void *)e->t.pool); }
     return dead;
 }
-static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii) {   // caller holds g_tmu; it is let go while the image is made
+static int write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDescriptorImageInfo *ii) {   // caller holds g_tmu; it is let go while the image is made. 1: write w
     treg_ent ent = g_treg[id], *e = &ent;
     if (e->img && VKA_ENV("DM_VK_IMG_UPGRADE", 1)) e->t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // an image registration is image intent (nvn_mtl.m image_prepare), with or without the texture's IMAGE flag
     pthread_mutex_unlock(&g_tmu);
     nvn_pool_use(1);
     g_first_sampled = !e->img;   // (a texture ID in the sampled table: a first use here is a sample, nvn2_sampled_content)
+    g_lazy_hit = 0;
     vka_img *im = treg_dead(id, e) ? NULL : vka_tex_get(&e->t, cb);
+    int lazy = !im && g_lazy_hit && !e->img;   // deferred (Deferred images): a null descriptor, zeros, until the image is made
     g_first_sampled = 0;
     nvn_pool_use(0);
     // (img_storage_upgrade runs without nvn_pool_use: it copies image to image and never reads the storage)
@@ -1576,6 +1690,7 @@ static void write_tex(int id, VkCommandBuffer cb, VkWriteDescriptorSet *w, VkDes
     *ii = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
     *w = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_set, .dstBinding = e->img ? 2 : 0, .dstArrayElement = (uint32_t)id, .descriptorCount = 1,
                                 .descriptorType = e->img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = ii};
+    return view != VK_NULL_HANDLE || lazy;
 }
 
 // ---------- Per-draw lookups (vka_draw.c) ----------
@@ -1703,13 +1818,13 @@ void vka_tex_id_check(int id) {
 void vka_tex_id_desc(int id, char *b, size_t n) {
     pthread_mutex_lock(&g_tmu);
     if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { snprintf(b, n, "not registered"); pthread_mutex_unlock(&g_tmu); return; }
-    treg_ent e = g_treg[id]; smap_ent *m = map_get(e.t.serial); vka_img *im = m ? m->im : NULL;
+    treg_ent e = g_treg[id]; smap_ent *m = map_get(e.t.serial); vka_img *im = m ? m->im : NULL; int lz = m && !im && lazy_find(e.t.serial) >= 0;
     pthread_mutex_unlock(&g_tmu);
     const view_t *v = e.has_v ? &e.v : NULL;
     snprintf(b, n, "serial %llu target %d format %#x %ux%ux%u levels %u flags %#x%s; view target %d layers %u+%u format %#x; image %s %ux%ux%u layers %u usage %#x",
              (unsigned long long)e.t.serial, e.t.d.target, e.t.d.format, e.t.d.width, e.t.d.height, e.t.d.depth, e.t.d.levels, e.t.d.flags, e.img ? " (image slot)" : "",
              v && v->set_target ? v->target : -1, v && v->set_layers ? v->min_layer : 0, v && v->set_layers ? v->nlayers : 0, v && v->set_format ? v->format : 0,
-             im ? "made" : m ? "refused" : "not made", im ? im->w : 0, im ? im->h : 0, im ? im->depth : 0, im ? im->layers : 0, im ? im->usage : 0);
+             im ? "made" : m ? (lz ? "deferred" : "refused") : "not made", im ? im->w : 0, im ? im->h : 0, im ? im->depth : 0, im ? im->layers : 0, im ? im->usage : 0);
 }
 int vka_tex_id_target(int id) {
     pthread_mutex_lock(&g_tmu);
@@ -1831,8 +1946,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     for (int k = 0; k < g_ntd; k++) {
         int id = g_tdirty[k]; g_tdflag[id] = 0;
         if (id >= (int)(g_treg[id].img ? g_nimg_slots : g_ntex_slots)) { VRED_ONCE("texture ID %d beyond the table", id); continue; }
-        write_tex(id, cb, &w[nw], &ii[nw]);
-        if (w[nw].pImageInfo->imageView) nw++;
+        if (write_tex(id, cb, &w[nw], &ii[nw])) nw++;
         if (nw == BATCH) { vk.vkUpdateDescriptorSets(V.dev, (uint32_t)nw, w, 0, NULL); nw = 0; }
     }
     g_ntd = 0;

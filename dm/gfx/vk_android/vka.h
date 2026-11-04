@@ -245,6 +245,8 @@ static inline uint32_t vka_img_slices(const vka_img *im, uint32_t lv) { return i
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb);   // the texture's image, made (and filled from guest memory, or cleared) on first use in cb; NULL = no image
 uint64_t vka_tex_mem(int *n, uint64_t *gpu_written);   // bytes of image memory now: n images, of which gpu_written bytes the GPU wrote (the rest copies pool storage)
 void vka_tex_alias_stats(char *b, size_t n);        // image bytes by content (cleared, filled once, tracked) and how many of them could live on their pool storage
+int vka_tex_id_lazy(int id);                         // texture ID id's texture is deferred: no image until the GPU writes it (vka_tex.c Deferred images); it reads zeros
+void vka_tex_top(char *b, size_t n);               // the largest live images: serial, shape, format, flags, content, MiB
 vka_img *vka_tex_acquire(uint64_t serial);          // a reference that keeps the image alive (the present thread), dropped with vka_tex_drop
 void vka_tex_drop(vka_img *im);
 int vka_tex_live_refs(vka_img **out, int max);       // references to every live image (the replayer's --dump-gpu), each dropped with vka_tex_drop
