@@ -1461,6 +1461,33 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (vka_nan_on() >= 2 && vka_nan_split(R.cim, R.nci)) vka_rp_end();   // DM_VK_NANSCAN=2: a scan inside the game's pass
 }
 
+// Read descriptors actually emitted for this dispatch, including scratch-backed UBOs.
+// Placed buffers and scratch spans already live through this submission's fence.
+static void buffer_trace_dispatch(const vka_dstate *d, const vka_shader *sh, uint64_t frame, uint64_t ordinal, int phase) {
+    uint64_t mask = vka_buffer_trace_mask(frame, sh->key, phase); if (!mask) return;
+    for (int i = 0; i < g_wk.n[5]; i++) {
+        const vka_res *r = &g_wk.r[5][i]; if (r->what != VKA_R_BUF) continue;
+        const dmsh_vk_bind *b = NULL;
+        for (uint32_t j = 0; j < sh->e->bind_count; j++) if (sh->b[j].set == 0 && sh->b[j].binding == r->binding) { b = &sh->b[j]; break; }
+        if (!b || b->reg < 0 || b->reg >= 16) continue;
+        int kind;
+        if (b->kind == DMSH_VK_KIND_SBUF) kind = 0;
+        else if (b->kind == DMSH_VK_KIND_CBUF || b->kind == DMSH_VK_KIND_UBO_PTR) kind = 1;
+        else continue;
+        if (!(mask & (1ull << (kind * 16 + b->reg)))) continue;
+        if (r->desc != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && r->desc != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) continue;
+        const VkDescriptorBufferInfo *bi = NULL;
+        for (uint32_t j = 0; j < g_w.n; j++) if (g_w.w[j].dstBinding == r->binding && g_w.w[j].dstArrayElement == r->elem) { bi = g_w.w[j].pBufferInfo; break; }
+        const vka_range *source = kind ? &d->b.ubo[5][b->reg] : &d->b.ssbo[5][b->reg];
+        if (!bi || !bi->buffer || !source->addr || source->addr < r->addr) continue;
+        // SBUF descriptors include an ABI alignment prefix; UBO copies start at their
+        // actual bound descriptor, even when it is a scratch copy of the guest range.
+        uint64_t prefix = source->addr - r->addr;
+        vka_buffer_sample sample = {frame, sh->key, ordinal, source->addr, source->size, r->addr, r->size,
+            *bi, (uint32_t)kind, (uint32_t)b->reg, r->binding, r->elem, (uint32_t)phase};
+        vka_buffer_trace_copy(g_cb, &sample, prefix);
+    }
+}
 int dm_sdk_ounce(void);
 static int g_nvn2 = -1;
 void vka_set_nvn2(int on) { g_nvn2 = on != 0; }
@@ -1585,12 +1612,14 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     if (recording_frame != trace_frame) { trace_frame = recording_frame; trace_ordinal = 0; }
     resource_trace(recording_frame, trace_ordinal++, d, sh[5], dp, skip);
     if (skip) { vka_barrier(g_cb); g_dispatches++; return; }
+    buffer_trace_dispatch(d, sh[5], recording_frame, trace_ordinal - 1, 0);
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     if (dp->ind) vk.vkCmdDispatchIndirect(g_cb, ib, io);
     else if (dp->x > 0 && dp->y > 0 && dp->z > 0) {
         if (sb && (uint64_t)dp->x * dp->y * dp->z > ns) spill_dispatch((uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z, ns);
         else vk.vkCmdDispatch(g_cb, (uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z);
     }
+    buffer_trace_dispatch(d, sh[5], recording_frame, trace_ordinal - 1, 1);
     vka_barrier(g_cb);   // (also frees the shared memory spill buffer for the next dispatch)
     g_dispatches++;
 }

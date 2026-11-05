@@ -436,6 +436,17 @@ void vka_tex_watch_dispatch(uint64_t key);         // DM_VK_NANSCAN: compute sha
 void vka_nan_draw(uint64_t vs, uint64_t fs);
 void vka_nan_pass(VkCommandBuffer cb, vka_img *const *ims, const uint32_t *lvs, const uint32_t *l0s, int n);
 void vka_nan_commit(uint64_t fence);
+// Default-off GPU buffer snapshots, retained through the existing submission fence.
+// kind: 0 = SSBO register, 1 = UBO register. Metadata is copied at recording time.
+typedef struct {
+    uint64_t frame, key, ordinal, guest, source_size, resolved_guest, resolved_size;
+    VkDescriptorBufferInfo descriptor;
+    uint32_t kind, reg, binding, element, phase;
+} vka_buffer_sample;
+uint64_t vka_buffer_trace_mask(uint64_t frame, uint64_t key, int phase);
+void vka_buffer_trace_copy(VkCommandBuffer cb, const vka_buffer_sample *sample, uint64_t prefix);
+void vka_buffer_trace_commit(uint64_t fence, int submitted);
+void vka_buffer_trace_failed(void);
 void vka_draw_stats(uint64_t *draws, uint64_t *skipped, uint64_t *dispatches, uint64_t *pipelines);
 
 // ---------- Present (vka_present.c) ----------
