@@ -44,12 +44,13 @@ typedef struct { int kind; uint64_t frame, ticket; tex_t t; double period; int h
 enum { J_PRESENT = 2, PQ = 32 };
 static pq_item g_pq[PQ];
 static uint64_t live_frame, tickets, g_pq_fill;
-static int worker_on, g_thread_up = 1;
+static int worker_on, g_thread_up = 1, sync_calls;
 static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_pcv = PTHREAD_COND_INITIALIZER;
 static job_t jobs[12]; static int njobs;
 static uint64_t vka_frame(void) { return live_frame; }
 static int up(void) { return worker_on; }
+static void present_sync(void) { sync_calls++; }
 static int vka_worker_on(void) { return worker_on; }
 static uint64_t vka_fence_last(void) { return 0; }
 static uint64_t vka_fence_queued(void) { return 0; }
@@ -85,6 +86,7 @@ int main(void) {
     uint64_t ticket = mtl_present(&texture, 0.016, NULL);
     assert(g_pq[(ticket - 1) % PQ].frame == 9000);
     assert(!g_pq[(ticket - 1) % PQ].has_crop);
+    assert(sync_calls == 13);
     puts("ok");
 }
 '''
