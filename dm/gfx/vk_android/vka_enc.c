@@ -67,11 +67,11 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 static inline void flush_pub(void);
 static void wait_tail(uint64_t want) {
     flush_pub();   // what it waits for must be handed over
-    uint64_t t0_ = 0;
-    for (int i = 0;; i++) {   // the encoder is usually close behind: wait on its tail for up to ~0.2 ms
+    uint64_t t0_ = mono_ns();
+    for (;;) {   // the encoder is usually close behind: wait on its tail for up to ~0.2 ms (the clock is read at every wake: a WFE with no write to the line lasts until the event stream, 10-100 µs)
         uint64_t t = atomic_load_explicit(&g_tail, memory_order_acquire); if (t >= want) return;
         wait_change(&g_tail, t);
-        if (i % 64 == 63) { uint64_t n = mono_ns(); if (!t0_) t0_ = n; else if (n - t0_ > 200000) break; }
+        if (mono_ns() - t0_ > 200000) break;
     }
     g_n_waits++; uint64_t t0 = mono_ns();
     // An event count: the sequence is read before the flag is set, so an encoder that sees the flag (and a tail at or past want) bumps it after that read and the futex
@@ -113,7 +113,15 @@ static void *rec_alloc(uint32_t id, size_t n) {
 // cycles in its own loop: power and heat). Nothing reaches the GPU before a part's submit, which flushes, so the batch only delays when the encoder starts on a call
 static uint64_t g_pub;        // the head published last
 static uint32_t g_batch = 4096;
-static inline void rec_done(size_t n) { g_ph += n; g_n_calls++; if (g_ph - g_pub >= g_batch) { g_pub = g_ph; publish(); } }
+static uint32_t g_wake = 0;           // DM_VK_ENC_WAKE: bytes held back while the encoder sleeps (0 = none): it is woken once per that many bytes, not once per batch
+static _Atomic uint64_t g_spin_ns = 200000;   // DM_VK_ENC_SPIN_US: the replay updates it while the encoder may be idle
+static inline void rec_done(size_t n) {
+    g_ph += n; g_n_calls++;
+    if (g_ph - g_pub >= g_batch) {
+        if (g_wake && g_ph - g_pub < g_wake && atomic_load_explicit(&g_csleep, memory_order_relaxed)) return;   // asleep: wake it for a worthwhile run of calls (every wait, sync, part switch and stop flushes)
+        g_pub = g_ph; publish();
+    }
+}
 static inline void flush_pub(void) { if (g_pub != g_ph) { g_pub = g_ph; publish(); } }
 
 // ---------- The records: each holds the call's arguments, pointers aimed at copies inside the record ----------
@@ -396,11 +404,11 @@ static void *enc_main(void *arg) {
         uint64_t h = atomic_load_explicit(&g_head, memory_order_acquire);
         if (t == h) {
             // Empty: spin while the replay thread is recording (its next call comes within microseconds), then sleep until a call comes
-            uint64_t t0 = 0; int i = 0;
+            uint64_t t0 = mono_ns(), lim = atomic_load_explicit(&g_spin_ns, memory_order_relaxed);
             for (;;) {
                 h = atomic_load_explicit(&g_head, memory_order_acquire); if (h != t) break;
+                if (mono_ns() - t0 >= lim) break;   // zero goes straight to the futex; otherwise account for the time in every WFE
                 wait_change(&g_head, t);
-                if (++i % 64 == 0) { uint64_t n = mono_ns(); if (!t0) t0 = n; else if (n - t0 > 200000) break; }
             }
             if (h == t) {
                 uint32_t s = atomic_load(&g_cseq);   // (an event count, as wait_tail's)
@@ -452,6 +460,7 @@ void vka_enc_start(VkCommandBuffer cb) {
     extern int vka_gp_active;
     if (!VKA_ENV("DM_VK_ENC", 1) || vka_gp_active || vka_nan_on() || !up()) { atomic_store(&g_ecb, VK_NULL_HANDLE); return; }
     { int bt = VKA_ENV("DM_VK_ENC_BATCH", 4096); g_batch = bt < 0 ? 0 : bt > (1 << 20) ? (1 << 20) : (uint32_t)bt; }   // live: from this submission
+    { int w = VKA_ENV("DM_VK_ENC_WAKE", 0), sp = VKA_ENV("DM_VK_ENC_SPIN_US", 200); g_wake = w < 0 ? 0 : w > (1 << 20) ? (1 << 20) : (uint32_t)w; atomic_store_explicit(&g_spin_ns, (uint64_t)(sp < 0 ? 0 : sp > 100000 ? 100000 : sp) * 1000, memory_order_relaxed); }
     atomic_store(&g_ecb, cb);
 }
 // Before vkEndCommandBuffer, a submit, or any other use of the command buffer or its pool: every call made
