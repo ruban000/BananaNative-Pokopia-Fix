@@ -473,7 +473,7 @@ static void clear_color(const p_clear_color *c) {
     const tex_t *t = S.rt.color[c->index]; const view_t *v = &S.rt.cview[c->index]; int hv = S.rt.has_cview[c->index];
     vka_img *im = vka_tex_get(t, g_cb); vka_fmt f;
     if (!im || !vka_fmt_of(hv && v->set_format ? v->format : t->d.format, &f)) return;
-    if (f.kind) { VRED_ONCE("color clear of a depth texture (format %#x)", t->d.format); return; }
+    if (f.kind >= 3) { VRED_ONCE("color clear of a depth texture (format %#x)", t->d.format); return; }   // (kind 1 / 2: integer colour, cleared with the integer value, color_value)
     if ((c->mask & 0xf) != 0xf) { VRED_ONCE("color clear with channel mask %#x is not on Vulkan yet (needs a pipeline): skipped", c->mask); return; }
     uint32_t lv, l0, nl; rt_range(im, v, hv, &lv, &l0, &nl);
     if (lv >= im->levels || !nl) return;
