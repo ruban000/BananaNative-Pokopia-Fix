@@ -124,6 +124,7 @@ void vka_rp_queue_activate(uint64_t serial);
 void vka_rp_queue_forget(uint64_t serial);
 void vka_rp_set_queue_origin(int on);
 int vka_worker_on(void);                              // DM_VK_WORKER (default 1): submissions are replayed on the replay worker thread
+uint64_t vka_exec_frame(void);                       // Recording frame for replay diagnostics; live frame when replay is inline
 uint64_t vka_present_reserve(void);
 void vka_present_fill(uint64_t tk, uint64_t frame, const tex_t *t, double period_s, const int crop[4]);
 uint64_t vka_present_inline(uint64_t frame, const tex_t *t, double period_s, const int crop[4]);
@@ -279,6 +280,12 @@ void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
 void vka_ctl_shot_done(VkFence fence);
 
 VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // texture ID id as a view of shape dim (DMSH_VK_DIM_*); VK_NULL_HANDLE = none fits
+int nvn_sparse_trace_on(void);
+int nvn_sparse_trace_wants(uint64_t serial);
+void nvn_sparse_trace_tex(uint64_t serial, const void *pool, const void *mem, uint64_t size, uint64_t frame, const char *detail);
+void vka_tex_view_desc(int id, VkImageView view, char *out, size_t size);
+void vka_tex_trace_binding(int id, VkImageView view, int storage, uint64_t key, int stage, uint32_t binding);
+void vka_tex_trace_img(vka_img *im, const char *what, uint32_t level, uint32_t layer, uint32_t layers);
 void vka_tex_id_desc(int id, char *b, size_t n);   // texture ID id described for a [RED] line
 typedef struct { uint64_t serial; int texture_format, view_format; VkFormat requested, actual; uint32_t width, height, depth; uint8_t kind; } vka_numeric_info;
 int vka_tex_id_numeric_info(int id, VkImageView view, vka_numeric_info *out);   // integer descriptor evidence; actual is UNDEFINED when no matching view was made

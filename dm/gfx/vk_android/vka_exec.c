@@ -45,6 +45,8 @@ extern uint64_t vka_n_rp, vka_n_bar; static uint64_t g_n_ub, g_n_sub, g_rec_ns, 
 static _Atomic uint64_t g_fstart[64], g_fstart_f[64];   // when the replay began recording each frame's first submission (its number mod 64): the adaptive floor's spans
 static uint64_t g_job_frame; static int g_job_frame_set;   // the frame of the submission the worker replays (vka_exec_sub_frame)
 void vka_exec_sub_frame(uint64_t f) { g_job_frame = f; g_job_frame_set = 1; }
+// Replay diagnostics use the queued submission identity, with live-frame fallback for inline replay.
+uint64_t vka_exec_frame(void) { return g_job_frame_set && vka_worker_on() ? g_job_frame : g_frame; }
 uint64_t vka_frame_start_ns(uint64_t f) { unsigned k = f % 64; return atomic_load(&g_fstart_f[k]) == f ? atomic_load(&g_fstart[k]) : 0; }   // now_ns; 0 = not known (vka_perf.c)
 void mtl_set_frame(uint64_t f) {
     g_frame = f; vka_ctl_frame(f);

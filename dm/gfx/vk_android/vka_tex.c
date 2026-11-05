@@ -1294,6 +1294,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     if (made_lazy && im) publish = 1;   // (made, or shared with a live image of the same storage and shape)
     map_put(t->serial, im);
     pthread_mutex_unlock(&g_tmu);
+    if (im) vka_tex_trace_img(im, "resolve", 0, 0, im->layers);
     if (publish) lazy_publish(im);
     nvn_pool_use(0);
     if (throttle) vka_up_throttle();
@@ -1538,8 +1539,49 @@ void mtl_tex_release(tex_t *t) {
 // Linear textures the GPU wrote in this submission. Metal makes a linear texture on the pool buffer, so what the GPU renders there is in guest memory for the CPU to read
 // (agl reads small linear render targets back on the CPU, such as a 1x1 R16F one in Donkey Kong Bananza's level); here the image is copied back into the storage
 static vka_img **g_wb; static int g_nwb, g_wbcap;
+// Describe the view already resolved by the recording thread, without creating an image/view.
+static void view_desc_locked(int id, VkImageView view, char *out, size_t size) {
+    if (!size) return;
+    uint64_t serial = id > 0 && id < g_ntreg ? g_treg[id].t.serial : 0;
+    smap_ent *e = serial ? map_get(serial) : NULL; vka_img *im = e ? e->im : NULL;
+    const view_ent *hit = NULL;
+    for (const view_ent *v = im ? im->views : NULL; v; v = v->next) if (v->v == view) { hit = v; break; }
+    if (!hit) { snprintf(out, size, "serial=%llu view=%p actual-view=unresolved image=%p", (unsigned long long)serial, (void *)view, im ? (void *)im->img : NULL); return; }
+    snprintf(out, size, "serial=%llu view=%p image=%p actual-format=%d type=%d aspect=%#x level=%u+%u layer=%u+%u base=%u vmin=%u shape=%ux%ux%u",
+             (unsigned long long)serial, (void *)view, (void *)im->img, hit->f, hit->t, hit->asp, hit->l0, hit->nl, hit->a0, hit->na,
+             im->base, im->vmin, im->w, im->h, im->layers);
+}
+void vka_tex_view_desc(int id, VkImageView view, char *out, size_t size) {
+    pthread_mutex_lock(&g_tmu); view_desc_locked(id, view, out, size); pthread_mutex_unlock(&g_tmu);
+}
+// Producer intents include copy/clear/storage registration; they do not assert that a shader
+// actually wrote a texel. Attachment and sampled-view records carry the subresource separately.
+void vka_tex_trace_img(vka_img *im, const char *what, uint32_t level, uint32_t layer, uint32_t layers) {
+    if (!im || !nvn_sparse_trace_wants(im->serial)) return;
+    char info[320];
+    snprintf(info, sizeof info, "%s image=%p level=%u layer=%u+%u shape=%ux%ux%u levels=%u fmt=%#x mode=%u track=%u bind=%u gpu=%u recorded=%llu done=%llu",
+             what, (void *)im->img, level, layer, layers, im->d.width, im->d.height, im->layers, im->levels, im->d.format,
+             im->mode, im->vtrack, im->vbind, im->gpu_owned, (unsigned long long)vka_fence_last(), (unsigned long long)vka_done());
+    nvn_sparse_trace_tex(im->serial, im->pool, im->mem, im->L.size, vka_exec_frame(), info);
+}
+void vka_tex_trace_binding(int id, VkImageView view, int storage, uint64_t key, int stage, uint32_t binding) {
+    if (!nvn_sparse_trace_on()) return;
+    pthread_mutex_lock(&g_tmu);
+    if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial || !nvn_sparse_trace_wants(g_treg[id].t.serial)) { pthread_mutex_unlock(&g_tmu); return; }
+    treg_ent e = g_treg[id]; smap_ent *m = map_get(e.t.serial); vka_img *im = m ? m->im : NULL;
+    char info[768], actual[320];
+    view_desc_locked(id, view, actual, sizeof actual);
+    snprintf(info, sizeof info, "%s shader=%016llx stage=%d binding=%u tid=%d image=%p view-level=%u+%u view-layer=%u+%u image-base=%u image-vmin=%u gpu=%u recorded=%llu done=%llu %s",
+             storage ? "storage-binding" : "sample-binding", (unsigned long long)key, stage, binding, id, im ? (void *)im->img : NULL,
+             e.has_v && e.v.set_levels ? e.v.base_level : 0, e.has_v && e.v.set_levels ? e.v.nlevels : e.t.d.levels,
+             e.has_v && e.v.set_layers ? e.v.min_layer : 0, e.has_v && e.v.set_layers ? e.v.nlayers : e.t.L.layers,
+             im ? im->base : 0, im ? im->vmin : 0, im ? im->gpu_owned : 0, (unsigned long long)vka_fence_last(), (unsigned long long)vka_done(), actual);
+    pthread_mutex_unlock(&g_tmu);
+    nvn_sparse_trace_tex(e.t.serial, e.t.pool, e.t.mem, e.t.L.size, vka_exec_frame(), info);
+}
 void vka_img_written(vka_img *im) {
     if (!im) return;
+    vka_tex_trace_img(im, "write-intent", 0, 0, im->layers);
     pthread_mutex_lock(&g_tmu);
     im->gpu_owned = 1;
     if ((im->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && im->mem && !im->wb_pending && im->samples == 1 && im->f.kind < 3 && im->f.bw == 1) {
