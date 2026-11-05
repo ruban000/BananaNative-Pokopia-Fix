@@ -25,7 +25,7 @@
     X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) \
     X(vkCmdBeginRendering) X(vkCmdEndRendering) \
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) \
-    X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
+    X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
     X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
@@ -133,6 +133,7 @@ typedef struct { CB_FIELD uint32_t first, n; const VkBuffer *b; const VkDeviceSi
 typedef struct { CB_FIELD VkBuffer b; VkDeviceSize o; VkIndexType t; } r_ib;
 typedef struct { CB_FIELD uint32_t a, b, c, d; int32_t e; uint32_t f; } r_draw;   // draw (a count, b instances, c first, d first instance), indexed (e vertex offset, f first instance), dispatch (vkCmdDispatchBase: base a b c, groups d f e)
 typedef struct { CB_FIELD VkBuffer b; VkDeviceSize o; uint32_t n, st; } r_ind;
+typedef struct { CB_FIELD VkBuffer b, cbuf; VkDeviceSize o, co; uint32_t n, st; } r_indc;
 typedef struct { CB_FIELD uint32_t first, n; const void *p; } r_vps;   // viewports or scissors
 typedef struct { CB_FIELD uint32_t v[5]; float f[4]; } r_val;               // the one-value states
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t set, n; const VkWriteDescriptorSet *w; } r_push;
@@ -247,6 +248,12 @@ static void VKAPI_CALL e_vkCmdDrawIndirect(VkCommandBuffer cb, VkBuffer b, VkDev
 static void VKAPI_CALL e_vkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t st) {
     DIRECT(vkCmdDrawIndexedIndirect, cb, b, o, n, st); BEGIN(r_ind, E_vkCmdDrawIndexedIndirect, 0); r->b = b; r->o = o; r->n = n; r->st = st; END();
 }
+static void VKAPI_CALL e_vkCmdDrawIndirectCount(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer c, VkDeviceSize co, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawIndirectCount, cb, b, o, c, co, n, st); BEGIN(r_indc, E_vkCmdDrawIndirectCount, 0); r->b = b; r->o = o; r->cbuf = c; r->co = co; r->n = n; r->st = st; END();
+}
+static void VKAPI_CALL e_vkCmdDrawIndexedIndirectCount(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer c, VkDeviceSize co, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawIndexedIndirectCount, cb, b, o, c, co, n, st); BEGIN(r_indc, E_vkCmdDrawIndexedIndirectCount, 0); r->b = b; r->o = o; r->cbuf = c; r->co = co; r->n = n; r->st = st; END();
+}
 static void VKAPI_CALL e_vkCmdDrawMeshTasksEXT(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     DIRECT(vkCmdDrawMeshTasksEXT, cb, x, y, z); BEGIN(r_draw, E_vkCmdDrawMeshTasksEXT, 0); r->a = x; r->b = y; r->c = z; END();
 }
@@ -346,6 +353,8 @@ static void run(const hdr *h) {
     case E_vkCmdDrawIndexed: { C(r_draw); R.vkCmdDrawIndexed(r->cb, r->a, r->b, r->c, r->e, r->f); break; }
     case E_vkCmdDrawIndirect: { C(r_ind); R.vkCmdDrawIndirect(r->cb, r->b, r->o, r->n, r->st); break; }
     case E_vkCmdDrawIndexedIndirect: { C(r_ind); R.vkCmdDrawIndexedIndirect(r->cb, r->b, r->o, r->n, r->st); break; }
+    case E_vkCmdDrawIndirectCount: { C(r_indc); R.vkCmdDrawIndirectCount(r->cb, r->b, r->o, r->cbuf, r->co, r->n, r->st); break; }
+    case E_vkCmdDrawIndexedIndirectCount: { C(r_indc); R.vkCmdDrawIndexedIndirectCount(r->cb, r->b, r->o, r->cbuf, r->co, r->n, r->st); break; }
     case E_vkCmdDispatch: { C(r_draw); R.vkCmdDispatch(r->cb, r->a, r->b, r->c); break; }
     case E_vkCmdDrawMeshTasksEXT: { C(r_draw); R.vkCmdDrawMeshTasksEXT(r->cb, r->a, r->b, r->c); break; }
     case E_vkCmdDispatchBase: { C(r_draw); R.vkCmdDispatchBase(r->cb, r->a, r->b, r->c, r->d, r->f, (uint32_t)r->e); break; }

@@ -1036,12 +1036,52 @@ static int mesh_cs(const vka_dstate *d, const p_draw *dw, vka_shader *sh[VKA_NST
 }
 void vka_mesh_cs_stats(uint64_t *draws, uint64_t *records) { if (draws) *draws = g_mcs_draws; if (records) *records = g_mcs_slots; }
 
+// Indirect-count multi-draws (nvnCommandBufferMultiDraw*IndirectCount, hle_nvn.c): the host records max draws, each with the count's address, its index and the multi-draw's
+// maximum and stride (NVN_MDI_NS). The count is written by the GPU, often by a compute pass of the same submission (Mario Kart World's foliage culling), so a count read by the
+// CPU while the commands are recorded is an older frame's: draws past this frame's count read stale records (black or misplaced trees), and draws under it are dropped, which
+// changes from frame to frame (the flicker of its trees and bushes). With drawIndirectCount the first draw makes the whole multi-draw with vkCmdDraw*IndirectCount, which reads
+// the count when the GPU runs it, and the other draws of that multi-draw are passed over. Records without NVN_MDI_NS (captures from before), a device without the feature or
+// DM_VK_MDI_GPU=0 read the count on the CPU, as before.
+uint64_t vka_frame(void);
+// mdi_plan: 1 = this first draw makes its multi-draw on the GPU (*n, *stride set), -1 = a later draw of a multi-draw made so (nothing to do), 0 = this draw alone, CPU count
+static struct { uint64_t cnt, ind0; uint32_t n, stride; } g_mdi;   // the last multi-draw made on the GPU (mdi_made)
+static int mdi_plan(uint64_t cnt, int i, uint32_t ns, uint64_t ind, uint32_t rec, int gpu, uint32_t *n, uint32_t *stride) {
+    if (i > 0) return g_mdi.cnt == cnt && (uint32_t)i < g_mdi.n && ind == g_mdi.ind0 + (uint64_t)i * g_mdi.stride ? -1 : 0;
+    g_mdi.cnt = 0;   // a new multi-draw: the last one's later draws are behind
+    *n = NVN_MDI_MAX(ns); *stride = NVN_MDI_STRIDE(ns);
+    return gpu && i == 0 && *n && *stride >= rec && !(*stride & 3) ? 1 : 0;
+}
+static void mdi_made(uint64_t cnt, uint64_t ind0, uint32_t n, uint32_t stride) { g_mdi.cnt = cnt; g_mdi.ind0 = ind0; g_mdi.n = n; g_mdi.stride = stride; }
+// The whole multi-draw with the GPU's count: its records and count in placed guest RAM, or 0 (the first draw is then made alone, its count read on the CPU, and so are the others)
+static int mdi_count_draw(uint64_t ind, uint32_t rec, uint64_t cnt, uint32_t n, uint32_t stride, int indexed) {
+    VkBuffer b, cb; VkDeviceSize o, co;
+    if (n > V.props.limits.maxDrawIndirectCount) n = V.props.limits.maxDrawIndirectCount;
+    if (!n || !vka_addr(ind, (uint64_t)(n - 1) * stride + rec, &b, &o, NULL) || (o & 3) || !vka_addr(cnt, 4, &cb, &co, NULL) || (co & 3)) {
+        VRED_ONCE("indirect-count multi-draw: records at %#llx (%u of %u bytes) or count at %#llx not in placed guest RAM: its count read on the CPU", (unsigned long long)ind, n, stride, (unsigned long long)cnt);
+        uint32_t c = 0; return !cpu_read(cnt, &c, 4) || !c;   // drawn alone below while the CPU's count has it; 1: nothing to draw
+    }
+    if (indexed) vk.vkCmdDrawIndexedIndirectCount(g_cb, b, o, cb, co, n, stride); else vk.vkCmdDrawIndirectCount(g_cb, b, o, cb, co, n, stride);
+    mdi_made(cnt, ind, n, stride);
+    return 1;
+}
+
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++; return; }
     if (!d->inited) vka_dstate_reset(d);
     uint64_t mdi = dw ? dw->mdi_cnt : di->mdi_cnt; int mdi_i = dw ? dw->mdi_i : di->mdi_i;
-    if (mdi) { uint32_t cnt = 0; if (!cpu_read(mdi, &cnt, 4) || (uint32_t)mdi_i >= cnt) return;   // past the multi-draw's count (read now: a count the GPU writes in this submission is not seen)
-               VRED_ONCE("indirect-count multi-draws read their count on the CPU at replay"); }
+    int mdi_gpu = 0; uint32_t mdi_n = 0, mdi_stride = 0;   // mdi_plan
+    if (mdi) {
+        mdi_gpu = mdi_plan(mdi, mdi_i, dw ? dw->mdi_ns : di->mdi_ns, dw ? dw->ind : di->ind, dw ? 16 : 20, V.draw_count && VKA_ENV("DM_VK_MDI_GPU", 1) != 0, &mdi_n, &mdi_stride);
+        if (mdi_gpu < 0) return;   // made by the multi-draw's first draw
+        if (mdi_i == 0 && VKA_ENV("DM_VK_MDI_LOG", 0) > 0) {   // diagnostic: each multi-draw's count as the CPU sees it while recording (an older frame's), for DM_VK_MDI_LOG lines
+            static _Atomic long left = -1; if (atomic_load(&left) < 0) atomic_store(&left, (long)VKA_ENV("DM_VK_MDI_LOG", 0));
+            if (atomic_fetch_sub(&left, 1) > 0) { uint32_t c = 0; int ok = cpu_read(mdi, &c, 4); uint32_t ns = dw ? dw->mdi_ns : di->mdi_ns;
+                VLOG("mdi: frame %llu count at %#llx: %u on the CPU%s, max %u, stride %u, records at %#llx, %s", (unsigned long long)vka_frame(), (unsigned long long)mdi, c, ok ? "" : " (not readable)",
+                     NVN_MDI_MAX(ns), NVN_MDI_STRIDE(ns), (unsigned long long)(dw ? dw->ind : di->ind), mdi_gpu ? "count read by the GPU" : "count read by the CPU"); }
+        }
+        if (!mdi_gpu) { uint32_t cnt = 0; if (!cpu_read(mdi, &cnt, 4) || (uint32_t)mdi_i >= cnt) return;   // past the multi-draw's count (read now: a count the GPU writes in this submission is not seen)
+                        VRED_ONCE("indirect-count multi-draws read their count on the CPU at replay (no drawIndirectCount, records without their maximum, or DM_VK_MDI_GPU=0)"); }
+    }
     d->b.base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
     PT(0);
@@ -1275,7 +1315,8 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     } else if (mcs) vk.vkCmdDraw(g_cb, mcs_nv, 1, 0, 0);
     else if (dw) {
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 16, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
-                   VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's"); vk.vkCmdDrawIndirect(g_cb, b, o, 1, 16); }
+                   VRED_ONCE("indirect draws: the driver segment's base instance (c0 + 0x644) reads the record's, not the GPU's");
+                   if (mdi_gpu && mdi_count_draw(ind, 16, mdi, mdi_n, mdi_stride, 0)) {} else vk.vkCmdDrawIndirect(g_cb, b, o, 1, 16); }
         else vk.vkCmdDraw(g_cb, (uint32_t)dw->count, inst, (uint32_t)dw->first, binst);
     } else {
         VkBuffer ib; VkDeviceSize io; VkIndexType it = di->itype == 0 ? VK_INDEX_TYPE_UINT8 : di->itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
@@ -1290,7 +1331,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         } else if (!vka_addr(di->ibuf, ind ? isz : isz * (uint64_t)(di->count > 0 ? di->count : 1), &ib, &io, NULL) || io % isz) SKIP("index buffer at %#llx is not in placed guest RAM: skipped", (unsigned long long)di->ibuf);
         ib_bind(ib, io, it);
         if (ind) { VkBuffer b; VkDeviceSize o; if (!vka_addr(ind, 20, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
-                   vk.vkCmdDrawIndexedIndirect(g_cb, b, o, 1, 20); }
+                   if (mdi_gpu && mdi_count_draw(ind, 20, mdi, mdi_n, mdi_stride, 1)) {} else vk.vkCmdDrawIndexedIndirect(g_cb, b, o, 1, 20); }
         else vk.vkCmdDrawIndexed(g_cb, (uint32_t)di->count, inst, 0, di->base_vertex, binst);
     }
     g_draws++;

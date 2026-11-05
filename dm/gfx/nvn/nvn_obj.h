@@ -169,8 +169,13 @@ typedef struct { float factor, units, clamp; } p_poly_offset;
 // p_draw.prim of an NVN2 nvnCommandBufferDrawMeshTasks (first, count: task workgroups, or mesh workgroups for a program without a task shader): outside NVN's primitives.
 // Recorded on Android only, where the Vulkan replay draws it through a mesh pipeline (vka_draw.c); the Mac host keeps the unimplemented stub (after switch2mac, MIT)
 #define NVN_PRIM_MESH 0x100
-typedef struct { int32_t prim, first, count, instances, base_instance; uint64_t ind; uint64_t mdi_cnt; int32_t mdi_i, pad; } p_draw;   // instances 0 counts as 1; ind != 0: DrawArraysIndirect, the arguments are read by the GPU from that address; mdi_cnt != 0: draw mdi_i of an indirect-count multi-draw (drawn only while mdi_i < the u32 at mdi_cnt)
-typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf, ind; uint64_t mdi_cnt; int32_t mdi_i, pad; } p_draw_idx;   // ind != 0: DrawElementsIndirect, {count, instances, first index, base vertex, base instance} read by the GPU from that address; mdi_cnt: as in p_draw
+typedef struct { int32_t prim, first, count, instances, base_instance; uint64_t ind; uint64_t mdi_cnt; int32_t mdi_i; uint32_t mdi_ns; } p_draw;   // instances 0 counts as 1; ind != 0: DrawArraysIndirect, the arguments are read by the GPU from that address; mdi_cnt != 0: draw mdi_i of an indirect-count multi-draw (drawn only while mdi_i < the u32 at mdi_cnt); mdi_ns: NVN_MDI_NS
+typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf, ind; uint64_t mdi_cnt; int32_t mdi_i; uint32_t mdi_ns; } p_draw_idx;   // ind != 0: DrawElementsIndirect, {count, instances, first index, base vertex, base instance} read by the GPU from that address; mdi_cnt, mdi_ns: as in p_draw
+// mdi_ns of each draw of an indirect-count multi-draw: the multi-draw's maximum draw count (bits 0-10, at most 1024) and record stride in bytes (bits 11-31), so a replay with a
+// GPU-read draw count (Vulkan's vkCmdDraw*IndirectCount) can make the whole multi-draw at its first draw; 0 (records from before, or a stride that does not fit): each draw on its own
+#define NVN_MDI_NS(max, stride) ((max) > 0 && (max) <= 1024 && (stride) > 0 && (uint64_t)(stride) < (1u << 21) ? (uint32_t)(max) | (uint32_t)(stride) << 11 : 0u)
+#define NVN_MDI_MAX(ns) ((ns) & 2047u)
+#define NVN_MDI_STRIDE(ns) ((ns) >> 11)
 // A draw record stops before ind unless it is an indirect draw or a multi-draw (hle_nvn.c rec_draw); read it with draw_rec / draw_idx_rec, which give the missing fields as 0.
 // Games size command memory by what nvnCommandBufferGetCommandMemoryUsed reports, so a plain draw must not take more of it than the real driver's commands do. Breath of the Wild
 // records each mesh's draw into a scratch command buffer and reserves that many bytes per mesh for the model's prerecorded draws, in the heap its resource size table sizes:
