@@ -168,6 +168,7 @@ static int init_once(void) {
     V.placed_align = pmp.minPlacedMemoryMapAlignment ? pmp.minPlacedMemoryMapAlignment : 4096; V.max_alloc = pm3.maxMemoryAllocationSize;
     V.max_push = V.push_desc ? ppd.maxPushDescriptors : 0;
     if (V.mesh && !vk.vkCmdDrawMeshTasksEXT) V.mesh = V.task = 0;
+    V.draw_count = f12.drawIndirectCount && vk.vkCmdDrawIndirectCount && vk.vkCmdDrawIndexedIndirectCount;   // indirect-count multi-draws with the GPU's count (vka_draw.c mdi_plan)
     if (V.mesh) { V.mesh_inv = pmesh.maxMeshWorkGroupInvocations; V.task_inv = pmesh.maxTaskWorkGroupInvocations; V.mesh_out_v = pmesh.maxMeshOutputVertices;
                   V.mesh_out_p = pmesh.maxMeshOutputPrimitives; V.task_payload = pmesh.maxTaskPayloadSize;
                   V.task_groups = pmesh.maxTaskWorkGroupCount[0]; V.mesh_groups = pmesh.maxMeshWorkGroupCount[0]; }
