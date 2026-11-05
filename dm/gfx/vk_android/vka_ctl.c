@@ -7,6 +7,7 @@
 //   "capture <n>"     the next n frames, one log line each: draws, skipped draws, render passes, full barriers, clears / copies, submissions, recording ms, GPU ms
 //   "screenshot [p]"  the next presented game frame (the window texture, before the present's scaling) as a PNG, by default ctl-shot-<frame>.png beside the control file
 //   "stats"           one log line now: the last 60 frames' averages, the frame rate, placed memory, pipelines, the switches set live
+//   "burst [n]"       the next n (8, at most 32) presented game frames, consecutive, as ctl-burst-<frame>.png beside the control file (frame-to-frame differences: flicker)
 // Every answer is a log line starting "[vk] ctl:" (android/tools/nxctl.sh waits for them)
 #if defined(__ANDROID__)
 #include "vka.h"
@@ -193,8 +194,79 @@ static int shot_bpp(VkFormat f) {
     default: return 0;
     }
 }
+// "burst <n>": the next n presented game frames, each copied in the present's own command buffer to its slot of one host-visible buffer (no wait between frames, so the
+// frames in flight overlap as in a normal run); after the last one's submission the present thread waits for it once and a thread writes ctl-burst-<frame>.png for each.
+// For frame-to-frame differences (flicker) that single screenshots, seconds apart, cannot show
+enum { BURST_MAX = 32 };
+static _Atomic int g_burst_want; static int g_burst_n, g_burst_i, g_burst_w, g_burst_h, g_burst_fmt, g_burst_flip, g_burst_done;
+static uint64_t g_burst_frame[BURST_MAX];
+static VkBuffer g_bbuf; static VkDeviceMemory g_bmem; static void *g_bmap; static VkDeviceSize g_bsize;
+static int burst_buf(VkDeviceSize n) {
+    if (g_bsize >= n) return 1;
+    if (g_bbuf) { vk.vkDestroyBuffer(V.dev, g_bbuf, NULL); vk.vkFreeMemory(V.dev, g_bmem, NULL); g_bbuf = VK_NULL_HANDLE; g_bmem = VK_NULL_HANDLE; g_bsize = 0; }
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vk.vkCreateBuffer(V.dev, &bi, NULL, &g_bbuf)) return 0;
+    VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, g_bbuf, &mr);
+    uint32_t t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+    if (t == UINT32_MAX) t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t};
+    if (t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &g_bmem) || vk.vkBindBufferMemory(V.dev, g_bbuf, g_bmem, 0) || vk.vkMapMemory(V.dev, g_bmem, 0, VK_WHOLE_SIZE, 0, &g_bmap)) {
+        if (g_bmem) vk.vkFreeMemory(V.dev, g_bmem, NULL);
+        vk.vkDestroyBuffer(V.dev, g_bbuf, NULL); g_bbuf = VK_NULL_HANDLE; g_bmem = VK_NULL_HANDLE; return 0;
+    }
+    g_bsize = n; return 1;
+}
+static int shot_bpp(VkFormat f);
+static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch) {
+    g_burst_done = 0;
+    if (!g_burst_n) {
+        int n = atomic_exchange_explicit(&g_burst_want, 0, memory_order_relaxed); if (n <= 0) return;
+        int bpp = shot_bpp(im->f.vk);
+        if (bpp != 4 || im->samples != 1 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { VLOG("ctl: burst: the window texture's format %d is not a 4-byte colour one", im->f.vk); return; }
+        if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; cw = (int)im->w; ch = (int)im->h; }
+        if (!burst_buf((VkDeviceSize)n * cw * ch * 4)) { VLOG("ctl: burst: no host-visible buffer of %d frames of %d x %d", n, cw, ch); return; }
+        g_burst_n = n; g_burst_i = 0; g_burst_w = cw; g_burst_h = ch; g_burst_fmt = im->f.vk; g_burst_flip = vka_origin_ll();
+        VLOG("ctl: burst of %d frames begins at frame %llu (%dx%d)", n, (unsigned long long)vka_frame(), cw, ch);
+    }
+    if (im->f.vk != g_burst_fmt || (int)im->w < g_burst_w || (int)im->h < g_burst_h) { VLOG("ctl: burst: the window texture changed after %d frames: stopped", g_burst_i); g_burst_n = g_burst_i; g_burst_done = g_burst_i > 0; return; }
+    if (cx < 0 || cy < 0 || cw != g_burst_w || ch != g_burst_h || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; }
+    vka_barrier(cb);
+    VkBufferImageCopy r = {(VkDeviceSize)g_burst_i * g_burst_w * g_burst_h * 4, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {cx, cy, 0}, {(uint32_t)g_burst_w, (uint32_t)g_burst_h, 1}};
+    vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_bbuf, 1, &r);
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    g_burst_frame[g_burst_i++] = vka_frame();
+    if (g_burst_i == g_burst_n) g_burst_done = 1;
+}
+typedef struct { uint8_t *rgb; int w, h; char path[1100]; uint64_t frame; } shot_job;
+static void *shot_main(void *arg);
+static void burst_done(VkFence fence) {   // present thread, after the submission holding the burst's last copy (the queue runs them in order)
+    if (!g_burst_done) return;
+    g_burst_done = 0; int n = g_burst_n; g_burst_n = 0;
+    if (vk.vkWaitForFences(V.dev, 1, &fence, VK_TRUE, 5000000000ull)) { VLOG("ctl: burst: the last copy did not finish in 5 s"); return; }
+    ctl_dir();
+    for (int i = 0; i < n; i++) {
+        int w = g_burst_w, h = g_burst_h; shot_job *j = calloc(1, sizeof *j); uint8_t *rgb = j ? malloc((size_t)w * h * 3) : NULL;
+        if (!rgb) { free(j); return; }
+        const uint8_t *base = (const uint8_t *)g_bmap + (size_t)i * w * h * 4;
+        for (int y = 0; y < h; y++) {
+            const uint8_t *s = base + (size_t)(g_burst_flip ? h - 1 - y : y) * w * 4; uint8_t *d = rgb + (size_t)y * w * 3;
+            for (int x = 0; x < w; x++, s += 4) {
+                if (g_burst_fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { uint32_t p; memcpy(&p, s, 4); d[3 * x] = (uint8_t)((p & 1023) >> 2); d[3 * x + 1] = (uint8_t)((p >> 10 & 1023) >> 2); d[3 * x + 2] = (uint8_t)((p >> 20 & 1023) >> 2); }
+                else if (g_burst_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_burst_fmt == VK_FORMAT_B8G8R8A8_SRGB) { d[3 * x] = s[2]; d[3 * x + 1] = s[1]; d[3 * x + 2] = s[0]; }
+                else { d[3 * x] = s[0]; d[3 * x + 1] = s[1]; d[3 * x + 2] = s[2]; }
+            }
+        }
+        j->rgb = rgb; j->w = w; j->h = h; j->frame = g_burst_frame[i];
+        snprintf(j->path, sizeof j->path, "%s/ctl-burst-%llu.png", g_ctl_dir, (unsigned long long)j->frame);
+        shot_main(j);   // this thread: the burst is a diagnostic, its frames already taken
+    }
+    VLOG("ctl: burst done: %d frames %llu-%llu → %s/ctl-burst-<frame>.png", n, (unsigned long long)g_burst_frame[0], (unsigned long long)g_burst_frame[n - 1], g_ctl_dir);
+}
+
 void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch) {   // present thread, before vkEndCommandBuffer
     g_rec_shot.on = 0;
+    if (im && im->inited && (g_burst_n || atomic_load_explicit(&g_burst_want, memory_order_relaxed))) burst_record(cb, im, cx, cy, cw, ch);
     if (!atomic_load_explicit(&g_shot_want, memory_order_relaxed) || !im || !im->inited) return;
     atomic_store(&g_shot_want, 0);
     int bpp = shot_bpp(im->f.vk);
@@ -208,7 +280,6 @@ void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     g_rec_shot.on = 1; g_rec_shot.w = cw; g_rec_shot.h = ch; g_rec_shot.fmt = im->f.vk; g_rec_shot.flip = vka_origin_ll(); g_rec_shot.frame = vka_frame();
 }
-typedef struct { uint8_t *rgb; int w, h; char path[1100]; uint64_t frame; } shot_job;
 static void put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
 static void chunk(FILE *f, const char *type, const uint8_t *d, uint32_t n) {
     uint8_t h[8]; put32(h, n); memcpy(h + 4, type, 4); fwrite(h, 1, 8, f); if (n) fwrite(d, 1, n, f);
@@ -237,6 +308,7 @@ static uint8_t half8(uint16_t h) {   // an RGBA16F channel, clamped to [0, 1] an
     return (uint8_t)(powf(v, 1 / 2.2f) * 255 + 0.5f);
 }
 void vka_ctl_shot_done(VkFence fence) {   // present thread, after the present's submission
+    burst_done(fence);
     if (!g_rec_shot.on) return;
     g_rec_shot.on = 0;
     if (vk.vkWaitForFences(V.dev, 1, &fence, VK_TRUE, 2000000000ull)) { VLOG("ctl: screenshot: the present's copy did not finish in 2 s"); return; }
@@ -276,6 +348,10 @@ int dm_gfx_ctl(const char *line) {   // the control thread (hle_hid.c ctl_main):
         dm_gfx_shot_at(1, p); VLOG("ctl: screenshot of the next frame queued%s%s", *p ? " → " : "", p); return 1;
     }
     if (!strcmp(line, "stats")) { atomic_store(&g_stats, 1); return 1; }
+    if (!strncmp(line, "burst", 5) && (!line[5] || line[5] == ' ')) {
+        int n = line[5] ? atoi(line + 6) : 8; if (n <= 0) n = 8; if (n > BURST_MAX) n = BURST_MAX;
+        atomic_store(&g_burst_want, n); VLOG("ctl: burst of the next %d frames queued", n); return 1;
+    }
     return 0;
 }
 #endif
