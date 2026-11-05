@@ -43,5 +43,9 @@ shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Mario Kart World shaders
 
 # ---- Graphics ----
+# The window size: main+0xc10190 (movz w21,#1440, in the function at main+0xc0ff60 that fills the renderer's size table) caps the twelve heights GamePerformanceGraphicsConfigGParam
+# gives (ResolutionMiddle* 1440 docked, ResolutionLow* 1080 / 900 handheld; 3D and screen, full, 2-way and 4-way split); each width is then height / 9 * 16. The host writes
+# DM_WINDOW_SIZE's height into it at load (loader.c window_apply; the Android launcher's Game resolution), 1440 without it (the game note, Window size)
+window_fn	9e244438c3d8ef1c703a6a85ef99c4f0	-	0xc10190	2560x1440
 # agl's render buffer binding: Donkey Kong Bananza's clears are wrapped in render conditions; the same engine, not yet checked on this game
 render_cond	on

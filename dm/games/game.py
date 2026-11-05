@@ -146,14 +146,14 @@ def header(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
-    wfn = []   # window size getters, one row per main build: <main build ID> <width fn> <height fn> <the game's own WxH> (loader.c window_apply; DM_WINDOW_SIZE=WxH sets the size, unset = the game's own)
+    wfn = []   # window size instructions, one row per main build: <main build ID> <width fn or -> <height fn or bound> <the game's own WxH> (loader.c window_apply; DM_WINDOW_SIZE=WxH sets the size, unset = the game's own; - = the game derives the width from the height)
     if g.get('window_fn', ''):
         for r in g.values('window_fn'):
-            if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[1:3]) or not re.fullmatch(r'\d{1,5}x\d{1,5}', r[3]):
-                sys.exit(f"{g.id}: window_fn takes <main build ID (32 hex)> <width function offset> <height function offset> <the game's own WxH>: {r}")
+            if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+|-', r[1]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[2]) or not re.fullmatch(r'\d{1,5}x\d{1,5}', r[3]):
+                sys.exit(f"{g.id}: window_fn takes <main build ID (32 hex)> <width function offset or -> <height function or bound offset> <the game's own WxH>: {r}")
             w, h = map(int, r[3].split('x'))
             if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
-            wfn.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {w}, {h}' + '}')
+            wfn.append('{' + q(r[0]) + f', {"0" if r[1] == "-" else r[1]}, {r[2]}, {w}, {h}' + '}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)

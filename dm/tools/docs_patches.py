@@ -126,8 +126,8 @@ SWITCH_BINDING = [
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
-    ('window_fn', '', {'what': "the window size's two getter functions, set at load (DM_WINDOW_SIZE, the Android launcher's Game resolution)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
-     'why': "the game's own constant window size, at fixed offsets per main build; a function fingerprint (two leaf functions returning the size, found from their callers) could carry it over the game's updates"}),
+    ('window_fn', '', {'what': "the window size's two getter functions, or the height bound of a game that derives the width, set at load (DM_WINDOW_SIZE, the Android launcher's Game resolution)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's own constant window size (or height bound), at fixed offsets per main build; a function fingerprint (two leaf functions returning the size, or the movz of the bound in the function that fills the size table, found from their callers) could carry it over the game's updates"}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),
 ]
 

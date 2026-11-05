@@ -624,10 +624,13 @@ static void map_image(module_t *m, const char *dir) {
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
-// The game's window size (profile key window_fn): two leaf functions of main return the width and the height (movz w0,#imm; ret: Donkey Kong Bananza's main+0x5bf770 / +0x5bf780).
+// The game's window size (profile key window_fn): main's instructions that give the width and the height, each a movz w<n>,#imm. Either two leaf getters
+// (movz w0,#imm; ret: Donkey Kong Bananza's main+0x5bf770 / +0x5bf780), or no width ("-", 0 here) and the height's upper bound when the game derives the width from the height
+// (Mario Kart World's main+0xc10190: the movz w21,#1440 that caps the heights its GamePerformanceGraphicsConfig gives, each width then being height / 9 * 16).
 // DM_WINDOW_SIZE=<w>x<h> writes that size into them (the Android launcher's Game resolution); unset, empty or "original" writes the game's own size from the profile, so a pack
 // rewritten with the older cut of the constants gives the game's size too. Only for the main build the row names, while the text is still writable (map_image, before the
-// seal), and after checking each function's shape: fixed addresses never run on another build. Not on iOS: the text is embedded there as signed code (map_image above)
+// seal), and after checking each instruction's shape (a leaf getter, or a movz holding the game's own value): fixed addresses never run on another build. Not on iOS: the text
+// is embedded there as signed code (map_image above)
 static void window_apply(module_t *m) {
     if (strcmp(m->name, "main") || m->nro) return;
     const char *e = getenv("DM_WINDOW_SIZE");
@@ -641,16 +644,27 @@ static void window_apply(module_t *m) {
         if (sscanf(e, "%ux%u%c", &a, &b, &x) != 2 || !a || !b || a > 0xFFFF || b > 0xFFFF) LOG("[RED] DM_WINDOW_SIZE=%s: must be <width>x<height> or original; the window stays %ux%u", e, w, h);
         else w = a, h = b;
     }
-    uint64_t fn[2] = {rows[r].wfn, rows[r].hfn}; unsigned v[2] = {w, h}, was[2];
+    uint64_t fn[2] = {rows[r].wfn, rows[r].hfn}; unsigned v[2] = {w, h}, mine[2] = {rows[r].w, rows[r].h}, was[2] = {0, 0};
     for (int i = 0; i < 2; i++) {
+        if (!fn[i]) continue;   // no width instruction: the game derives the width from the height
         if (fn[i] + 8 > m->text_end) { LOG("[RED] window_fn: main+%#llx is outside main's text; the window stays the pack's", (unsigned long long)fn[i]); return; }
         const uint32_t *p = (const uint32_t *)(m->base + fn[i]);
-        if ((p[0] & 0xFFE0001Fu) != 0x52800000u || p[1] != 0xD65F03C0u) {
-            LOG("[RED] window_fn: main+%#llx is %08x %08x, not movz w0,#imm; ret: the window stays the pack's", (unsigned long long)fn[i], p[0], p[1]); return;
+        // movz w<n>,#imm (32-bit, no shift); a leaf getter (then ret) may hold another size (an older pack's cut), any other site must hold the game's own value
+        if ((p[0] & 0xFFE00000u) != 0x52800000u || (p[1] != 0xD65F03C0u && ((p[0] >> 5) & 0xFFFF) != mine[i])) {
+            LOG("[RED] window_fn: main+%#llx is %08x %08x, neither movz w0,#imm; ret nor a movz of the game's own %u: the window stays the pack's", (unsigned long long)fn[i], p[0], p[1], mine[i]); return;
         }
         was[i] = (p[0] >> 5) & 0xFFFF;
     }
-    for (int i = 0; i < 2; i++) *(uint32_t *)(m->base + fn[i]) = 0x52800000u | (v[i] << 5);   // movz w0,#v (the old cut's bytes: 1920 = 00f08052, 1080 = 00878052)
+    for (int i = 0; i < 2; i++)
+        if (fn[i]) { uint32_t *p = (uint32_t *)(m->base + fn[i]); *p = (*p & ~(0xFFFFu << 5)) | (v[i] << 5); }   // movz w<n>,#v (the old cut's bytes: 1920 = 00f08052, 1080 = 00878052)
+    if (!fn[0]) {   // the game keeps its own aspect ratio: say the width it will compute, and when the height bound cannot raise the size above the game's own
+        unsigned gw = h * rows[r].w / rows[r].h;
+        LOG("window: height bound %u (%s; main+%#llx; the game's own %ux%u, the pack's bound %u): the game derives the width, about %ux%u", h, own ? "the game's own" : "DM_WINDOW_SIZE",
+            (unsigned long long)fn[1], rows[r].w, rows[r].h, was[1], gw, h);
+        if (!own && w != gw) LOG("[RED] DM_WINDOW_SIZE=%s: this game keeps its own %ux%u aspect ratio; the window is about %ux%u", e, rows[r].w, rows[r].h, gw, h);
+        if (h > rows[r].h) LOG("[RED] DM_WINDOW_SIZE=%s: a bound above the game's own %u does not raise the game's configured sizes", e, rows[r].h);
+        return;
+    }
     LOG("window: %ux%u (%s; main+%#llx / +%#llx; the game's own %ux%u, the pack's %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE",
         (unsigned long long)fn[0], (unsigned long long)fn[1], rows[r].w, rows[r].h, was[0], was[1]);
 }
