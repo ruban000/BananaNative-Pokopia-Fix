@@ -31,7 +31,7 @@ class DrawTrace(unittest.TestCase):
 #define VK_DESCRIPTOR_TYPE_SAMPLER 0
 #define VK_DESCRIPTOR_TYPE_STORAGE_BUFFER 7
 static uint64_t frame;
-static unsigned edges, buffers, images, targets, view_descriptions;
+static unsigned edges, buffers, images, targets, view_descriptions, sampler_descriptions;
 static char logs[131072]; static size_t log_bytes;
 static uint64_t vka_exec_frame(void) { return frame; }
 static int vka_env_str(const char *key, char *s, size_t n) { const char *v=getenv(key); if(v) snprintf(s,n,"%s",v); return !!v; }
@@ -60,6 +60,9 @@ typedef VkWriteDescriptorSet write;
 static void vka_tex_view_desc(int id,uintptr_t view,char *s,size_t n) {
  assert(id==7 && (view==0xbbb || view==0xbbc));view_descriptions++;
  snprintf(s,n,"serial=31403 actual-format=97 level=2+1 layer=3+1 actual-view=%#lx",(unsigned long)view);
+}
+static int vka_samp_desc(uintptr_t sampler,char *s,size_t n) {
+ assert(sampler==0xaaa || sampler==0xaab);sampler_descriptions++;snprintf(s,n,"emitted-sampler=%#lx",(unsigned long)sampler);return 1;
 }
 typedef struct { uint64_t serial;uintptr_t img; } vka_img;
 typedef struct { unsigned width,height; } extent;
@@ -102,7 +105,7 @@ int main(void) {
     draw_resource_trace(&d,sh,0x9000,20,1,0,0,0,0,0); assert(edges==5);
     /* Empty selectors are inert; shader-only selects direct draws by VS OR PS. */
     setenv("DM_VK_DRAW_TRACE_RANGE","",1);frame=7;
-    unsigned before=edges;draw_resource_trace(&d,sh,0,0,0,0,0,0,0,0);assert(edges==before&&!images&&!targets&&!view_descriptions);
+    unsigned before=edges;draw_resource_trace(&d,sh,0,0,0,0,0,0,0,0);assert(edges==before&&!images&&!targets&&!view_descriptions&&!sampler_descriptions);
     uint64_t keys[16];unsigned nk;
     assert(draw_trace_keys("7b,0x1C8",keys,&nk)&&nk==2&&keys[0]==123&&keys[1]==456);
     assert(!draw_trace_keys("7b,",keys,&nk));assert(!draw_trace_keys("7b,7b",keys,&nk));
@@ -125,7 +128,7 @@ int main(void) {
     R.cs[0]=101;R.ds=200;R.has_rt=1;R.nci=1;R.cim[0]=&colour;R.cslot[0]=2;R.cv[0]=0xc00;R.cf[2]=97;R.clv[0]=2;R.cl0[0]=3;R.cnl[2]=1;R.cext[2]=(extent){64,32};R.rt.color[2]=&logical;
     R.dim=&depth;R.dv=0xd00;R.dlv=1;R.dl0=4;R.dnl=1;R.df=126;R.dext=(extent){128,64};R.rt.depth=&depth;
     draw_resource_trace(&d,sh,0,0,0,0,0,0,0,0);
-    assert(edges==before+2&&images==2&&view_descriptions==2&&targets==2);
+    assert(edges==before+2&&images==2&&view_descriptions==2&&sampler_descriptions==2&&targets==2);
     assert(strstr(logs,"key 00000000000001c8 binding 257[0] source 1 reg 0")&&strstr(logs,"source-guest 0x3400 source-size 64 guest-base 0x3400 size 64 buffer 0xdef offset 128 range 64"));
     assert(strstr(logs,"binding 258[0]")&&strstr(logs,"sampler-id 11 sampler 0xaaa view 0xbbb")&&strstr(logs,"binding 258[1]")&&strstr(logs,"sampler-id 12 sampler 0xaab view 0xbbc"));
     assert(strstr(logs,"colour 2 serial 101 image-serial 100 image 0x900 view 0xc00 format 97 level 2 layer 3+1 shape 64x32"));
@@ -136,9 +139,12 @@ int main(void) {
     draw_resource_trace(&d,sh,0x5000,20,1,0,0,0,0,0);assert(edges==before+3);
     ps.key=457;draw_resource_trace(&d,sh,0x5000,20,1,0,0,0,0,0);assert(edges==before+3);ps.key=456;
     /* No sampler inspection after the exact two-recording-frame window. */
-    frame=12;unsigned descriptions=view_descriptions;draw_resource_trace(&d,sh,0x5000,20,1,0,0,0,0,0);assert(edges==before+3&&view_descriptions==descriptions);
+    frame=12;unsigned descriptions=view_descriptions,samplers=sampler_descriptions;draw_resource_trace(&d,sh,0x5000,20,1,0,0,0,0,0);assert(edges==before+3&&view_descriptions==descriptions&&sampler_descriptions==samplers);
     setenv("DM_VK_DRAW_TRACE_SHADERS","1c8,",1);frame=13;draw_resource_trace(&d,sh,0x5000,20,1,0,0,0,0,0);assert(edges==before+3);
     char longkeys[300];memset(longkeys,'a',sizeof longkeys);longkeys[sizeof longkeys-1]=0;setenv("DM_VK_DRAW_TRACE_SHADERS",longkeys,1);frame=14;draw_resource_trace(&d,sh,0x5000,20,1,0,0,0,0,0);assert(edges==before+3);
+    /* Empty selectors remain inert even with emitted image descriptors present. */
+    setenv("DM_VK_DRAW_TRACE_SHADERS","",1);setenv("DM_VK_DRAW_TRACE_RANGE","",1);frame=15;
+    samplers=sampler_descriptions;draw_resource_trace(&d,sh,0,0,0,0,0,0,0,0);assert(sampler_descriptions==samplers);
     puts("ok");
 }
 '''

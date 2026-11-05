@@ -1889,6 +1889,21 @@ static VkSampler sampler_of(const samp_par *p) {
     g_samp = realloc(g_samp, (size_t)(g_nsamp + 1) * sizeof *g_samp); g_samp[g_nsamp++] = (samp_ent){*p, s};
     return s;
 }
+// Selected draw diagnostics describe the immutable sampler actually emitted, even after its registry ID is reused. Never retain a pointer into the growing cache.
+int vka_samp_desc(VkSampler sampler, char *out, size_t size) {
+    if (!out || !size) return 0;
+    samp_par p = {0}; int found = 0;
+    pthread_mutex_lock(&g_tmu);
+    if (sampler) for (int i = 0; i < g_nsamp; i++) if (g_samp[i].s == sampler) { p = g_samp[i].p; found = 1; break; }
+    pthread_mutex_unlock(&g_tmu);
+    if (!found) { snprintf(out, size, "unknown"); return 0; }
+    int n = snprintf(out, size, "raw min=%u mag=%u wrap=%u,%u,%u lod=%g..%g bias=%g aniso=%g compare=%u,%u reduction=%u border=%g,%g,%g,%g device-max-bias=%g device-max-aniso=%g",
+        (unsigned)p.minf, (unsigned)p.magf, (unsigned)p.ws, (unsigned)p.wt, (unsigned)p.wr, p.lod_min, p.lod_max, p.lod_bias, p.aniso,
+        (unsigned)p.cmp_mode, (unsigned)p.cmp_func, (unsigned)p.reduction, p.border[0], p.border[1], p.border[2], p.border[3],
+        V.props.limits.maxSamplerLodBias, V.props.limits.maxSamplerAnisotropy);
+    if (n < 0 || (size_t)n >= size) { snprintf(out, size, "unknown(truncated)"); return 0; }
+    return 1;
+}
 static VkComponentSwizzle swz1(int n) { return n >= 0 && n <= 5 ? (VkComponentSwizzle)(n + 1) : VK_COMPONENT_SWIZZLE_IDENTITY; }   // NVN ZERO ONE R G B A = Vulkan's minus 1
 
 // The view a registered texture ID stands for: its view_t (levels, layers, format, target, swizzle, depth-stencil mode) over the texture's image. vt: the view type, or -1 for

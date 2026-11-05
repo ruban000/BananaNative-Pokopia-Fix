@@ -1257,6 +1257,10 @@ static uint64_t draw_resource_trace(const vka_dstate *d, vka_shader *const sh[VK
                      (unsigned long long)frame, (unsigned long long)draw, st, (unsigned long long)sh[st]->key, r->binding, r->elem, r->desc,
                      binding ? binding->kind : -1, binding ? binding->reg : -1, r->flags, r->dim, r->tid, r->sid,
                      (unsigned long long)(uintptr_t)ii->sampler, (unsigned long long)(uintptr_t)ii->imageView, ii->imageLayout, detail);
+                char sampler[384]; int known = vka_samp_desc(ii->sampler, sampler, sizeof sampler);
+                VLOG("draw sampler: frame %llu draw %llu stage %d key %016llx binding %u[%u] sampler-id %d sampler %#llx known %d: %s",
+                     (unsigned long long)frame, (unsigned long long)draw, st, (unsigned long long)sh[st]->key, r->binding, r->elem, r->sid,
+                     (unsigned long long)(uintptr_t)ii->sampler, known, sampler);
                 continue;
             }
             if (w->pTexelBufferView) {

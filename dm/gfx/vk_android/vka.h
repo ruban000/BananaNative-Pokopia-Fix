@@ -290,6 +290,7 @@ int nvn_sparse_trace_on(void);
 int nvn_sparse_trace_wants(uint64_t serial);
 void nvn_sparse_trace_tex(uint64_t serial, const void *pool, const void *mem, uint64_t size, uint64_t frame, const char *detail);
 void vka_tex_view_desc(int id, VkImageView view, char *out, size_t size);
+int vka_samp_desc(VkSampler sampler, char *out, size_t size);   // selected trace only: 1 = complete immutable creation parameters, 0 = unknown or truncated
 void vka_tex_trace_binding(int id, VkImageView view, int storage, uint64_t key, int stage, uint32_t binding);
 void vka_tex_trace_img(vka_img *im, const char *what, uint32_t level, uint32_t layer, uint32_t layers);
 void vka_tex_id_desc(int id, char *b, size_t n);   // texture ID id described for a [RED] line
