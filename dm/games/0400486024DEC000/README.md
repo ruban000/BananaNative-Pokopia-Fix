@@ -27,7 +27,14 @@ A Switch 2 game: update v131072 (the dump's content version; no `control.nacp`, 
 - The NSOs are ZBIC (system 22.0.0 on): `dm/tools/nso.py` needs the `zbic` package ([android/README.md](../../../android/README.md#the-environment)). The tools on this machine take it from a private folder through `PYTHONPATH` (the toolchain environment does not have it).
 - RomFS files are zstd with dictionary 1 from `Pack/ZsDic.pack.zs`, as Tears of the Kingdom's.
 - `romfs_marker`: `System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs` (the update's; the base has `Product.100`).
-- Movies: 26 `Event/Movie/*.webm`, each one AV1 1920x1080 yuv420p video stream ([Open](#open)).
+- Movies: 26 `Event/Movie/*.webm`, each one AV1 1920x1080 yuv420p video stream ([Movies](#movies)).
+
+## Movies
+
+- **What they are** (`ffprobe` and `trace_headers` over all 26): AV1 Main 8-bit 4:2:0, 1920x1080 at 60 fps, BT.709 matrix and primaries, sRGB transfer, limited range, no film grain, no audio track; encoded with SVT-AV1 and remuxed by QuickTime into Matroska. 1,394 s and 83,630 pictures in all, 1.64 GB, 2.8 to 21.5 Mbit/s. Each packet is a temporal unit without a temporal delimiter; every key frame packet repeats the sequence header (a key frame about every 5 s). From 9 s (the 8 `Dm_MelodyGet_*` jingles) to 311 s (`Dm_StaffCredit_0000`); `Dm_Title_*` are the title screen's background loops (99 s, then 30 s loops), on screen for as long as the player idles.
+- **Who plays them:** the pack's movie module is `subsdk0` (NintendoSDK movie 22.2.8). The game's player (main +0x3b5f08c…) asks `movie::VideoDecoder` for NV12 pictures in plain buffers (output format 3, pixel storage type 1, w*h*3/2 bytes a frame, one image pool per `VideoFrame`); the movie library's wrapper (subsdk0 +0xf6d0…) picks the codec by the decoder kind at +0x400 (3 = AV1) and calls the 14 `nn::codec` AV1 exports of the sdk module, then `ReadDecoderOutputImageNv12`. It aborts on any error of the AV1 Initialize (subsdk0 +0xf900 / +0xf9c0), so without an AV1 decoder the first movie would end the game.
+- **Status: implemented, unverified on a device (2026-11-05).** The Android host decodes them with dav1d ([AV1 movies on SDK 22.2](../../../docs/reference/movies.md#av1-movies-on-sdk-222-implemented-unverified-on-a-device)): all 14 entry points of this sdk build are taken over, pictures are bit-exact with ffmpeg's dav1d in the Linux test (and on 90 packets each of `Dm_MelodyGet_Sun_05`, `Dm_Title_0005` and `Dm_StaffCredit_0000`, decoded by the wrapper by hand). `DM_AV1_THREADS` sets dav1d's threads (default 2). Decode cost on one Ryzen 9 7950X core (ffmpeg's libdav1d, x86 assembly): 3.1 ms a picture (`Dm_StaffCredit_0000`), 4.4 ms (`Dm_Title_0075`), 6.4 ms (`Dm_Title_0065`, the hardest); on the phone not measured (estimated 8 to 22 ms a picture on one core).
+- **What the first boot should log:** `[codec] image pool 1920x1080 format 3, 1 picture(s)`, then `[codec] AV1 decoder 1: 1920x1080, input format N, output format 3, by transfer memory` (or `by remote memory`: which one the game takes is not known from the disassembly) `(dav1d, 2 thread(s) on the host)`, `[codec] AV1 decoder 1: first picture 1920x1080 into buffer 0`, and at the end of a movie `end of stream after N pictures` with N = 60 a second (570 for a 9.5 s jingle). No `[RED] nn::codec` line. A title loop shows a Flush or Stop and a new first picture, or a Finalize and an Initialize in the same memory.
 
 ## Shaders
 
@@ -71,11 +78,12 @@ Read from the code, none of it measured:
 ## Open
 
 - **First boot (Android):** heap request and `SetHeapSize` result, the alias region's high-water mark, the first frame. Nothing has run yet.
-- **AV1 movies:** all 26 movies are AV1, and the host's `nn::codec` video decoders have no AV1 (`hle_codec_video.c` answers its initialization unsupported). Whether the boot plays one (a logo or title movie) and what the movie player does with the failure is not known.
+- **AV1 movies** ([Movies](#movies)): decoded with dav1d, not run yet. To see on the first boot: which Initialize overload the game takes, the decode time and the CPU threads' load at 1080p60 on the phone (`[longframe]`, per-thread CPU), the heat over the title loop, whether the title loop plays and loops, and whether the player keeps 60 fps. Then the hardware decoder (MediaCodec `video/av01`, if the phone has `c2.qti.av1.decoder`) for heat. The movie library's other machinery (its event manager thread, sync point events, `movie::VideoFrame` sync handles) has only run with Bananza's VP9 player.
 - **Mesh and task programs:** 500 mesh and 20 task programs; on a phone without `VK_EXT_mesh_shader` the replay runs them as compute (`DM_VK_MESH_CS`), checked only on Mario Kart World.
 - Audio, the save path and input are untested.
 - The window size constant (`window_fn`) and the render-scale stub are not looked for.
 
 ## Found on this game
 
+- [AV1 movies on SDK 22.2](../../../docs/reference/movies.md#av1-movies-on-sdk-222-implemented-unverified-on-a-device): the host's AV1 decoder (dav1d) was made for its 26 movies.
 - [NVN2 task and mesh stages in a BNSH program's slots 7 and 8](../../../docs/reference/shaders.md#nvn2-task-and-mesh-stages-in-a-bnsh-programs-slots-7-and-8): 491 mesh and 17 task programs the split did not take; `runtime_shaders.py` found nothing in a RomFS that uses zstd dictionaries.
