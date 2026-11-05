@@ -105,6 +105,7 @@ int main(void) {
     // A command the service does not know: success with zeroed output (logged in red)
     d = request(0, 0, 9, 0, 1500); cmif(d, 1500);
     assert(h_sf_Send(sess, msg, 0x100) == 0 && reply(&out, NULL, NULL) == 0);
+    memset(msg, 0, sizeof msg); msg[0] = 2; assert(h_sf_Send(sess, msg, 0x100) == 0);   // the Close message devmgr::Finalize sends before closing the handle
     h_sf_Close(sess); h_sf_Close(root);
     printf("t_sf_auddmg: passed\n");
     return 0;
