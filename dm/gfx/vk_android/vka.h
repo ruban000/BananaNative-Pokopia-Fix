@@ -118,7 +118,7 @@ uint64_t vka_fence_last(void);                      // the last fence reserved (
 uint64_t vka_fence_queued(void);                    // the last fence handed to the queue: the most a submission (the present's) may wait for without a wait-before-signal on its own queue
 // The replay (vka_exec.c), entered by the replay worker (vka_worker.c) or inline by the mtl_* calls of the submitting thread
 void vka_rp_sub_begin(void);
-void vka_rp_exec(const uint8_t *handle, uint64_t fence);   // fence: the submission's, reserved before it (0 = taken at its commit)
+void vka_rp_exec(const uint8_t *handle, uint64_t fence);   // nonzero fence: reserved worker submission, all OP_FENCE_SYNC syncs already published before enqueue; 0: inline, taken at commit
 uint64_t vka_rp_sub_commit(uint64_t reserved);
 void vka_rp_queue_activate(uint64_t serial);
 void vka_rp_queue_forget(uint64_t serial);

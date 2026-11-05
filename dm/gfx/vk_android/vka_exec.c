@@ -715,7 +715,8 @@ static void exec(const uint8_t *p, int depth) {
             if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_sub_frame,
                                                                            (unsigned long long)t, (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, ms_now());
             break; }
-        case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_cur_fence ? g_cur_fence : vka_fence_last() + 1; s->fenced = 1; break; }   // the fence this submission commits with
+        // Reserved worker submissions published their syncs before enqueue. Replaying an older job must not overwrite a later fence on the same sync.
+        case OP_FENCE_SYNC: if (!g_cur_fence) { sync_t *s; memcpy(&s, a, 8); s->fence = vka_fence_last() + 1; s->fenced = 1; } break;   // inline: the fence taken at commit
         case OP_RENDER_COND: { const p_render_cond *rc = a;
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
             else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y);
