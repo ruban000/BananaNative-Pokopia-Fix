@@ -178,9 +178,18 @@ static int rt_same(const p_set_rt *a, int ha, const p_set_rt *b, int hb) {
 }
 // Game barriers (OP_BARRIER) that came with a pass open: taken inside it (DM_VK_BAR_KEEP), ended it at once, ended it later at a draw that needed it (bar_hazard)
 static uint64_t g_bar_in, g_bar_kept, g_bar_late;
+// DM_VK_PASS_LOG=<n> (diagnostic, live): one line per render pass for the next n passes: frame, targets (texture serial, format, level / layers), clears, draws. To compare the passes
+// of frames whose pictures differ (vka_ctl.c burst)
+static uint64_t g_plog_d0, g_plog_frame; static unsigned g_plog_i; static char g_plog_b[400];
+uint64_t vka_frame(void);
+static void plog_end(void) {
+    if (!g_plog_b[0]) return;
+    VLOG("pass: %s; %llu draws", g_plog_b, (unsigned long long)(g_draws - g_plog_d0)); g_plog_b[0] = 0;
+}
 void vka_rp_end(void) {
     if (PC.n) pc_flush();
     if (!R.on) return;
+    plog_end();
     vk.vkCmdEndRendering(g_cb);
     vka_barrier(g_cb);   // the pass's writes before whatever reads them next (copies, the present, the next pass's samples)
     R.on = 0; vka_tex_feedback(NULL, NULL, 0);
@@ -277,6 +286,12 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         if (dp || sp) snprintf(b + bn, bn < sizeof b ? sizeof b - bn : 0, " d:%d%s", R.df ? R.df : R.sf, (dp ? dp : sp)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "C" : "");
         vka_gp_pass(b);
     }
+    { static uint32_t gen; static long left; uint32_t g = atomic_load(&vka_env_gen); if (g != gen) { gen = g; left = (long)VKA_ENV("DM_VK_PASS_LOG", 0); }
+      if (left > 0) { left--; uint64_t f = vka_frame(); if (f != g_plog_frame) { g_plog_frame = f; g_plog_i = 0; }
+          size_t bn = (size_t)snprintf(g_plog_b, sizeof g_plog_b, "frame %llu #%u %ux%ux%u", (unsigned long long)f, g_plog_i++, w, h, layers);
+          for (int i = 0; i < n && bn < sizeof g_plog_b; i++) if (ca[i].imageView) bn += (size_t)snprintf(g_plog_b + bn, sizeof g_plog_b - bn, " c%d:s%llu/%#x%s", i, (unsigned long long)rt->color[i]->serial, rt->color[i]->d.format, ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "C" : "");
+          if ((dp || sp) && bn < sizeof g_plog_b) snprintf(g_plog_b + bn, sizeof g_plog_b - bn, " d:s%llu%s", (unsigned long long)rt->depth->serial, (dp ? dp : sp)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "C" : "");
+          g_plog_d0 = g_draws; } }
     vk.vkCmdBeginRendering(g_cb, &ri);
     R.on = 1; vka_n_rp++; if (g_dyn_filter == 2) vka_dyn_invalidate();   // DM_VK_DYN_FILTER=2: the dynamic state set again at each pass (bisect)
     for (int k = 0; k < nlate; k++) { VkClearAttachment c = {late[k]->asp, late[k]->ci >= 0 ? (uint32_t)late[k]->ci : 0, late[k]->in}; VkClearRect cr = {late[k]->rc, 0, layers}; vk.vkCmdClearAttachments(g_cb, 1, &c, 1, &cr); }

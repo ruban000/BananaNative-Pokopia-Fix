@@ -151,10 +151,20 @@ uint64_t mtl_sub_commit(void) {
     push(&j);
     return j.fence;
 }
+uint64_t vka_fence_last(void);
+int vka_wait_done(uint64_t fence, uint64_t timeout_ns);
+// DM_VK_PRESENT_SYNC=1 (diagnostic, live): the game's present returns only once every submission before it has run on the GPU, so whatever the game reads of the GPU's
+// output afterwards is this frame's (no frame in flight): to tell timing-dependent CPU reads of GPU results from other causes
+static void present_sync(void) {
+    if (!VKA_ENV("DM_VK_PRESENT_SYNC", 0)) return;
+    if (up()) { pthread_mutex_lock(&g_mu); while (g_qout != g_qin) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu); }
+    uint64_t f = vka_fence_last(); if (f) vka_wait_done(f, 2000000000ull);
+}
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    if (!up()) return vka_present_inline(t, period_s, crop);
+    if (!up()) { uint64_t tk = vka_present_inline(t, period_s, crop); present_sync(); return tk; }
     job_t j = {J_PRESENT}; j.ticket = vka_present_reserve(); j.t = *t; j.period = period_s; j.has_crop = crop != NULL; if (crop) memcpy(j.crop, crop, sizeof j.crop);
     push(&j);
+    present_sync();
     return j.ticket;
 }
 #endif
