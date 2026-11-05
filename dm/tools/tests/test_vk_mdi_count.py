@@ -66,6 +66,18 @@ class MultiDrawCount(unittest.TestCase):
             out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout
             self.assertEqual(out.strip(), "ok")
 
+    def test_device_gates(self):
+        # The count path needs drawIndirectCount and, for a maximum over one draw, multiDrawIndirect; the device logs drawIndirectFirstInstance, which GPU-written
+        # records with a non-zero firstInstance (BaseInstance, c0 + 0x644) need, and the readiness report lists both
+        dev = (ROOT / "dm/gfx/vk_android/vka_dev.c").read_text()
+        line = next(l for l in dev.splitlines() if l.strip().startswith("V.draw_count ="))
+        for need in ("f12.drawIndirectCount", "f2.features.multiDrawIndirect", "vk.vkCmdDrawIndirectCount", "vk.vkCmdDrawIndexedIndirectCount"):
+            self.assertIn(need, line)
+        self.assertIn("draw path: drawIndirectFirstInstance", dev)
+        rd = (ROOT / "dm/gfx/vk_android/vka_readiness.c").read_text()
+        for name in ("drawIndirectFirstInstance", "multiDrawIndirect", "drawIndirectCount", "shaderDrawParameters"):
+            self.assertIn('B("%s"' % name, rd)
+
 
 if __name__ == "__main__":
     unittest.main()

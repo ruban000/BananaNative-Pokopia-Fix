@@ -126,6 +126,7 @@ __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n)
     const VkPhysicalDeviceFeatures *F = &f2.features;
 #define B(name, v) put(&o, "feature." name "=%d\n", (v) ? 1 : 0);
     B("geometryShader", F->geometryShader) B("tessellationShader", F->tessellationShader) B("textureCompressionBC", F->textureCompressionBC)
+    B("drawIndirectFirstInstance", F->drawIndirectFirstInstance) B("multiDrawIndirect", F->multiDrawIndirect)
     B("textureCompressionASTC_LDR", F->textureCompressionASTC_LDR) B("textureCompressionETC2", F->textureCompressionETC2) B("shaderInt64", F->shaderInt64)
     B("shaderInt16", F->shaderInt16) B("shaderFloat64", F->shaderFloat64) B("shaderStorageImageReadWithoutFormat", F->shaderStorageImageReadWithoutFormat)
     B("shaderStorageImageWriteWithoutFormat", F->shaderStorageImageWriteWithoutFormat) B("shaderStorageImageExtendedFormats", F->shaderStorageImageExtendedFormats)
