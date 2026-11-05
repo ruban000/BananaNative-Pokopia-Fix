@@ -17,7 +17,7 @@
 0768a09a3688c91c	{"local":[4,4,4],"shared":2304}
 07aa8f2bc9f663be	{"local":[8,8,1],"shared":0}
 07e32815cb46c6a4	{"local":[64,1,1],"shared":49152}
-0823b08c2027a38d	{"local":[8,8,1],"shared":0}
+0823b08c2027a38d	{"local":[8,8,1],"shared":0,"tex":{"4":{"fmt":"R8Uint"}}}
 083be5e292dc622d	{"local":[64,1,1],"shared":0}
 083e8f7689fbee43	{"local":[64,1,1],"shared":49152}
 08c0188168a89d2c	{"local":[8,4,1],"shared":0}
@@ -678,7 +678,7 @@ e7703414cc10c29d	{"local":[64,1,1],"shared":0}
 e7d9e8e6ec956fc3	{"local":[64,1,1],"shared":49152}
 e7e9e1b9f81ea0dc	{"local":[64,1,1],"shared":0}
 e818693fc2d69091	{"local":[1,1,1],"shared":0}
-e8b67edbc1c57f9d	{"local":[8,8,1],"shared":0}
+e8b67edbc1c57f9d	{"local":[8,8,1],"shared":0,"tex":{"2":{"fmt":"R8Uint"}},"img":{"0":{"fmt":"R32Uint"}}}
 e91b474d1edd57c6	{"local":[32,1,1],"shared":0}
 e93ba9bb921b372a	{"local":[32,1,1],"shared":0}
 ea9ed3d2f783131a	{"local":[4,16,1],"shared":0}
