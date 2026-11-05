@@ -1110,13 +1110,47 @@ static int mdi_count_draw(uint64_t ind, uint32_t rec, uint64_t cnt, uint32_t n, 
 // shader can write memory. Own all metadata before ending rendering (which may run
 // other diagnostics); copies are illegal inside rendering. Existing source/staging
 // fence lifetimes apply. This observes the post-draw boundary, not a CPU guest read.
+static void image_trace_refuse_mask(uint64_t mask, uint64_t frame, uint64_t key, uint64_t draw, const char *why) {
+    for (unsigned r = 0; r < 16; r++) if (mask & (1ull << (32 + r))) vka_image_trace_omit(frame, key, draw, r, why);
+}
+static unsigned image_trace_collect(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], uint64_t mask,
+                                    uint64_t frame, uint64_t draw, uint32_t variant, vka_image_sample out[16]) {
+    (void)d;
+    mask &= 0xffffull << 32; if (!mask) return 0;
+    uint64_t fence = vka_exec_reserved_fence();
+    if (!fence || fence <= vka_done()) { image_trace_refuse_mask(mask, frame, sh[1]->key, draw, "unreserved_or_completed_fence"); return 0; }
+    unsigned n = 0;
+    for (int i = 0; i < g_wk.n[1]; i++) {
+        const vka_res *r = &g_wk.r[1][i]; if (r->what != VKA_R_TEX) continue;
+        const dmsh_vk_bind *b = NULL;
+        for (uint32_t j = 0; j < sh[1]->e->bind_count; j++) if (sh[1]->b[j].set == 0 && sh[1]->b[j].binding == r->binding) { b = &sh[1]->b[j]; break; }
+        if (!b || b->kind != DMSH_VK_KIND_TEX || b->reg < 0 || b->reg >= 16 || !(mask & (1ull << (32 + b->reg)))) continue;
+        mask &= ~(1ull << (32 + b->reg));
+        if (b->count != 1 || r->elem) { vka_image_trace_omit(frame, sh[1]->key, draw, (unsigned)b->reg, "descriptor_array"); continue; }
+        const VkDescriptorImageInfo *ii = NULL;
+        for (uint32_t j = 0; j < g_w.n; j++) if (g_w.w[j].dstBinding == r->binding && g_w.w[j].dstArrayElement == r->elem &&
+            g_w.w[j].descriptorCount == 1 && (g_w.w[j].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || g_w.w[j].descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) { ii = g_w.w[j].pImageInfo; break; }
+        const char *why = "descriptor_or_layout"; vka_image_view v = {0};
+        if (ii && ii->imageView && ii->imageLayout == VK_IMAGE_LAYOUT_GENERAL) why = vka_tex_snapshot_view(r->tid, ii->imageView, &v);
+        if (!why) for (int j = 0; j < R.nci; j++) if (R.cim[j]->img == v.image && R.clv[j] == v.level &&
+            v.layer >= R.cl0[j] && v.layer - R.cl0[j] < R.cnl[R.cslot[j]]) { why = "attachment_feedback"; break; }
+        if (why) { if (v.hold) vka_tex_drop(v.hold); vka_image_trace_omit(frame, sh[1]->key, draw, (unsigned)b->reg, why); continue; }
+        out[n++] = (vka_image_sample){.source = {.frame = frame, .key = sh[1]->key, .ordinal = draw, .kind = 2, .reg = (uint32_t)b->reg,
+            .binding = r->binding, .element = r->elem, .phase = 2, .stage = 1, .variant = variant, .vertex_key = sh[0] ? sh[0]->key : 0},
+            .view = v, .descriptor = *ii, .reserved_fence = fence, .texture_id = r->tid, .sampler_id = r->sid};
+    }
+    image_trace_refuse_mask(mask, frame, sh[1]->key, draw, "missing_direct_texture");
+    return n;
+}
 static void buffer_trace_draw(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], uint64_t ordinal, uint32_t variant) {
-    if (!sh[1] || d->rast_discard) return;
+    if (!sh[1]) return;
     uint64_t frame = vka_exec_frame();
-    uint64_t mask = vka_buffer_trace_mask(frame, sh[1]->key, 2) & (0xffffull << 16);
+    uint64_t mask = vka_buffer_trace_mask(frame, sh[1]->key, 2) & (0xffffffffull << 16);
     if (!mask) return;
-    if (draw_writes(sh, d)) return;
-    for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && (g_wk.pool[st] || g_wk.n[st] < 0)) return;
+    if (d->rast_discard || draw_writes(sh, d)) { image_trace_refuse_mask(mask, frame, sh[1]->key, ordinal, "discard_or_shader_write"); return; }
+    for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && (g_wk.pool[st] || g_wk.n[st] < 0)) { image_trace_refuse_mask(mask, frame, sh[1]->key, ordinal, "incomplete_or_bindless_walk"); return; }
+    vka_image_sample images[16];
+    unsigned nimages = image_trace_collect(d, sh, mask, frame, ordinal, variant, images);
     struct { vka_buffer_sample source; uint64_t prefix; } samples[16];
     unsigned count = 0;
     for (int i = 0; i < g_wk.n[1]; i++) {
@@ -1137,9 +1171,13 @@ static void buffer_trace_draw(const vka_dstate *d, vka_shader *const sh[VKA_NSTA
         samples[count++].prefix = prefix;
         mask &= ~(1ull << (16 + b->reg)); // at most one descriptor per selected UBO slot
     }
-    if (!count) return;
+    if (!count && !nimages) return;
     vka_rp_end();
     for (unsigned i = 0; i < count; i++) vka_buffer_trace_copy(g_cb, &samples[i].source, samples[i].prefix);
+    for (unsigned i = 0; i < nimages; i++) {
+        vka_image_trace_copy(g_cb, &images[i]);
+        vka_tex_drop(images[i].view.hold); // no hold may suppress the next draw's storage upgrade
+    }
 }
 
 // Bounded draw evidence from the existing resource walk and resolved descriptor writes; no second walk or memory read.

@@ -1709,6 +1709,50 @@ static void view_desc_locked(int id, VkImageView view, char *out, size_t size) {
              (unsigned long long)serial, (void *)view, (void *)im->img, hit->f, hit->t, hit->asp, hit->l0, hit->nl, hit->a0, hit->na,
              im->base, im->vmin, im->w, im->h, im->layers, im->depth);
 }
+// Raw copies use the image's format, not the view's component mapping or sRGB decode.
+// This allowlist excludes compressed, packed/multiplane and depth/stencil formats.
+static unsigned snapshot_bpp(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: return 1;
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16_SFLOAT: return 2;
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_SFLOAT: return 4;
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_SFLOAT: return 8;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+    default: return 0;
+    }
+}
+const char *vka_tex_snapshot_view(int id, VkImageView view, vka_image_view *out) {
+    memset(out, 0, sizeof *out);
+    const char *why = "unresolved_view";
+    pthread_mutex_lock(&g_tmu);
+    uint64_t serial = id > 0 && id < g_ntreg ? g_treg[id].t.serial : 0;
+    smap_ent *e = serial ? map_get(serial) : NULL; vka_img *im = e ? e->im : NULL;
+    const view_ent *hit = NULL;
+    for (const view_ent *v = im ? im->views : NULL; v; v = v->next) if (view && v->v == view) { hit = v; break; }
+    if (!hit) goto done; // Never substitute the ID's newest image for a different emitted view.
+    why = "unsupported_image";
+    if (!im->img || !im->inited || im->samples != 1 || im->depth != 1 || im->d.target == NVN_TEXTURE_TARGET_3D ||
+        im->rs || im->vpool || im->vtrack || im->vbind || im->dcap || im->base || im->vmin || !(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) goto done;
+    why = "ambiguous_subresource";
+    if (hit->t != VK_IMAGE_VIEW_TYPE_2D || hit->asp != VK_IMAGE_ASPECT_COLOR_BIT || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+        hit->nl != 1 || hit->na != 1 || hit->l0 >= im->levels || hit->l0 >= 32 || hit->a0 >= im->layers) goto done;
+    unsigned bpp = snapshot_bpp(im->f.vk);
+    why = "unsupported_format";
+    if (!bpp || snapshot_bpp(hit->f) != bpp || im->f.bw != 1 || im->f.bh != 1 || im->f.bpb != bpp) goto done;
+    uint32_t w = im->w >> hit->l0, h = im->h >> hit->l0; if (!w) w = 1; if (!h) h = 1;
+    why = "image_size_limit";
+    if (!im->w || !im->h || w > INT32_MAX || h > INT32_MAX || (uint64_t)w * h > (8u * 1024 * 1024) / bpp) goto done;
+    *out = (vka_image_view){im, serial, im->serial, im->img, hit->v, im->f.vk, hit->f, hit->t, hit->asp, hit->swz,
+        hit->l0, hit->nl, hit->a0, hit->na, w, h, 1, im->samples, bpp};
+    im->refs++; im->holds++; why = NULL;
+done:
+    pthread_mutex_unlock(&g_tmu); return why;
+}
 void vka_tex_view_desc(int id, VkImageView view, char *out, size_t size) {
     pthread_mutex_lock(&g_tmu); view_desc_locked(id, view, out, size); pthread_mutex_unlock(&g_tmu);
 }

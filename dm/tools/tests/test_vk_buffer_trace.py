@@ -8,23 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 
 
-class BufferTrace(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("cc"), "C compiler required")
-    def test_gpu_boundaries_and_fence_retirement(self):
-        source = (ROOT / "dm/gfx/vk_android/vka_buftrace.c").read_text()
-        source = source.replace('#include "vka_capture.h"', '')
-        header = (ROOT / "dm/gfx/vk_android/vka.h").read_text()
-        sample = header[header.index("typedef struct {\n    uint64_t frame, key, ordinal, guest"):]
-        sample = sample[:sample.index("uint64_t vka_buffer_trace_mask")]
-        draw = (ROOT / "dm/gfx/vk_android/vka_draw.c").read_text()
-        dispatch = draw[draw.index("static void buffer_trace_dispatch("):draw.index("int dm_sdk_ounce")]
-        fragment = draw[draw.index("static void buffer_trace_draw("):draw.index("static int draw_trace_overlap(")]
-        writes = draw[draw.index("static int draw_writes("):draw.index("// After a game barrier")]
-        # The hook is on the successful draw tail, before a later draw can rebind.
-        tail = draw[draw.index("    uint64_t trace_ind_size ="):draw.index("// Read descriptors actually emitted")]
-        self.assertIn("buffer_trace_draw(d, sh, trace_draw, k.fs_variant);", tail)
-        self.assertLess(tail.index("draw_resource_trace("), tail.index("buffer_trace_draw("))
-        harness = r'''
+TRACE_HARNESS = r'''
 #define __ANDROID__ 1
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
@@ -92,8 +76,9 @@ static void barrier_cmd(VkCommandBuffer cb,VkPipelineStageFlags s,VkPipelineStag
 static struct {
  PFN_vkCreateBuffer vkCreateBuffer;PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements;
  PFN_vkAllocateMemory vkAllocateMemory;PFN_vkBindBufferMemory vkBindBufferMemory;PFN_vkMapMemory vkMapMemory;
+ PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer;
  PFN_vkCmdCopyBuffer vkCmdCopyBuffer;PFN_vkCmdPipelineBarrier vkCmdPipelineBarrier;
-} vk={create_buffer,requirements,alloc_memory,bind_memory,map_memory,copy_cmd,barrier_cmd};
+} vk={create_buffer,requirements,alloc_memory,bind_memory,map_memory,NULL,copy_cmd,barrier_cmd};
 static void execute(void) {
  assert(!awaiting_copy&&!awaiting_war);
  for(unsigned i=0;i<ncommands;i++) {
@@ -102,8 +87,13 @@ static void execute(void) {
  } ncommands=0;
 }
 static void producer(mock_buffer *b,int value) { assert(!awaiting_copy&&!awaiting_war);commands[ncommands++]=(typeof(commands[0])){NULL,b,0,0,b->size,value}; }
+
+static uint64_t current_reserved=123, done_fence;
+static uint64_t vka_exec_reserved_fence(void) { return current_reserved; }
+static uint64_t vka_done(void) { return done_fence; }
+typedef struct vka_img vka_img;
 '''
-        selection_types = r'''
+TRACE_SELECTION_TYPES = r'''
 enum { VKA_NSTAGE=6,VKA_R_IMG=2,VKA_R_GMEM_LOG=3,DMSH_VK_BF_RW=1,VKA_R_BUF=1,DMSH_VK_KIND_SBUF=1,DMSH_VK_KIND_CBUF=2,DMSH_VK_KIND_UBO_PTR=3 };
 typedef struct { uint64_t addr,size; } vka_range;
 typedef struct { struct { vka_range ssbo[8][16],ubo[8][16]; } b; int rast_discard; } vka_dstate;
@@ -129,7 +119,36 @@ static void vka_rp_end(void) {
  if(clobber_shader) clobber_shader->key=0;
  memset(g_w.w,0,sizeof g_w.w);memset(g_wk.r[1],0,sizeof g_wk.r[1]);
 }
+
+static unsigned image_trace_collect(const vka_dstate *d,vka_shader *const sh[VKA_NSTAGE],uint64_t mask,uint64_t frame,uint64_t draw,uint32_t variant,vka_image_sample out[16]) {
+ (void)d;(void)sh;(void)mask;(void)frame;(void)draw;(void)variant;(void)out;return 0;
+}
+static void image_trace_refuse_mask(uint64_t m,uint64_t f,uint64_t k,uint64_t d,const char *why) { (void)m;(void)f;(void)k;(void)d;(void)why; }
+static void vka_tex_drop(vka_img *im) { (void)im;assert(0); }
 '''
+
+
+class BufferTrace(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "C compiler required")
+    def test_gpu_boundaries_and_fence_retirement(self):
+        source = (ROOT / "dm/gfx/vk_android/vka_buftrace.c").read_text()
+        source = source.replace('#include "vka_capture.h"', '')
+        header = (ROOT / "dm/gfx/vk_android/vka.h").read_text()
+        sample = header[header.index("typedef struct {\n    uint64_t frame, key, ordinal, guest"):]
+        sample = sample[:sample.index("uint64_t vka_buffer_trace_mask")]
+        image_view = header[header.index("typedef struct {\n    vka_img *hold;"):header.index("const char *vka_tex_snapshot_view")]
+        image_sample = header[header.index("typedef struct {\n    vka_buffer_sample source;"):header.index("uint64_t vka_exec_reserved_fence")]
+        sample = image_view + sample + image_sample
+        draw = (ROOT / "dm/gfx/vk_android/vka_draw.c").read_text()
+        dispatch = draw[draw.index("static void buffer_trace_dispatch("):draw.index("int dm_sdk_ounce")]
+        fragment = draw[draw.index("static void buffer_trace_draw("):draw.index("static int draw_trace_overlap(")]
+        writes = draw[draw.index("static int draw_writes("):draw.index("// After a game barrier")]
+        # The hook is on the successful draw tail, before a later draw can rebind.
+        tail = draw[draw.index("    uint64_t trace_ind_size ="):draw.index("// Read descriptors actually emitted")]
+        self.assertIn("buffer_trace_draw(d, sh, trace_draw, k.fs_variant);", tail)
+        self.assertLess(tail.index("draw_resource_trace("), tail.index("buffer_trace_draw("))
+        harness = TRACE_HARNESS
+        selection_types = TRACE_SELECTION_TYPES
         test = r'''
 static void dispose(bt_packet *p) { uint64_t n=p->h.n;vcap_hbuf_free(&p->h);free(p);atomic_fetch_sub(&g_bt_live_bytes,n); }
 static void fire_all(void) { for(unsigned i=0;i<ncompletions;i++) completions[i].fn(completions[i].arg);ncompletions=0; }

@@ -290,6 +290,17 @@ int nvn_sparse_trace_on(void);
 int nvn_sparse_trace_wants(uint64_t serial);
 void nvn_sparse_trace_tex(uint64_t serial, const void *pool, const void *mem, uint64_t size, uint64_t frame, const char *detail);
 void vka_tex_view_desc(int id, VkImageView view, char *out, size_t size);
+// Exact emitted-view snapshot; its short hold must be dropped before recording another draw.
+typedef struct {
+    vka_img *hold;
+    uint64_t serial, image_serial;
+    VkImage image; VkImageView view;
+    VkFormat image_format, view_format; VkImageViewType type; VkImageAspectFlags aspect;
+    VkComponentMapping swizzle;
+    uint32_t level, levels, layer, layers, width, height, depth, samples, bpp;
+} vka_image_view;
+const char *vka_tex_snapshot_view(int id, VkImageView view, vka_image_view *out);
+
 int vka_samp_desc(VkSampler sampler, char *out, size_t size);   // selected trace only: 1 = complete immutable creation parameters, 0 = unknown or truncated
 void vka_tex_trace_binding(int id, VkImageView view, int storage, uint64_t key, int stage, uint32_t binding);
 void vka_tex_trace_img(vka_img *im, const char *what, uint32_t level, uint32_t layer, uint32_t layers);
@@ -450,6 +461,17 @@ uint64_t vka_buffer_trace_mask(uint64_t frame, uint64_t key, int phase);
 void vka_buffer_trace_copy(VkCommandBuffer cb, const vka_buffer_sample *sample, uint64_t prefix);
 void vka_buffer_trace_commit(uint64_t fence, int submitted);
 void vka_buffer_trace_failed(void);
+typedef struct {
+    vka_buffer_sample source;
+    vka_image_view view;
+    VkDescriptorImageInfo descriptor;
+    uint64_t reserved_fence;
+    int texture_id, sampler_id;
+} vka_image_sample;
+uint64_t vka_exec_reserved_fence(void); // zero for inline recording: image diagnostics refuse it
+void vka_image_trace_omit(uint64_t frame, uint64_t key, uint64_t draw, unsigned reg, const char *reason);
+void vka_image_trace_copy(VkCommandBuffer cb, const vka_image_sample *sample);
+
 void vka_draw_stats(uint64_t *draws, uint64_t *skipped, uint64_t *dispatches, uint64_t *pipelines);
 
 // ---------- Present (vka_present.c) ----------
