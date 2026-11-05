@@ -735,6 +735,21 @@ static void walk_all(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE]) {
 // are the same word for word skips its push (DM_VK_PUSH_DEDUP=0: every draw pushes). Pushed descriptors stay bound across draws and pipeline binds while the layout stays
 // the same (Vulkan's pipeline layout compatibility); a new command buffer or a set bound in their place forgets them (vka_dyn_invalidate, bind_sets)
 static struct { uint64_t *w; size_t n, cap; } g_pd[2];
+// Set 1 survives subsequent binds at the same bind point with the same layout. A different set-0 layout can disturb it, including on a draw that does not read the pool.
+// Use exact layout identity rather than assuming that layouts with the same pool set are compatible. These are command-buffer bindings, not resource-content caches.
+static struct { VkPipelineLayout layout; VkDescriptorSet set; } g_pool_bind[2];
+static uint64_t g_pool_bind_calls, g_pool_bind_emitted;
+static void pool_bind_layout(VkPipelineBindPoint bp, VkPipelineLayout layout) {
+    int c = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
+    if (g_pool_bind[c].layout != layout) { g_pool_bind[c].layout = layout; g_pool_bind[c].set = VK_NULL_HANDLE; }
+}
+static void pool_bind(VkPipelineBindPoint bp, VkPipelineLayout layout, VkDescriptorSet set) {
+    int c = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
+    g_pool_bind_calls++;
+    if (VKA_ENV("DM_VK_POOL_BIND_FILTER", 1) && g_pool_bind[c].set == set) return;
+    vk.vkCmdBindDescriptorSets(g_cb, bp, layout, 1, 1, &set, 0, NULL);
+    g_pool_bind[c].set = set; g_pool_bind_emitted++;
+}
 static uint64_t g_pd_skip, g_pd_push, g_pd_skip_all, g_pd_push_all, g_pd_delta_w, g_pd_delta_all;
 // The replay statistics' line: driver segments bound again (DM_VK_DRV_MEMO) and pushes skipped (DM_VK_PUSH_DEDUP) since the last line
 void vka_drv_memo_stats(char *b, size_t n) {
@@ -746,6 +761,9 @@ void vka_drv_memo_stats(char *b, size_t n) {
              "partial pushes (DM_VK_PUSH_DELTA) wrote %.0f %% of their descriptors", h + m ? 100.0 * h / (double)(h + m) : 0.0, sk + pu ? 100.0 * sk / (double)(sk + pu) : 0.0,
              g_pd_delta_all ? 100.0 * g_pd_delta_w / (double)g_pd_delta_all : 0.0);
     g_pd_delta_w = g_pd_delta_all = 0;
+    size_t used = n ? strnlen(b, n) : 0;
+    if (used < n) snprintf(b + used, n - used, "; pool binds %llu/%llu emitted", (unsigned long long)g_pool_bind_emitted, (unsigned long long)g_pool_bind_calls);
+    g_pool_bind_emitted = g_pool_bind_calls = 0;
 }
 static VkWriteDescriptorSet g_dw[512]; static uint32_t g_dwn;   // the writes that changed (push_same returns 2)
 static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
@@ -810,6 +828,7 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         g_w.w[k] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = g_xw.binding[x], .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &g_w.bi[k]};
     }
     uint64_t t2_ = g_prof ? cntvct() : 0;
+    pool_bind_layout(bp, lay->layout);
     if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
                      if (ps == 0) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_w.n, g_w.w);
                      else if (ps == 2) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_dwn, g_dw); }
@@ -821,7 +840,7 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 0, 1, &set, 0, NULL);
     }
     if (g_prof) g_ps[2] += cntvct() - t2_;
-    if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
+    if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) pool_bind(bp, lay->layout, ps); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
     return 1;
 }
 // Images first used by a draw (from the walk, walk_all), or remade with storage use (vka_tex.c img_storage_upgrade): dry = only whether there is one
@@ -966,7 +985,7 @@ static void ib_bind(VkBuffer b, VkDeviceSize o, VkIndexType t) {
     if (IB.valid && g_vb_filter && IB.b == b && IB.o == o && IB.t == t) return;
     vk.vkCmdBindIndexBuffer(g_cb, b, o, t); IB.valid = 1; IB.b = b; IB.o = o; IB.t = t;
 }
-void vka_dyn_invalidate(void) { DY.valid = 0; VB.valid = 0; IB.valid = 0; g_pd[0].n = g_pd[1].n = 0; }
+void vka_dyn_invalidate(void) { DY.valid = 0; VB.valid = 0; IB.valid = 0; g_pd[0].n = g_pd[1].n = 0; memset(g_pool_bind, 0, sizeof g_pool_bind); }
 #define PT(i) do { if (g_prof) { uint64_t t_ = cntvct(); if ((i) > 0 && g_pt_ph == (i) - 1) g_pt[(i) > 0 ? (i) - 1 : 0] += t_ - g_pt_last; g_pt_last = t_; g_pt_ph = (i); } } while (0)
 void vka_draw_prof(char *b, size_t n, double draws) {
     if (!g_prof || draws <= 0) { if (n) b[0] = 0; return; }

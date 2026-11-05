@@ -413,6 +413,7 @@ DM_VK_PCACHE	path	`=<file>` (Android, restart) the Vulkan pipeline cache file; `
 DM_VK_PCACHE_SAVE_S	switch	`=<s>` (Android, live, 20; at least 1) the pipeline cache file is saved at most every s seconds while new pipelines are made (the save at the end of the run and at suspend is forced)
 DM_VK_PLACED	diagnostic	`0` (Android, restart, on) memory pools stay anonymous memory instead of placed Vulkan memory, so the GPU sees none (draws then default off, `DM_VK_DRAW`)
 DM_VK_PLACE_LAZY	switch	`0` (Android, read once, on) every memory pool is placed when it is made, instead of when the GPU is first given an address in it ([memory.md](reference/memory.md))
+DM_VK_POOL_BIND_FILTER	switch	`0` (Android, live, on) rebinds the bindless pool descriptor set for every use; normally identical actual sets with the same pipeline layout and bind point remain bound until command-buffer state is invalidated
 DM_VK_PREFAULT	diagnostic	`0` (Android, restart, on) placed maps are not faulted in after placing; a diagnostic to measure whether the driver needs it
 DM_VK_PRESENT_SYNC	diagnostic	`=1` (Android, live): the game's present returns only once every submission before it has run on the GPU (no frame in flight), to tell timing-dependent CPU reads of GPU results from other causes (`vka_worker.c`)
 DM_VK_PRETRANSFORM	switch	`0` (Android, live: makes a new swapchain, 1) no pre-rotation: the compositor rotates the picture instead of it being drawn in the panel's own orientation
