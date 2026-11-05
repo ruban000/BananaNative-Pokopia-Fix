@@ -406,6 +406,9 @@ DM_VK_NANSCAN_FS	diagnostic	`=<key>` (Android, restart) with `DM_VK_NANSCAN`, a 
 DM_VK_NANSCAN_SERIAL	diagnostic	`=<serial>` (Android, restart) with `DM_VK_NANSCAN=2`, split only passes into the image of that texture serial (default any)
 DM_VK_NANSCAN_STEP	diagnostic	`=<n>` (Android, restart, default 64) with `DM_VK_NANSCAN=2`, the pass is ended and scanned after every n draws
 DM_VK_NUMERIC_TRACE	diagnostic	`1` logs once for each integer format at a shader binding the requested and the created view format, the numeric class (float / sint / uint) and the texture, to find a view whose numeric type does not match what the shader declares (Vulkan replay on Android)
+DM_VK_PAGEOUT	diagnostic	`=1` (Android, live, off) requests lossless kernel page-out of cold guest texture storage; pins mappings and excludes placed/pending driver memory; accepted advice is not a reclaimed-memory measurement
+DM_VK_PAGEOUT_MB	diagnostic	`=<MiB>` (Android, live, 16; at most 256) per-second paging advice budget, in requests of at most 1 MiB; validate FPS, faults, zram cost and net available memory before enabling
+DM_VK_PAGEOUT_S	diagnostic	`=<seconds>` (Android, live, 3) minimum time since upload before opt-in texture-storage paging; values from 0 to 3600
 DM_VK_PASS_CLEARS	switch	`0` (Android, live: the next submission, 1) clears of the bound targets are made outside the render pass instead of inside the pass over them (each such clear then ends the pass)
 DM_VK_PASS_KEEP	switch	`0` (Android, live: the next submission, 1) a render target change ends the open pass at once instead of only when the next draw's targets differ
 DM_VK_PASS_LOG	diagnostic	`=<n>` (Android, live): one log line for each of the next n render passes: frame, size, colour and depth targets (texture serial, format, `C` for a clear on load) and its draws (`vka_draw.c`), to compare the passes of frames whose pictures differ

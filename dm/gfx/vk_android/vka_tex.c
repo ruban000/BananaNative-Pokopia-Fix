@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 // ---------- Formats ----------
 typedef struct { VkFormat vk; uint8_t kind, srgb; } fmt_ent;
@@ -1243,6 +1244,154 @@ void vka_tex_top(char *b, size_t n) {
     pthread_mutex_unlock(&g_tmu);
 }
 
+// ---------- Cold texture storage page-out (opt-in until measured) ----------
+// Only resident CPU storage copies are candidates; image data and guest bytes stay intact.
+// MADV_PAGEOUT is a reclaim request, not proof that the kernel reclaimed any pages.
+// Each syscall is at most 1 MiB, each sweep at most 16 MiB by default. The pool/mapping
+// lease precedes g_tmu; vka_mem_pageout excludes placed and pending driver mappings
+// under the placement lock through the syscall. A failed request keeps its cursor.
+#include "vka_pageout.h"
+static _Atomic uint64_t g_po_bytes, g_po_calls, g_po_fail;
+static void *pageout_main(void *arg) {
+    (void)arg; pthread_setname_np(pthread_self(), "vk-pageout");
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
+    size_t cursor = 0; long pg = sysconf(_SC_PAGESIZE);
+    uintptr_t pm = (uintptr_t)(pg > 0 ? pg : 4096) - 1;
+    for (;;) {
+        sleep(1);
+        if (!VKA_ENV("DM_VK_PAGEOUT", 0)) continue;
+        double sec = VKA_ENVF("DM_VK_PAGEOUT_S", 3.0), mb = VKA_ENVF("DM_VK_PAGEOUT_MB", 16.0);
+        if (!(sec >= 0 && sec <= 3600 && mb > 0 && mb <= 256)) continue;
+        uint64_t now = now_ns(), wait = (uint64_t)(sec * 1e9), budget = (uint64_t)(mb * 1048576.0) & ~(uint64_t)pm;
+        for (unsigned scan = 0; scan < 4096 && budget; scan++) {
+            nvn_pool_use(1);
+            pthread_mutex_lock(&g_tmu);
+            if (!g_nlive) { pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); break; }
+            if (cursor >= (size_t)g_nlive) cursor = 0;
+            vka_img *im = g_live[cursor++]; uintptr_t lo, hi;
+            if (!im->from_mem || im->gpu_owned || im->vpool || !im->mem || !im->pool || !im->pgen || !im->up_ns || now < im->up_ns || now - im->up_ns < wait || img_pool_dead(im) ||
+                !vkp_chunk((uintptr_t)im->mem, nvn_tex_data_size(&im->d), pm, im->po_off, budget, &lo, &hi)) {
+                pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); continue;
+            }
+            int r = vka_mem_pageout(lo, hi);
+            if (r) {   // 1: request accepted, -1: syscall refused, 0: mapping excluded
+                budget -= hi - lo; atomic_fetch_add(&g_po_calls, 1);
+                if (r > 0) { atomic_fetch_add(&g_po_bytes, hi - lo); im->po_off += hi - lo; }
+                else atomic_fetch_add(&g_po_fail, 1);
+            }
+            pthread_mutex_unlock(&g_tmu);
+            nvn_pool_use(0);
+        }
+    }
+    return NULL;
+}
+static void pageout_start(void) {
+    if (!VKA_ENV("DM_VK_PAGEOUT", 0)) return;
+    static _Atomic int started;
+    if (atomic_load_explicit(&started, memory_order_relaxed) || atomic_exchange(&started, 1)) return;
+    pthread_t th;
+    if (!pthread_create(&th, NULL, pageout_main, NULL)) pthread_detach(th);
+    else atomic_store(&started, 0);
+}
+void vka_tex_pageout_stats(uint64_t *bytes, uint64_t *calls, uint64_t *fails) { pageout_start(); *bytes = atomic_load(&g_po_bytes); *calls = atomic_load(&g_po_calls); *fails = atomic_load(&g_po_fail); }
+
+// The image census (ctl "census", diagnostic): one TSV row per live image, and a summary line of what holds the image memory: how many registered texture IDs name each
+// image (an image no ID names now, whose texture was not finalized, is reachable only by a later attachment or copy through that texture object), whether a newer live
+// image lies over part of its storage (the game reused that memory for another texture), and the bytes by content class. Caller: the frame boundary (vka_ctl.c)
+static int ptr_cmp(const void *a, const void *b) { uintptr_t x = (uintptr_t)*(vka_img *const *)a, y = (uintptr_t)*(vka_img *const *)b; return x < y ? -1 : x > y; }
+void vka_tex_census(const char *path, char *sum, size_t n) {
+    pthread_mutex_lock(&g_tmu);
+    int nl = g_nlive; vka_img **v = malloc((size_t)(nl ? nl : 1) * sizeof *v); uint32_t *nid = calloc((size_t)(nl ? nl : 1), sizeof *nid); uint8_t *newer = calloc((size_t)(nl ? nl : 1), 1);
+    if (!v || !nid || !newer) { pthread_mutex_unlock(&g_tmu); free(v); free(nid); free(newer); snprintf(sum, n, "census: no memory"); return; }
+    memcpy(v, g_live, (size_t)nl * sizeof *v); qsort(v, (size_t)nl, sizeof *v, ptr_cmp);
+#define IDX(im) ({ vka_img *k_ = (im); vka_img **h_ = bsearch(&k_, v, (size_t)nl, sizeof *v, ptr_cmp); h_ ? (int)(h_ - v) : -1; })
+    int nreg = 0;
+    for (int id = 1; id < g_ntreg; id++) { if (!g_treg[id].t.serial) continue; nreg++; smap_ent *e = map_get(g_treg[id].t.serial); if (e && e->im) { int k = IDX(e->im); if (k >= 0) nid[k]++; } }
+    // newer[k]: a live image of a later serial over part of image k's storage that is not the same storage start (a texture made over reused memory)
+    for (int i = 0; i < g_nbymem; i++) {
+        const mem_ent *a = &g_bymem[i];
+        for (int j = i + 1; j < g_nbymem && g_bymem[j].lo < a->hi; j++) {
+            const mem_ent *b = &g_bymem[j]; if (b->lo == a->lo) continue;
+            int ka = IDX(a->im), kb = IDX(b->im);
+            if (a->im->serial < b->im->serial) { if (ka >= 0) newer[ka] = 1; } else if (kb >= 0) newer[kb] = 1;
+        }
+    }
+    FILE *f = path && *path ? fopen(path, "we") : NULL;
+    if (f) fprintf(f, "serial\tmode\tgpu\ttrack\tpdead\tsparse\tfmt\ttarget\tw\th\tdepth\tlayers\tlevels\tbase\tbytes\tdedicated\tnids\tnewer_over\trefs\tviews\tstorage\tstorage_size\tpool_flags\tflags\n");
+    static const char *const mn[4] = {"zero", "fill", "track", "sparse"};
+    uint64_t by_noid = 0, by_noid_newer = 0, by_newer = 0, by_ded = 0, by_cls[6] = {0}; int c_noid = 0, c_noid_newer = 0, c_cls[6] = {0};
+    for (int k = 0; k < nl; k++) {
+        vka_img *im = v[k]; int nv = 0; for (view_ent *w = VIEWS(im); w; w = w->next) nv++;
+        int cls = im->gpu_owned ? 4 : im->mode < 4 ? im->mode : 5; by_cls[cls] += im->bytes; c_cls[cls]++;
+        if (!nid[k]) { by_noid += im->bytes; c_noid++; if (newer[k]) { by_noid_newer += im->bytes; c_noid_newer++; } }
+        if (newer[k]) by_newer += im->bytes;
+        if (!im->m.blk) by_ded += im->bytes;
+        if (f) fprintf(f, "%llu\t%s\t%d\t%d\t%d\t%d\t%#x\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%llu\t%d\t%u\t%u\t%d\t%d\t%p\t%llu\t%#x\t%#x\n", (unsigned long long)im->serial, mn[im->mode & 3], im->gpu_owned,
+                       im->track, im->pdead, im->vpool != NULL, im->d.format, im->d.target, im->w, im->h, im->depth, im->layers, im->levels, im->base, (unsigned long long)im->bytes, !im->m.blk,
+                       nid[k], newer[k], im->refs, nv, (const void *)im->mem, (unsigned long long)im->L.size, pool_flags(im->pool), im->d.flags);
+    }
+#undef IDX
+    // What the same images would take with other usage (measured: an image made and its requirements read, no memory): A0 as made (check), A1 without attachment and storage
+    // use, A2 also without the format list / MUTABLE_FORMAT. Only images whose content is their storage (not GPU-written, not sparse, single-sampled)
+    typedef struct { VkFormat vk, alt; VkFormat x[4]; int nx; uint32_t w, h, z, lv, ly; VkImageUsageFlags u; int cube, is3d; uint64_t bytes; uint8_t cls; } alt_q;
+    alt_q *aq = malloc((size_t)(nl ? nl : 1) * sizeof *aq); int naq = 0;
+    for (int k = 0; aq && k < nl; k++) { vka_img *im = v[k];
+        if (im->gpu_owned || im->vpool || im->rs || im->samples > 1 || im->mode == ST_ZERO) continue;
+        alt_q *q = &aq[naq++]; *q = (alt_q){im->f.vk, im->alt, {0}, im->nx, im->w, im->h, im->depth, im->levels, im->layers, im->usage, 0, im->d.target == NVN_TEXTURE_TARGET_3D, im->bytes, (uint8_t)(compressed(&im->f) ? 1 : 0)};
+        memcpy(q->x, im->xfmt, sizeof q->x);
+        q->cube = !q->is3d && im->w == im->h && im->layers >= 6 && im->layers % 6 == 0; }
+    pthread_mutex_unlock(&g_tmu);
+    if (f) fclose(f);
+    uint64_t az[3][2] = {{0}}; int afail = 0;   // [variant][uncompressed, compressed]
+    for (int i = 0; i < naq; i++) { alt_q *q = &aq[i];
+        for (int var = 0; var < 3; var++) {
+            VkFormat fls[6] = {q->vk, q->alt}; int nfl = 2; for (int k = 0; k < q->nx; k++) fls[nfl++] = q->x[k]; if (!q->alt && q->nx) fls[1] = fls[--nfl];
+            int list = var < 2 && (q->alt || q->nx);
+            VkImageFormatListCreateInfo fli = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = (uint32_t)nfl, .pViewFormats = fls};
+            VkImageUsageFlags u = var == 0 ? q->u : q->u & ~(VkImageUsageFlags)(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+            VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = list ? &fli : NULL, .flags = (list ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0) | (q->cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
+                .imageType = q->is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, .format = q->vk, .extent = {q->w, q->h, q->z}, .mipLevels = q->lv, .arrayLayers = q->ly, .samples = VK_SAMPLE_COUNT_1_BIT,
+                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+            VkImage img; if (vk.vkCreateImage(V.dev, &ci, NULL, &img)) { afail++; az[var][q->cls] += q->bytes; continue; }
+            VkMemoryRequirements mr; vk.vkGetImageMemoryRequirements(V.dev, img, &mr); vk.vkDestroyImage(V.dev, img, NULL);
+            az[var][q->cls] += mr.size;
+        } }
+    uint64_t made[2] = {0}; for (int i = 0; i < naq; i++) made[aq[i].cls] += aq[i].bytes;
+    free(aq);
+    // The driver's image sizes by shape (once a run): which tilings, level counts and layer counts small textures take (the census shows small compressed images taking
+    // several times their texel bytes). Each entry: width/levels/layers size@alignment
+    static int probed; if (!probed) { probed = 1;
+        static const VkFormat pf[] = {VK_FORMAT_ASTC_8x8_SRGB_BLOCK, VK_FORMAT_ASTC_6x6_SRGB_BLOCK, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC7_UNORM_BLOCK, VK_FORMAT_R8G8B8A8_UNORM};
+        static const uint32_t ps[] = {4, 16, 64, 256, 1024};
+        for (unsigned fi = 0; fi < sizeof pf / sizeof *pf; fi++) for (int tl = 0; tl < 2; tl++) {
+            char ln[1200]; size_t o = (size_t)snprintf(ln, sizeof ln, "ctl: census: image sizes VkFormat %d %s:", pf[fi], tl ? "linear" : "optimal");
+            for (unsigned si = 0; si < sizeof ps / sizeof *ps; si++) for (int lyr = 1; lyr <= 16; lyr += 15) {
+                uint32_t w = ps[si], full = 1; while ((w >> full) && full < 16) full++;
+                uint32_t lvs[3] = {1, full > 3 ? 3 : full, full};
+                for (int li = 0; li < 3; li++) {
+                    if (li && lvs[li] == lvs[li - 1]) continue;
+                    VkImageFormatProperties ip; VkImageTiling ti = tl ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL; VkImageUsageFlags u = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                    if (o >= sizeof ln) break;
+                    if (vk.vkGetPhysicalDeviceImageFormatProperties(V.pd, pf[fi], VK_IMAGE_TYPE_2D, ti, u, 0, &ip) || ip.maxMipLevels < lvs[li] || ip.maxArrayLayers < (uint32_t)lyr) { o += (size_t)snprintf(ln + o, sizeof ln - o, " %u/%u/%d -", w, lvs[li], lyr); continue; }
+                    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = pf[fi], .extent = {w, w, 1}, .mipLevels = lvs[li], .arrayLayers = (uint32_t)lyr,
+                        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = ti, .usage = u, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+                    VkImage img; if (vk.vkCreateImage(V.dev, &ci, NULL, &img)) { o += (size_t)snprintf(ln + o, sizeof ln - o, " %u/%u/%d x", w, lvs[li], lyr); continue; }
+                    VkMemoryRequirements mr; vk.vkGetImageMemoryRequirements(V.dev, img, &mr); vk.vkDestroyImage(V.dev, img, NULL);
+                    o += (size_t)snprintf(ln + o, sizeof ln - o, " %u/%u/%d %llu@%llu", w, lvs[li], lyr, (unsigned long long)mr.size, (unsigned long long)mr.alignment);
+                }
+            }
+            VLOG("%s", ln);
+        } }
+    snprintf(sum, n, "census: %d images, %d registered texture IDs; no ID names %d (%.0f MB; %d / %.0f MB of them under a newer image's storage); under a newer image's storage %.0f MB; dedicated %.0f MB; "
+             "by class: cleared %d / %.0f MB, filled once %d / %.0f MB, tracked %d / %.0f MB, sparse %d / %.0f MB, GPU-written %d / %.0f MB%s%s",
+             nl, nreg, c_noid, by_noid / 1e6, c_noid_newer, by_noid_newer / 1e6, by_newer / 1e6, by_ded / 1e6, c_cls[0], by_cls[0] / 1e6, c_cls[1], by_cls[1] / 1e6, c_cls[2], by_cls[2] / 1e6,
+             c_cls[3], by_cls[3] / 1e6, c_cls[4], by_cls[4] / 1e6, f ? " → " : "", f ? path : "");
+    size_t sl = strlen(sum);
+    if (sl < n) snprintf(sum + sl, n - sl, "; storage content: uncompressed %.0f MB as made (%.0f MB remade), %.0f MB without attachment / storage use, %.0f MB also without the format list; compressed %.0f MB (%.0f / %.0f / %.0f)%s",
+                         made[0] / 1e6, az[0][0] / 1e6, az[1][0] / 1e6, az[2][0] / 1e6, made[1] / 1e6, az[0][1] / 1e6, az[1][1] / 1e6, az[2][1] / 1e6, afail ? " (some images not remade: counted as made)" : "");
+    free(v); free(nid); free(newer);
+}
+
 vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
     g_lazy_hit = 0;
     if (!t || !t->serial || !vka_ok()) return NULL;
@@ -1480,8 +1629,10 @@ cut:;
     *nbytes = bytes;
     return 1;
 }
+static void pageout_start(void);
 static void upload(vka_img *im, const tex_t *t, VkCommandBuffer cb) {
     uint64_t t0 = now_ns(), nb = 0; upload_(im, t, cb, &nb);
+    im->po_off = 0; im->up_ns = now_ns(); pageout_start();   // (its storage was just read: paged out again once it has been left alone)
     atomic_fetch_add_explicit(&g_up_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_bytes, nb, memory_order_relaxed);
 }
 static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *nbytes) {

@@ -6,6 +6,7 @@
 #   nxctl.sh screenshot [file.png]  the next game frame as a PNG; pulled to file.png (default ./ctl-shot-<frame>.png)
 #   nxctl.sh burst 16 [dir]         the next 16 consecutive game frames as PNGs; pulled to dir (default .) as ctl-burst-<frame>.png
 #   nxctl.sh stats                  averages of the last 60 frames, the switches set live
+#   nxctl.sh census                 the image census (ctl-census-<frame>.tsv beside the control file) and the host's malloc / scratch / placed memory
 #   nxctl.sh dump                   any other DM_CTL line as it is (key presses "A~0.2", "dump", ...)
 #   nxctl.sh log [n]                the last n (40) lines of the run's log, nothing sent
 # NX_SERIAL (default: adb's, ANDROID_SERIAL or the only phone) picks the phone, NX_PKG (default dev.nxnative.android) the app, NX_WAIT (default 3) the seconds to wait for the answer.
@@ -35,7 +36,7 @@ t=0; got=0
 while [ "$t" -lt $((WAIT * 4 + want / 6)) ]; do
     sleep 0.25; t=$((t + 1))
     out=$($A shell "tail -n +$((n0 + 1)) '$LOG'" | tr -d '\r' | grep -E '\[vk\] ctl:|DM_CTL|\[RED\]|new swapchain' || true)
-    got=$(printf '%s' "$out" | grep -c 'ctl: \(env .* applied\|capture done\|stats at\|screenshot of frame\|screenshot:\|burst done\|burst:\)\|DM_CTL: press\|DM_CTL: env' || true)
+    got=$(printf '%s' "$out" | grep -c 'ctl: \(env .* applied\|capture done\|stats at\|screenshot of frame\|screenshot:\|burst done\|burst:\|census: [0-9]\)\|DM_CTL: press\|DM_CTL: env' || true)
     [ "$got" -ge 1 ] && { [ "$1" != capture ] || printf '%s' "$out" | grep -q 'capture done'; } && { [ "$1" != burst ] || printf '%s' "$out" | grep -q 'burst done\|burst:'; } && break
 done
 printf '%s\n' "${out:-(no answer in the log yet: nxctl.sh log)}"

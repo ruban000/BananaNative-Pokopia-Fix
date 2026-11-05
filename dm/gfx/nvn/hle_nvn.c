@@ -385,6 +385,8 @@ static void pc_log(uint64_t present) {
     pthread_mutex_unlock(&g_pc_mu);
 }
 
+void nvn_pool_census_log(void) { pc_log(0); }   // the ctl census (vka_ctl.c): the pool census now (DM_NVN_POOLS set at start), present 0
+
 // ---------- Memory pools ----------
 NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 0, sizeof(pool_builder_t)); }
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }

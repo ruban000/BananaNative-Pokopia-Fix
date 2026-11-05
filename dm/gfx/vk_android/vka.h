@@ -188,6 +188,8 @@ uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *
 int vka_pool_bda(uint64_t addr, VkDeviceAddress *bda);   // the device address of a pool byte (the table the binding side reads)
 void *vka_mem_mapped(size_t n);   // no placed maps: a mapped allocation as a segment where the driver maps it (the selftest on an emulator)
 int vka_mem_chunks(uint64_t *lo, uint64_t *hi, uint64_t *bda, int max);   // the placed segments by address (guest range and device address); the count
+int vka_mem_pageout(uintptr_t lo, uintptr_t hi);  // caller holds nvn_pool_use; 1 advised, -1 refused, 0 excluded
+void vka_mem_segs(char *b, size_t n);               // the placed segments: count and the largest (ctl census)
 uint64_t vka_mem_placed_bytes(uint64_t *peak);     // bytes of placed Vulkan memory now (and the peak)
 
 // ---------- Textures (vka_tex.c) ----------
@@ -239,6 +241,8 @@ typedef struct vka_img {
     // pdead: that pool was finalized since (vka_tex.c img_pool_dead): its storage is not read again
     const void *pool; uint64_t pgen, pfin; int pdead;
     uint8_t dcap;            // a sparse texture's dense image whose finer levels DM_VK_SPARSE_DENSE_MB left out (vka_tex.c dense_floor)
+    uint64_t po_off;         // successfully advised whole storage bytes since the last upload (not reclaimed bytes)
+    uint64_t up_ns;          // when its content was last read from its storage (upload)
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
 static inline int vka_img_lv(const vka_img *im, uint32_t *lv) { if (*lv < im->base) return 0; *lv -= im->base; return *lv < im->levels; }
@@ -250,6 +254,8 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb);   // the texture's ima
 uint64_t vka_tex_mem(int *n, uint64_t *gpu_written);   // bytes of image memory now: n images, of which gpu_written bytes the GPU wrote (the rest copies pool storage)
 void vka_tex_alias_stats(char *b, size_t n);        // image bytes by content (cleared, filled once, tracked) and how many of them could live on their pool storage
 int vka_tex_id_lazy(int id);                         // texture ID id's texture is deferred: no image until the GPU writes it (vka_tex.c Deferred images); it reads zeros
+void vka_tex_pageout_stats(uint64_t *bytes, uint64_t *calls, uint64_t *fails);   // successful request bytes, syscall attempts and refused attempts (not reclaimed bytes)
+void vka_tex_census(const char *path, char *sum, size_t n);
 void vka_tex_top(char *b, size_t n);               // the largest live images: serial, shape, format, flags, content, MiB
 vka_img *vka_tex_acquire(uint64_t serial);          // a reference that keeps the image alive (the present thread), dropped with vka_tex_drop
 void vka_tex_drop(vka_img *im);
