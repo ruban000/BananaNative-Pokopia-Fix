@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <sys/resource.h>
+#include "vka_upload_trace.h"
 
 // ---------- Formats ----------
 typedef struct { VkFormat vk; uint8_t kind, srgb; } fmt_ent;
@@ -848,6 +849,14 @@ static uint8_t *unmapped_content(const tex_t *t) {
                                                               (unsigned long long)u, (unsigned long long)((nbytes + 4095) >> 12), (const void *)t->mem);
     return c;
 }
+static uint8_t *ut_gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
+    uint8_t *p = UT_TIME(UT_SNAPSHOT, gw_content(mem, n, seen));
+    ut_add(UT_SNAPSHOT_BYTES, p ? n : 0); return p;
+}
+static uint8_t *ut_unmapped_content(const tex_t *t) {
+    uint8_t *p = UT_TIME(UT_SNAPSHOT, unmapped_content(t));
+    ut_add(UT_SNAPSHOT_BYTES, p ? nvn_tex_data_size(&t->d) : 0); return p;
+}
 static void pageout_start(void);
 static void storage_read_touch(vka_img *im) {
     // Partial row copies read the same storage as full uploads. Neither an
@@ -855,20 +864,24 @@ static void storage_read_touch(vka_img *im) {
     im->po_off = 0; im->up_ns = now_ns(); pageout_start();
 }
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
-    im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
+    int receipt = ut_begin(im, UT_OTHER, 0, 0, 0);
+    im->stamp = nvn_dirty_now(); UT_VOID(UT_PROTECT, nvn_dirty_protect(t->mem, t->L.size));
     if (vka_nan_on()) im->hash_valid = mem_hash_mapped(t->mem, nvn_tex_data_size(&t->d), &im->hash);
-    uint8_t *c = im->vpool ? NULL : gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
-    if (!c && !im->vpool) c = unmapped_content(t);
+    uint8_t *c = im->vpool ? NULL : ut_gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);   // (a sparse pool's storage is read through its page table: upload_)
+    if (!c && !im->vpool) c = ut_unmapped_content(t);
     if (c) { tex_t tc = *t; tc.mem = c; upload(im, &tc, cb); free(c); g_gw_over++; } else upload(im, t, cb);
     if (vka_nan_on()) { im->head_valid = mem_hash_mapped(t->mem, t->L.size < 64 ? t->L.size : 64, &im->head); im->up_fence = vka_fence_last() + 1;
         size_t n = t->L.size < 256 ? t->L.size : 256;
         if (dm_guest_unmapped((uintptr_t)t->mem, n)) { free(im->snap); im->snap = NULL; }
         else { if (!im->snap) im->snap = malloc(256); if (im->snap) memcpy(im->snap, t->mem, n); } }
+    ut_end(receipt, 1);
 }
 static void upload_fill(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // the same without tracking (ST_FILL)
-    uint8_t *c = im->vpool ? NULL : gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);
-    if (!c && !im->vpool) c = unmapped_content(t);
+    int receipt = ut_begin(im, UT_OTHER, 0, 0, 0);
+    uint8_t *c = im->vpool ? NULL : ut_gw_content(t->mem, nvn_tex_data_size(&t->d), &im->gw_seen);
+    if (!c && !im->vpool) c = ut_unmapped_content(t);
     if (c) { tex_t tc = *t; tc.mem = c; upload(im, &tc, cb); free(c); g_gw_over++; } else upload(im, t, cb);
+    ut_end(receipt, 1);
 }
 // A linear 2D texture of one level and layer whose pages the CPU wrote between byte lo and hi of its storage: only those rows again (Donkey Kong Bananza's glyph cache,
 // 1024x8192 R8: the whole 8 MB was deswizzled and copied each time a glyph was rasterized into it). 0 = not such a texture (the caller uploads all of it)
@@ -879,13 +892,13 @@ static int upload_rows_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb, 
     if (st < pitch) return 0;
     uint32_t r0 = (uint32_t)(lo / st), r1 = (uint32_t)((hi + st - 1) / st); if (r1 > by) r1 = by;
     if (r0 >= r1) r0 = 0, r1 = by;
-    im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // stamp, protect, then read (upload_tracked)
-    vka_span s; if (!vka_scratch(pitch * (r1 - r0), 16, &s)) return 1;
-    for (uint32_t y = r0; y < r1; y++) memcpy(s.ptr + (size_t)(y - r0) * pitch, t->mem + (size_t)y * st, pitch);
+    im->stamp = nvn_dirty_now(); UT_VOID(UT_PROTECT, nvn_dirty_protect(t->mem, t->L.size));   // stamp, protect, then read (upload_tracked)
+    vka_span s; if (!ut_scratch(pitch * (r1 - r0), 16, &s)) return 1;
+    UT_VOID(UT_DESWIZZLE, for (uint32_t y = r0; y < r1; y++) memcpy(s.ptr + (size_t)(y - r0) * pitch, t->mem + (size_t)y * st, pitch));
     if (pitch && r1 > r0) storage_read_touch(im);
     uint32_t y0 = r0 * f->bh, y1 = r1 * f->bh > im->h ? im->h : r1 * f->bh;
     VkBufferImageCopy c = {s.off, bx * f->bw, (r1 - r0) * f->bh, {im->aspect, 0, 0, 1}, {0, (int32_t)y0, 0}, {im->w, y1 - y0, 1}};
-    vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    ut_copy(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     g_rows_up += pitch * (r1 - r0);
     return 1;
 }
@@ -923,9 +936,9 @@ static int zero_rows(vka_img *im, VkCommandBuffer cb, uint32_t i, uint32_t ly, u
     for (uint32_t y = y0; y < y1; y += per) {
         uint32_t ye = y + per < y1 ? y + per : y1, py0 = y * f->bh, py1 = ye * f->bh > h ? h : ye * f->bh;
         rg[n++] = (VkBufferImageCopy){is_astc(f->vk) ? ZHALF : 0, bx * f->bw, 0, {im->aspect, i, ly, 1}, {0, (int32_t)py0, 0}, {w, py1 - py0, 1}};
-        if (n == 64) { vk.vkCmdCopyBufferToImage(cb, g_zbuf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg); n = 0; }
+        if (n == 64) { ut_copy(cb, g_zbuf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg); n = 0; }
     }
-    if (n) vk.vkCmdCopyBufferToImage(cb, g_zbuf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg);
+    if (n) ut_copy(cb, g_zbuf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg);
     return 1;
 }
 // Tiles across image level i of a sparse residency image (its tile width in texels from the format's granularity)
@@ -954,10 +967,10 @@ static void copy_bound(vka_img *im, VkCommandBuffer cb, const vka_span *s, uint3
             uint32_t px0 = tx * im->rs_tw, px1 = t1 * im->rs_tw > w ? w : t1 * im->rs_tw;
             rg[n++] = (VkBufferImageCopy){s->off + (VkDeviceSize)(r0 - y0) * pitch + (VkDeviceSize)(px0 / f->bw) * f->bpb, bx * f->bw, (py1 - py0 + f->bh - 1) / f->bh * f->bh,
                                           {im->aspect, i, ly, 1}, {(int32_t)px0, (int32_t)py0, 0}, {px1 - px0, py1 - py0, 1}};
-            if (n == 32) { vk.vkCmdCopyBufferToImage(cb, s->buf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg); n = 0; }
+            if (n == 32) { ut_copy(cb, s->buf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg); n = 0; }
         }
     }
-    if (n) vk.vkCmdCopyBufferToImage(cb, s->buf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg);
+    if (n) ut_copy(cb, s->buf, im->img, VK_IMAGE_LAYOUT_GENERAL, n, rg);
 }
 // Levels and layers of a sparse texture's image whose pages or mappings changed since (gen, stamp), or all of them, gathered from the page table and deswizzled by bands:
 // a band is one row of GOB blocks (8 << block height block rows), which is one range of the storage. Bands with nothing mapped are zero texels from the zero buffer, bands that
@@ -1012,16 +1025,16 @@ static void upload_sparse_parts(vka_img *im, VkCommandBuffer cb, uint64_t gen, u
                 any = 1;
                 size_t sz = (size_t)(y1 - y0) * pitch * (is3d ? (im->depth >> i ? im->depth >> i : 1) : 1);
                 if (st == 1 && !is3d && zero_rows(im, cb, i, ly, w, h, bx, pitch, y0, y1)) { zeroed += sz; continue; }
-                vka_span s; if (!vka_scratch(sz, 16, &s)) { VRED("sparse texture serial %llu: no scratch memory for level %u layer %u (%zu bytes)", (unsigned long long)im->serial, lv, ly, sz); goto out; }
+                vka_span s; if (!ut_scratch(sz, 16, &s)) { VRED("sparse texture serial %llu: no scratch memory for level %u layer %u (%zu bytes)", (unsigned long long)im->serial, lv, ly, sz); goto out; }
                 if (st == 1) { if (is_astc(f->vk)) for (size_t q = 0; q + 16 <= sz; q += 16) memcpy(s.ptr + q, k_astc_zero, 16); else memset(s.ptr, 0, sz); zeroed += sz; }
                 else {
                     uint64_t so = off + BAND_OFF(k), sl = band_bytes ? BAND_OFF(k1) - BAND_OFF(k) : len;
                     if (so + sl > off + len) sl = off + len - so;
                     if (sl > cap) { free(part); cap = sl; if (!(part = malloc(cap))) { VRED("sparse texture serial %llu: copy of %llu bytes not allocated", (unsigned long long)im->serial, (unsigned long long)sl); goto out; } }
-                    mapped += sl - nvn_sparse_copy(im->vpool, part, mem + so, sl);
+                    mapped += sl - UT_TIME(UT_SNAPSHOT, nvn_sparse_copy(im->vpool, part, mem + so, sl)); ut_add(UT_SNAPSHOT_BYTES, sl);
                     if (is_astc(f->vk)) astc_zero_blocks(part, sl);
                     // the deswizzler reads level lv of layer ly at its offset in the whole storage, and writes row y at y * pitch: part holds just this run's bytes
-                    if (nvn_deswizzle_rows(d, lv, ly, (const uint8_t *)((uintptr_t)part - (uintptr_t)so), s.ptr - (size_t)y0 * pitch, pitch, y0, y1)) {
+                    if (UT_TIME(UT_DESWIZZLE, nvn_deswizzle_rows(d, lv, ly, (const uint8_t *)((uintptr_t)part - (uintptr_t)so), s.ptr - (size_t)y0 * pitch, pitch, y0, y1))) {
                         VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)im->serial, d->format, d->target); goto out; }
                     up += sz;
                 }
@@ -1029,7 +1042,7 @@ static void upload_sparse_parts(vka_img *im, VkCommandBuffer cb, uint64_t gen, u
                 uint32_t dz = is3d ? (im->depth >> i ? im->depth >> i : 1) : 1;
                 VkBufferImageCopy c = {s.off, bx * f->bw, (y1 - y0) * f->bh, {im->aspect, i, ly, 1}, {0, (int32_t)py0, 0}, {w, py1 - py0, dz}};
                 if (rt) copy_bound(im, cb, &s, i, ly, w, h, pitch, band_rows, k, k1, y0);   // only the bound tiles (an unbound one takes no write)
-                else vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+                else ut_copy(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
                 cb = vka_up_point(cb);
             }
             #undef BAND_STATE
@@ -1046,9 +1059,11 @@ out:
              (unsigned long long)im->serial, im->d.width, im->d.height, im->layers, im->base, im->levels, im->base + im->levels, d->format, nsub, nzero, up / 1048576.0, zeroed / 1048576.0, mapped / 1048576.0, all ? "" : " (changed since the last upload)");
 }
 static void upload_sparse(vka_img *im, VkCommandBuffer cb, int all) {   // generation and stamp, protect the physical pages behind it, then read (nvn_mtl.m pkg_upload)
+    int receipt = ut_begin(im, UT_SPARSE, 0, 0, 0); ut_image(im);
     uint64_t gen = im->vgen, stamp = im->stamp;
-    im->vgen = nvn_sparse_gen(); im->stamp = nvn_dirty_now(); nvn_sparse_protect(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size);
+    im->vgen = nvn_sparse_gen(); im->stamp = nvn_dirty_now(); UT_VOID(UT_PROTECT, nvn_sparse_protect(im->vpool, (uint64_t)(uintptr_t)im->mem, im->L.size));
     upload_sparse_parts(im, cb, gen, stamp, all, 0);
+    ut_end(receipt, 1);
 }
 // A GPU-written sparse texture's residency image (sparse_gpu): its tiles bound where pages are mapped and unbound where none is, nothing read (all: every tile; else those whose
 // mappings changed since). Open: a tile bound again starts with what its memory slot held (the Switch keeps the physical page's content), not cleared
@@ -1148,24 +1163,26 @@ static void sparse_refresh(vka_img *im, VkCommandBuffer cb) {
     upload_sparse(im, cb, 0);
 }
 static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int cpu) {
+    int receipt = ut_begin(im, UT_FIRST, 0, 0, 0);
     vka_img_barrier(cb, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     im->inited = 1;
-    uint64_t seen; uint8_t *c = im->samples == 1 && t->mem && !im->vpool ? gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;   // the content the mode's "holds data" checks look at
+    uint64_t seen; uint8_t *c = im->samples == 1 && t->mem && !im->vpool ? ut_gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;   // the content the mode's "holds data" checks look at
     int mode = im->samples == 1 ? storage_mode(t, c ? c : t->mem, &im->f, cpu, g_first_sampled) : ST_ZERO;
     free(c);
     if (mode != ST_ZERO) im->from_mem = 1;
     im->mode = (uint8_t)mode;
     if (im->rs && mode == ST_ZERO && sparse_gpu(t, &im->f)) { im->vbind = 1; sp_add(im); sparse_bind(im, cb, 1); }   // (a GPU-written sparse texture: its tiles bound before the clear below)
     // (an upload into the upload batch may send it and go on in the next one: vka_up_cur is where it ended; NULL: none could be begun after a GPU hang)
-    if (mode == ST_TRACK) { im->track = 1; im->span = nvn_dirty_span(t->mem, t->L.size); upload_tracked(im, t, cb); g_st_up[mode]++; if ((cb = vka_up_cur(cb))) vka_barrier(cb); return; }
-    if (mode == ST_SPARSE) { im->vtrack = 1; sp_add(im); upload_sparse(im, cb, 1); g_st_up[mode]++; if ((cb = vka_up_cur(cb))) vka_barrier(cb); return; }
-    if (mode == ST_FILL) { upload_fill(im, t, cb); g_st_up[mode]++; if ((cb = vka_up_cur(cb))) vka_barrier(cb); return; }   // the copy before the draw or copy that reads it
+    if (mode == ST_TRACK) { im->track = 1; im->span = nvn_dirty_span(t->mem, t->L.size); upload_tracked(im, t, cb); g_st_up[mode]++; if ((cb = vka_up_cur(cb))) vka_barrier(cb); ut_end(receipt, 1); return; }
+    if (mode == ST_SPARSE) { im->vtrack = 1; sp_add(im); upload_sparse(im, cb, 1); g_st_up[mode]++; if ((cb = vka_up_cur(cb))) vka_barrier(cb); ut_end(receipt, 1); return; }
+    if (mode == ST_FILL) { upload_fill(im, t, cb); g_st_up[mode]++; if ((cb = vka_up_cur(cb))) vka_barrier(cb); ut_end(receipt, 1); return; }   // the copy before the draw or copy that reads it
     g_st_up[ST_ZERO]++;
     VkImageSubresourceRange rg = {im->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
     if (im->f.kind >= 3) { VkClearDepthStencilValue z = {0, 0}; vk.vkCmdClearDepthStencilImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg); }
     else if (!compressed(&im->f)) { VkClearColorValue z = {{0}}; vk.vkCmdClearColorImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg); }
     else if (t->mem) { im->from_mem = 1; upload_fill(im, t, cb); cb = vka_up_cur(cb); }   // a compressed texture with no data yet: its storage (zeros) is a valid block pattern; Vulkan cannot clear it
     if (cb) vka_barrier(cb);
+    ut_end(receipt, ut_current && ut_current->v[UT_COPIED] != 0);
 }
 
 // ---------- Deferred images: GPU content nothing has written yet ----------
@@ -1197,7 +1214,7 @@ static int lazy_ok(const tex_t *t, const vka_fmt *f) {   // caller holds g_tmu (
     const nvn_texdesc *d = &t->d;
     if (!on || !t->mem || f->kind >= 3 || compressed(f) || d->samples > 1 || d->target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if ((double)t->L.size < VKA_ENVF("DM_VK_LAZY_MB", 1.0) * 1048576.0 || cpuw_has(t->serial)) return 0;
-    uint64_t seen; uint8_t *c = !(t->pool && pool_sparse(t->pool)) ? gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;
+    uint64_t seen; uint8_t *c = !(t->pool && pool_sparse(t->pool)) ? ut_gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;
     int mode = storage_mode(t, c ? c : t->mem, f, 0, 1);
     free(c);
     return mode == ST_ZERO;
@@ -1581,7 +1598,9 @@ static int up_parallel(up_part *p, uint32_t n, int *fail) {
     pthread_cond_broadcast(&UP.cv);
     pthread_mutex_unlock(&UP.mu);
     up_run();   // this thread takes parts too
+    uint64_t ut_wait = ut_current ? now_ns() : 0;
     pthread_mutex_lock(&UP.mu); while (atomic_load(&UP.done) < n) pthread_cond_wait(&UP.done_cv, &UP.mu); atomic_store(&UP.n, 0); pthread_mutex_unlock(&UP.mu);
+    if (ut_current) ut_add(UT_MTWAIT, now_ns() - ut_wait);
     *fail = atomic_load(&UP.fail);
     pthread_mutex_unlock(&g_up_one);
     return 1;
@@ -1609,7 +1628,7 @@ static int upload_mt(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *
         if (rows < 0 || (uint32_t)rows != by) { free(pc); free(parts); return 0; }   // (a shape the serial path reports)
         for (uint32_t ly = 0; ly < im->layers; ly++, k++) {
             piece_t *q = &pc[k]; *q = (piece_t){{0}, lv, ly, w, h, z, bx, by, pitch, 0};
-            if (!vka_scratch(piece, 16, &q->s)) goto cut;   // (no scratch: as the serial path, the pieces before it are uploaded)
+            if (!ut_scratch(piece, 16, &q->s)) goto cut;   // (no scratch: as the serial path, the pieces before it are uploaded)
             // Runs of block rows of at least ~64 KB (all slices of a 3D level in each)
             uint32_t per = (uint32_t)((65536 + pitch * z - 1) / (pitch * z)); if (!per) per = 1;
             for (uint32_t y = 0; y < by; y += per) {
@@ -1620,7 +1639,10 @@ static int upload_mt(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *
     }
 cut:;
     int fail = 0;
-    if (!up_parallel(parts, np, &fail)) { for (uint32_t i = 0; i < np; i++) if (nvn_deswizzle_rows(parts[i].d, parts[i].lv, parts[i].ly, parts[i].src, parts[i].dst, parts[i].pitch, parts[i].y0, parts[i].y1)) { fail = 1; *parts[i].bad = 1; } }
+    uint64_t ut_t = ut_current ? now_ns() : 0;
+    int parallel = up_parallel(parts, np, &fail);
+    if (!parallel) { for (uint32_t i = 0; i < np; i++) if (nvn_deswizzle_rows(parts[i].d, parts[i].lv, parts[i].ly, parts[i].src, parts[i].dst, parts[i].pitch, parts[i].y0, parts[i].y1)) { fail = 1; *parts[i].bad = 1; } }
+    if (ut_current) { ut_add(UT_DESWIZZLE, now_ns() - ut_t); ut_current->u[UT_TASKS] = np; ut_current->u[UT_PARALLEL] = parallel; }
     free(parts);
     // A piece that could not be deswizzled ends the upload there, as on the serial path: the pieces before it are copied, it and those after it are not
     if (fail) VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target);
@@ -1629,7 +1651,7 @@ cut:;
         piece_t *q = &pc[i];
         if (atomic_load(&q->bad)) break;
         VkBufferImageCopy c = {q->s.off, q->bx * f->bw, q->by * f->bh, {im->aspect, q->lv, q->ly, 1}, {0, 0, 0}, {q->w, q->h, q->z}};
-        vk.vkCmdCopyBufferToImage(cb, q->s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        ut_copy(cb, q->s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
         bytes += q->pitch * q->by * q->z;
     }
     free(pc);
@@ -1656,9 +1678,9 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
         uint32_t bx = (w + f->bw - 1) / f->bw, by = (h + f->bh - 1) / f->bh;
         size_t pitch = (size_t)bx * f->bpb, piece = pitch * by * z;
         for (uint32_t ly = 0; ly < (linear ? 1 : im->layers); ly++) {
-            vka_span s; if (!vka_scratch(piece, 16, &s)) { free(part); return; }
-            if (linear) { size_t st = d->stride ? d->stride : pitch; for (uint32_t y = 0; y < by; y++) memcpy(s.ptr + y * pitch, src + y * st, pitch); }
-            else if (nvn_deswizzle(d, lv, ly, src, s.ptr, pitch)) { VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(part); return; }
+            vka_span s; if (!ut_scratch(piece, 16, &s)) { free(part); return; }
+            if (linear) { size_t st = d->stride ? d->stride : pitch; UT_VOID(UT_DESWIZZLE, for (uint32_t y = 0; y < by; y++) memcpy(s.ptr + y * pitch, src + y * st, pitch)); }
+            else if (UT_TIME(UT_DESWIZZLE, nvn_deswizzle(d, lv, ly, src, s.ptr, pitch))) { VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(part); return; }
             if (piece) storage_read_touch(im);
             if (d->format >= 0x79 && d->format <= 0x94 && vka_nan_on()) {   // DM_VK_NANSCAN: all-zero blocks of ASTC textures (an all-zero ASTC block is an error block)
                 uint64_t zb = 0, nb = piece / 16; for (uint64_t k = 0; k < nb; k++) if (!mem_any(s.ptr + 16 * k, 16)) zb++;
@@ -1670,7 +1692,7 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
                 static _Atomic int nz; if (zb && atomic_fetch_add(&nz, 1) < 64) VLOG("NaN scan: upload of serial %llu format %#x level %u layer %u: %llu of %llu blocks all zero (storage %p)", (unsigned long long)t->serial, d->format, lv, ly, (unsigned long long)zb, (unsigned long long)nb, (const void *)t->mem);
             }
             VkBufferImageCopy c = {s.off, bx * f->bw, by * f->bh, {im->aspect, lv, ly, 1}, {0, 0, 0}, {w, h, z}};
-            vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+            ut_copy(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
             bytes += piece;
             if (!(cb = vka_up_point(cb))) { free(part); *nbytes = bytes; return; }
         }
@@ -2293,13 +2315,16 @@ static int scan_img(vka_img *im, VkCommandBuffer cb, int sparse) {
     size_t lo, hi;
     if (!nvn_dirty_bounds_since(&im->span, im->mem, im->L.size, im->stamp, &lo, &hi)) return 0;
     tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
+    int receipt = ut_begin(im, UT_DIRTY, im->span != NULL, lo, hi);
     int rows = VKA_ENV("DM_VK_ROWS", 1);
-    if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) return !im->span;
+    if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) { ut_end(receipt, 1); return !im->span; }
     upload_tracked(im, &t, cb);
     if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x flags %#x target %d: its storage changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format, im->d.flags, im->d.target);
+    ut_end(receipt, 1);
     return !im->span;
 }
 void vka_tex_prepare(VkCommandBuffer cb) {
+    ut_tick();   // outside both pool and texture locks; writer never touches images
     bindless_init();
     nvn_pool_use(1);   // the re-uploads below read guest storage: no pool is finalized (and unmapped) under them. Taken before g_tmu, as write_tex does
     pthread_mutex_lock(&g_tmu);
@@ -2310,10 +2335,11 @@ void vka_tex_prepare(VkCommandBuffer cb) {
         if (im->gpu_owned || img_pool_dead(im)) continue;
         tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
         nvn_tex_layout(&t.d, &t.L);
-        if (im->vtrack) { sparse_refresh(im, cb); g_reup++; continue; }
+        int receipt = ut_begin(im, UT_WRITE, 0, 0, 0);
+        if (im->vtrack) { sparse_refresh(im, cb); g_reup++; ut_end(receipt, 1); continue; }
         if (!im->track && (im->span = nvn_dirty_span(t.mem, t.L.size))) im->track = 1;
         if (im->track) upload_tracked(im, &t, cb); else upload_fill(im, &t, cb);
-        g_reup++;
+        g_reup++; ut_end(receipt, 1);
     }
     g_nredo = 0;
     // GPU writes whose submission is done: the images over them that did not get their bytes are uploaded again (see gw_t above)
@@ -2336,7 +2362,9 @@ void vka_tex_prepare(VkCommandBuffer cb) {
                 vka_img *im = g_bymem[j].im;
                 if (!im->from_mem || im->gpu_owned || im->vpool || im->gw_seen >= w->seq || img_pool_dead(im)) continue;
                 tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
+                int receipt = ut_begin(im, UT_GPU, 0, 0, 0);
                 if (im->track) upload_tracked(im, &t, cb); else upload_fill(im, &t, cb);
+                ut_end(receipt, 1);
                 g_gw_late++; if (g_gw_late <= 8 || !(g_gw_late & (g_gw_late - 1))) VLOG("textures re-uploaded after a GPU write into their storage: %llu (uploads that applied pending GPU writes: %llu; pages raw global memory stores wrote: %llu)", (unsigned long long)g_gw_late, (unsigned long long)g_gw_over, (unsigned long long)g_gml_pages);
                 if (g_gw_late <= 8) VLOG("texture serial %llu %ux%u format %#x: a GPU write into its storage (%s %#llx+%#llx) is done, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format,
                                           w->kind == GW_COPY ? "copy" : w->kind == GW_FILL ? "fill" : w->kind == GW_UPDATE ? "inline update" : "store", (unsigned long long)w->lo, (unsigned long long)(w->hi - w->lo));

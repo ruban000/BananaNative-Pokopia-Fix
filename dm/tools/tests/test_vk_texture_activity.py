@@ -68,6 +68,9 @@ static void gpu_copy(VkCommandBuffer cb,uintptr_t buf,uintptr_t image,int layout
     observed=*copy;copies++;
 }
 static struct {void (*vkCmdCopyBufferToImage)(VkCommandBuffer,uintptr_t,uintptr_t,int,uint32_t,const VkBufferImageCopy *);} vk={gpu_copy};
+#define UT_VOID(field, expr) do { expr; } while (0)
+#define ut_scratch vka_scratch
+#define ut_copy vk.vkCmdCopyBufferToImage
 #define memcpy read_copy
 '''
         code += function(source, "static void storage_read_touch(")
