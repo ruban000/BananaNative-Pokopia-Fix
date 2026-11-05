@@ -20,6 +20,7 @@
 #include <strings.h>
 #include <zlib.h>
 #include <math.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <malloc.h>
 #include <dlfcn.h>
@@ -72,7 +73,7 @@ static const char *const g_live[] = {"DM_VK_DRAW", "DM_VK_STATS", "DM_VK_HANG_S"
                                      "DM_VK_CHUNK", "DM_VK_PASS_CLEARS", "DM_VK_PASS_KEEP", "DM_VK_DYN_FILTER", "DM_VK_PROF", "DM_VK_ROWS", "DM_VK_SYNCLOG", "DM_VK_UBWC", "DM_VK_IMG_UPGRADE", "DM_VK_DONE_LAST", "DM_VK_AFF_REPLAY", "DM_VK_AFF_ALL",
                                      "DM_VK_NANSCAN_DUMP", "DM_VK_VB_FILTER", "DM_VK_ENC_BATCH", "DM_VK_BAR_KEEP", "DM_VK_DRV_MEMO", "DM_VK_PUSH_DELTA", "DM_VK_UPLOAD_MT", "DM_VK_UPLOAD_MT_MIN", "DM_VK_PAGEOUT", "DM_VK_PAGEOUT_S", "DM_VK_PAGEOUT_MB",
                                      "DM_VK_DRAW_TRACE_SHADERS", "DM_VK_DRAW_TRACE_RANGE", "DM_VK_DRAW_TRACE_SLOT", "DM_VK_DRAW_TRACE_COUNT", "DM_VK_DRAW_TRACE_FRAMES",
-                                     "DM_VK_BUFFER_TRACE", "DM_VK_BUFFER_TRACE_DIR", "DM_VK_BUFFER_TRACE_FRAMES", "DM_VK_BUFFER_TRACE_COUNT",
+                                     "DM_VK_BUFFER_TRACE", "DM_VK_BUFFER_TRACE_DIR", "DM_VK_BUFFER_TRACE_FRAMES", "DM_VK_BUFFER_TRACE_COUNT", "DM_VK_BURST_CROP",
                                      "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", "DM_VK_POOL_BIND_FILTER", "DM_VK_ENC_WAKE", "DM_VK_ENC_SPIN_US", NULL};
 static int in(const char *const *t, const char *k) { for (; *t; t++) if (!strcmp(*t, k)) return 1; return 0; }
 
@@ -262,6 +263,20 @@ static int shot_bpp(VkFormat f) {
 enum { BURST_MAX = 32 };
 static _Atomic int g_burst_want; static int g_burst_n, g_burst_i, g_burst_w, g_burst_h, g_burst_fmt, g_burst_flip, g_burst_done;
 static uint64_t g_burst_frame[BURST_MAX];
+// Latched output-PNG coordinates relative to the present rectangle. Source window
+// geometry stays separate from the smaller copy/PNG dimensions for the whole burst.
+static struct { int on, x, y, w, h, cx, cy, cw, ch; uint32_t iw, ih; } g_burst_crop;
+static int burst_crop_parse(const char *s, int cw, int ch, int rect[4]) {
+    if (!*s) { rect[0] = rect[1] = 0; rect[2] = cw; rect[3] = ch; return 1; }
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9') return 0;
+        unsigned v = 0;
+        do { unsigned d = (unsigned)(*s++ - '0'); if (v > ((unsigned)INT_MAX - d) / 10) return 0; v = v * 10 + d; } while (*s >= '0' && *s <= '9');
+        rect[i] = (int)v;
+        if (i < 3) { if (*s++ != ',') return 0; } else if (*s) return 0;
+    }
+    return cw > 0 && ch > 0 && rect[0] < cw && rect[1] < ch && rect[2] > 0 && rect[3] > 0 && rect[2] <= cw - rect[0] && rect[3] <= ch - rect[1];
+}
 static VkBuffer g_bbuf; static VkDeviceMemory g_bmem; static void *g_bmap; static VkDeviceSize g_bsize;
 static int burst_buf(VkDeviceSize n) {
     if (g_bsize >= n) return 1;
@@ -285,13 +300,30 @@ static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
         int n = atomic_exchange_explicit(&g_burst_want, 0, memory_order_relaxed); if (n <= 0) return;
         int bpp = shot_bpp(im->f.vk);
         if (bpp != 4 || im->samples != 1 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { VLOG("ctl: burst: the window texture's format %d is not a 4-byte colour one", im->f.vk); return; }
-        if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; cw = (int)im->w; ch = (int)im->h; }
-        if (!burst_buf((VkDeviceSize)n * cw * ch * 4)) { VLOG("ctl: burst: no host-visible buffer of %d frames of %d x %d", n, cw, ch); return; }
-        g_burst_n = n; g_burst_i = 0; g_burst_w = cw; g_burst_h = ch; g_burst_fmt = im->f.vk; g_burst_flip = vka_origin_ll();
-        VLOG("ctl: burst of %d frames begins at frame %llu (%dx%d)", n, (unsigned long long)frame, cw, ch);
+        char crop[128] = {0}; vka_env_str("DM_VK_BURST_CROP", crop, sizeof crop);
+        int on = crop[0] != 0, rect[4];
+        if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint64_t)cx + (unsigned)cw > im->w || (uint64_t)cy + (unsigned)ch > im->h) {
+            if (on) { VRED("ctl: burst: invalid present rectangle for crop; no frames copied"); return; }
+            cx = cy = 0; cw = (int)im->w; ch = (int)im->h;
+        }
+        if (strlen(crop) == sizeof crop - 1 || !burst_crop_parse(crop, cw, ch, rect)) { VRED("ctl: burst: crop must be x,y,w,h within the output rectangle; no frames copied"); return; }
+        g_burst_crop = (typeof(g_burst_crop)){on, rect[0], rect[1], rect[2], rect[3], cx, cy, cw, ch, im->w, im->h};
+        int w = rect[2], h = rect[3];
+        if (!burst_buf((VkDeviceSize)n * w * h * 4)) { VLOG("ctl: burst: no host-visible buffer of %d frames of %d x %d", n, w, h); return; }
+        g_burst_n = n; g_burst_i = 0; g_burst_w = w; g_burst_h = h; g_burst_fmt = im->f.vk; g_burst_flip = vka_origin_ll();
+        VLOG("ctl: burst of %d frames begins at frame %llu (%dx%d)", n, (unsigned long long)frame, w, h);
+    }
+    if (g_burst_crop.on && (cx != g_burst_crop.cx || cy != g_burst_crop.cy || cw != g_burst_crop.cw || ch != g_burst_crop.ch ||
+        im->w != g_burst_crop.iw || im->h != g_burst_crop.ih || vka_origin_ll() != g_burst_flip || im->samples != 1 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT)) {
+        VRED("ctl: burst: source geometry/origin changed after %d cropped frames: stopped", g_burst_i); g_burst_n = g_burst_i; g_burst_done = g_burst_i > 0; return;
     }
     if (im->f.vk != g_burst_fmt || (int)im->w < g_burst_w || (int)im->h < g_burst_h) { VLOG("ctl: burst: the window texture changed after %d frames: stopped", g_burst_i); g_burst_n = g_burst_i; g_burst_done = g_burst_i > 0; return; }
-    if (cx < 0 || cy < 0 || cw != g_burst_w || ch != g_burst_h || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; }
+    if (g_burst_crop.on) {
+        cx += g_burst_crop.x;
+        cy += g_burst_flip ? g_burst_crop.ch - g_burst_crop.y - g_burst_crop.h : g_burst_crop.y;
+        VLOG("ctl: burst crop: frame %llu output %d,%d,%d,%d window %d,%d,%d,%d source %d,%d origin-ll %d", (unsigned long long)frame,
+             g_burst_crop.x, g_burst_crop.y, g_burst_w, g_burst_h, g_burst_crop.cx, g_burst_crop.cy, g_burst_crop.cw, g_burst_crop.ch, cx, cy, g_burst_flip);
+    } else if (cx < 0 || cy < 0 || cw != g_burst_w || ch != g_burst_h || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; }
     vka_barrier(cb);
     VkBufferImageCopy r = {(VkDeviceSize)g_burst_i * g_burst_w * g_burst_h * 4, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {cx, cy, 0}, {(uint32_t)g_burst_w, (uint32_t)g_burst_h, 1}};
     vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_bbuf, 1, &r);
