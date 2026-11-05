@@ -86,7 +86,7 @@ static int nvn_deswizzle_block_rows(const nvn_texdesc *d,unsigned lv){return d->
 static int nvn_deswizzle_rows(const nvn_texdesc *d,unsigned lv,unsigned ly,const void *src,void *dst,size_t pitch,uint32_t y0,uint32_t y1){(void)ly;if(fail_desw)return 1;unsigned w=d->width>>lv?d->width>>lv:1;for(unsigned y=y0;y<y1;y++)memcpy((uint8_t*)dst+y*pitch,(const uint8_t*)src+y*w,w);return 0;}
 static int nvn_deswizzle(const nvn_texdesc *d,unsigned lv,unsigned ly,const void *src,void *dst,size_t pitch){return nvn_deswizzle_rows(d,lv,ly,src,dst,pitch,0,nvn_deswizzle_block_rows(d,lv));}
 static int mem_any(const void *p,uint64_t n){(void)p;(void)n;return 1;}
-static int storage_mode(const tex_t *t,const void *p,const vka_fmt *f,int cpu,int sampled){(void)t;(void)p;(void)f;(void)cpu;(void)sampled;return mode;}
+static int storage_mode(const tex_t *t,const void *p,const vka_fmt *f,int cpu,int sampled,int lazy){(void)t;(void)p;(void)f;(void)cpu;(void)sampled;(void)lazy;return mode;}
 static int sparse_gpu(const tex_t *t,const vka_fmt *f){(void)t;(void)f;return 0;}
 static void sp_add(vka_img *im){(void)im;}
 static int compressed(const vka_fmt *f){return f->bw>1;}
