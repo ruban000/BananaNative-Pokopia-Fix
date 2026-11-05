@@ -152,6 +152,8 @@ static struct {
     int on; VkRect2D area; uint32_t layers, samples;
     uint32_t ncolor; VkFormat cf[8]; uint8_t ckind[8]; VkFormat df, sf;
     vka_img *cim[8]; uint32_t clv[8], cl0[8]; int nci;   // the colour attachments (DM_VK_NANSCAN)
+    uint64_t cs[8], ds; uint32_t cslot[8]; VkImageView cv[8];                 // actual attachment views, retained for selected draw diagnostics
+    vka_img *dim; VkImageView dv; uint32_t dlv, dl0;
     p_set_rt rt; int has_rt;                             // the targets it was opened for: a later SET_RT of the same targets keeps it open
     uint32_t cnl[8], dnl; VkExtent2D cext[8], dext;      // each attachment's layers and level size (clears in the pass must cover what they would outside it)
     int swrite;                                          // a draw of the pass wrote memory (storage buffers or images, raw global stores, a geometry shader's claim)
@@ -226,6 +228,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         VkImageView v = vka_view(im, f.view, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, l0, nl, NULL);
         if (!v) continue;
         ca[i].imageView = v; R.cf[i] = f.view; R.ckind[i] = f.kind; samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv;
+        R.cs[R.nci] = t->serial; R.cslot[R.nci] = (uint32_t)i; R.cv[R.nci] = v;
         R.cim[R.nci] = im; R.clv[R.nci] = lv; R.cl0[R.nci++] = l0;
         uint32_t lw = im->w >> lv ? im->w >> lv : 1, lh = im->h >> lv ? im->h >> lv : 1;
         R.cnl[i] = nl; R.cext[i] = (VkExtent2D){lw, lh};
@@ -246,6 +249,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
                 if (im->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sp = &da; R.sf = im->f.vk; }
                 samples = im->samples; fb_im[nfb] = im; fb_lv[nfb++] = lv;
                 uint32_t lw = im->w >> lv ? im->w >> lv : 1, lh = im->h >> lv ? im->h >> lv : 1;
+                R.ds = rt->depth->serial; R.dim = im; R.dv = v; R.dlv = lv; R.dl0 = l0;
                 R.dnl = nl; R.dext = (VkExtent2D){lw, lh};
                 if (lw < w) w = lw; if (lh < h) h = lh; if (nl < layers) layers = nl;
                 vka_tex_trace_img(im, "depth-attachment", lv, l0, nl);
@@ -1116,9 +1120,29 @@ static int draw_trace_range(const char *s, uint64_t *addr, uint64_t *size, int *
     s = end; *size = strtoull(s, &end, 0);
     return end != s && !*end && *addr && *size && *size <= UINT64_MAX - *addr;
 }
+// A strict bounded list: malformed or truncated filters must never broaden a trace.
+static int draw_trace_keys(const char *s, uint64_t keys[16], unsigned *n) {
+    *n = 0;
+    while (*s) {
+        if (*n == 16) return 0;
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+        uint64_t key = 0; unsigned digits = 0;
+        while (*s && *s != ',') {
+            unsigned v = *s >= '0' && *s <= '9' ? (unsigned)(*s - '0') : *s >= 'a' && *s <= 'f' ? (unsigned)(*s - 'a' + 10) : *s >= 'A' && *s <= 'F' ? (unsigned)(*s - 'A' + 10) : 16;
+            if (v == 16 || ++digits > 16) return 0;
+            key = (key << 4) | v; s++;
+        }
+        if (!digits) return 0;
+        for (unsigned i = 0; i < *n; i++) if (keys[i] == key) return 0;
+        keys[(*n)++] = key;
+        if (*s == ',' && !*++s) return 0;
+    }
+    return 1;
+}
 static void draw_resource_trace(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], uint64_t ind, uint64_t ind_size,
                                 int indexed, int mdi_gpu, uint64_t count_addr, int mdi_i, uint32_t mdi_n, uint32_t mdi_stride) {
-    static char config[160]; static int slot = -2, all_indirect, active, ended;
+    static char config[160], shader_config[256]; static int slot = -2, all_indirect, active, ended;
+    static uint64_t shader_keys[16]; static unsigned nkeys;
     static uint64_t addr, size, checked = ~0ull, first = ~0ull, ordinal_frame = ~0ull, ordinal;
     static unsigned count, max_count, max_frames;
     uint64_t frame = vka_exec_frame();
@@ -1126,28 +1150,38 @@ static void draw_resource_trace(const vka_dstate *d, vka_shader *const sh[VKA_NS
     uint64_t draw = ordinal++;
     if (checked != frame) {
         checked = frame;
-        const char *env = getenv("DM_VK_DRAW_TRACE_RANGE"); if (!env) env = "";
+        char env[160] = {0}, want_keys[256] = {0};
+        vka_env_str("DM_VK_DRAW_TRACE_RANGE", env, sizeof env);
+        vka_env_str("DM_VK_DRAW_TRACE_SHADERS", want_keys, sizeof want_keys);
         int want_slot = (int)VKA_ENV("DM_VK_DRAW_TRACE_SLOT", -1);
-        if (strcmp(env, config) || want_slot != slot) {
+        if (strcmp(env, config) || strcmp(want_keys, shader_config) || want_slot != slot) {
             count = 0; first = ~0ull; ended = 0; active = 0; slot = want_slot;
-            if (strlen(env) >= sizeof config) { config[0] = 0; VRED_ONCE("draw trace: range value too long"); return; }
-            strcpy(config, env);
+            strcpy(config, env); strcpy(shader_config, want_keys);
+            if (strlen(env) == sizeof env - 1 || strlen(want_keys) == sizeof want_keys - 1 || !draw_trace_keys(shader_config, shader_keys, &nkeys)) {
+                VRED_ONCE("draw trace: malformed/duplicate/truncated shader keys (at most16 hexadecimal VS/FS keys), or range value too long"); return;
+            }
             if (!draw_trace_range(config, &addr, &size, &all_indirect) || slot < -1 || slot > 15) {
                 VRED_ONCE("draw trace: expected hexadecimal guest-address:byte-size or indirect, and slot -1..15"); return;
             }
             long nc = VKA_ENV("DM_VK_DRAW_TRACE_COUNT", 100), nf = VKA_ENV("DM_VK_DRAW_TRACE_FRAMES", 4);
             max_count = (unsigned)(nc < 1 ? 1 : nc > 512 ? 512 : nc);
             max_frames = (unsigned)(nf < 1 ? 1 : nf > 120 ? 120 : nf);
-            active = size || all_indirect || slot >= 0;
-            if (active) VLOG("draw trace armed: range %#llx+%llu all-indirect %d slot %d, at most %u frames / %u draws; c0 word usage is not a library fact",
-                             (unsigned long long)addr, (unsigned long long)size, all_indirect, slot, max_frames, max_count);
+            active = size || all_indirect || slot >= 0 || nkeys;
+            if (active) VLOG("draw trace armed: range %#llx+%llu all-indirect %d slot %d shader-keys %u (VS or FS; intersect range/slot when set), at most %u frames / %u draws; c0 word usage is not a library fact",
+                             (unsigned long long)addr, (unsigned long long)size, all_indirect, slot, nkeys, max_frames, max_count);
         }
     }
     if (!active || ended) return;
     if (first != ~0ull && (frame - first >= max_frames || count >= max_count)) {
         ended = 1; VLOG("draw trace ended: %u selected draws, first frame %llu, end frame %llu", count, (unsigned long long)first, (unsigned long long)frame); return;
     }
-    int match = ind && (all_indirect || draw_trace_overlap(ind, ind_size, addr, size));
+    if (nkeys) {
+        int shader_match = 0;
+        for (unsigned i = 0; i < nkeys; i++) if ((sh[0] && sh[0]->key == shader_keys[i]) || (sh[1] && sh[1]->key == shader_keys[i])) shader_match = 1;
+        if (!shader_match) return;
+    }
+    int match = nkeys && !size && !all_indirect && slot < 0;
+    if (ind && (all_indirect || draw_trace_overlap(ind, ind_size, addr, size))) match = 1;
     for (int st = 0; st < 5 && !match; st++) if (sh[st]) {
         for (int i = 0; i < g_wk.n[st] && !match; i++) {
             const vka_res *r = &g_wk.r[st][i];
@@ -1165,22 +1199,54 @@ static void draw_resource_trace(const vka_dstate *d, vka_shader *const sh[VKA_NS
     VLOG("draw edge: frame %llu draw %llu vs %016llx fs %016llx indexed %d indirect %#llx bytes %llu mdi-gpu %d count-address %#llx mdi-index %d max %u stride %u record-base-instance %u c0-644-host-value %u c0-644-use unknown gpu-indirect-values unobserved",
          (unsigned long long)frame, (unsigned long long)draw, sh[0] ? (unsigned long long)sh[0]->key : 0ull, sh[1] ? (unsigned long long)sh[1]->key : 0ull,
          indexed, (unsigned long long)ind, (unsigned long long)ind_size, mdi_gpu, (unsigned long long)count_addr, mdi_i, mdi_n, mdi_stride, d->b.base_instance, d->b.base_instance);
+    for (int i = 0; i < R.nci; i++) {
+        const vka_img *im = R.cim[i]; uint32_t slot = R.cslot[i];
+        VLOG("draw target: frame %llu draw %llu colour %u serial %llu image-serial %llu image %#llx view %#llx format %u level %u layer %u+%u shape %ux%u",
+             (unsigned long long)frame, (unsigned long long)draw, slot,
+             (unsigned long long)R.cs[i], (unsigned long long)im->serial,
+             (unsigned long long)(uintptr_t)im->img, (unsigned long long)(uintptr_t)R.cv[i], (unsigned)R.cf[slot], R.clv[i], R.cl0[i], R.cnl[slot],
+             R.cext[slot].width, R.cext[slot].height);
+    }
+    if (R.dim) VLOG("draw target: frame %llu draw %llu depth-stencil serial %llu image-serial %llu image %#llx view %#llx depth-format %u stencil-format %u level %u layer %u+%u shape %ux%u",
+        (unsigned long long)frame, (unsigned long long)draw, (unsigned long long)R.ds,
+        (unsigned long long)R.dim->serial, (unsigned long long)(uintptr_t)R.dim->img, (unsigned long long)(uintptr_t)R.dv,
+        (unsigned)R.df, (unsigned)R.sf, R.dlv, R.dl0, R.dnl, R.dext.width, R.dext.height);
     for (int st = 0; st < 5; st++) if (sh[st]) {
         for (int i = 0; i < g_wk.n[st]; i++) {
             const vka_res *r = &g_wk.r[st][i];
-            if (r->desc != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && r->what != VKA_R_DRV) continue;
-            const VkDescriptorBufferInfo *bi = NULL;
-            for (uint32_t j = 0; j < g_w.n; j++) if (g_w.w[j].dstBinding == r->binding && g_w.w[j].dstArrayElement == r->elem) { bi = g_w.w[j].pBufferInfo; break; }
-            if (!bi) continue;
+            const VkWriteDescriptorSet *w = NULL;
+            for (uint32_t j = 0; j < g_w.n; j++) if (g_w.w[j].dstBinding == r->binding && g_w.w[j].dstArrayElement == r->elem) { w = &g_w.w[j]; break; }
+            if (!w) continue;   // e.g. a rasterizer-discarded fragment stage
             const dmsh_vk_bind *binding = NULL;
             for (uint32_t j = 0; j < sh[st]->e->bind_count; j++) if (sh[st]->b[j].set == 0 && sh[st]->b[j].binding == r->binding) { binding = &sh[st]->b[j]; break; }
-            const vka_range *source = binding && binding->kind == DMSH_VK_KIND_SBUF && binding->reg >= 0 && binding->reg < 16 ? &d->b.ssbo[st][binding->reg] : NULL;
+            if (w->pImageInfo) {
+                const VkDescriptorImageInfo *ii = w->pImageInfo;
+                char detail[640] = "sampler-only";
+                if (r->desc != VK_DESCRIPTOR_TYPE_SAMPLER) vka_tex_view_desc(r->tid, ii->imageView, detail, sizeof detail);
+                VLOG("draw image: frame %llu draw %llu stage %d key %016llx binding %u[%u] desc %u source %d reg %d flags %#x dim %#x id %d sampler-id %d sampler %#llx view %#llx layout %u: %s",
+                     (unsigned long long)frame, (unsigned long long)draw, st, (unsigned long long)sh[st]->key, r->binding, r->elem, r->desc,
+                     binding ? binding->kind : -1, binding ? binding->reg : -1, r->flags, r->dim, r->tid, r->sid,
+                     (unsigned long long)(uintptr_t)ii->sampler, (unsigned long long)(uintptr_t)ii->imageView, ii->imageLayout, detail);
+                continue;
+            }
+            if (w->pTexelBufferView) {
+                VLOG("draw texel buffer: frame %llu draw %llu stage %d key %016llx binding %u[%u] desc %u flags %#x id %d view %#llx",
+                     (unsigned long long)frame, (unsigned long long)draw, st, (unsigned long long)sh[st]->key, r->binding, r->elem, r->desc,
+                     r->flags, r->tid, (unsigned long long)(uintptr_t)*w->pTexelBufferView);
+                continue;
+            }
+            const VkDescriptorBufferInfo *bi = w->pBufferInfo; if (!bi) continue;
+            const vka_range *source = NULL;
+            if (binding && binding->reg >= 0 && binding->reg < 16) {
+                if (binding->kind == DMSH_VK_KIND_SBUF) source = &d->b.ssbo[st][binding->reg];
+                else if (binding->kind == DMSH_VK_KIND_CBUF || binding->kind == DMSH_VK_KIND_UBO_PTR) source = &d->b.ubo[st][binding->reg];
+            }
             VLOG("draw buffer: frame %llu draw %llu stage %d key %016llx binding %u[%u] source %d reg %d flags %#x source-guest %#llx source-size %llu guest-base %#llx size %llu buffer %#llx offset %llu range %llu driver-bank %d",
                  (unsigned long long)frame, (unsigned long long)draw, st, (unsigned long long)sh[st]->key, r->binding, r->elem,
                  binding ? binding->kind : -1, binding ? binding->reg : -1, r->flags, source ? (unsigned long long)source->addr : 0ull, source ? (unsigned long long)source->size : 0ull,
                  (unsigned long long)r->addr, (unsigned long long)r->size, (unsigned long long)(uintptr_t)bi->buffer, (unsigned long long)bi->offset, (unsigned long long)bi->range, r->what == VKA_R_DRV ? r->bank : -1);
         }
-        if (g_wk.pool[st]) VLOG("draw edge: frame %llu draw %llu stage %d has bindless pool resources; listed buffers are not a complete graph", (unsigned long long)frame, (unsigned long long)draw, st);
+        if (g_wk.pool[st]) VLOG("draw edge: frame %llu draw %llu stage %d has bindless pool resources; listed set-0 bindings are not a complete graph", (unsigned long long)frame, (unsigned long long)draw, st);
     }
 }
 

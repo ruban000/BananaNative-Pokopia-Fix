@@ -71,6 +71,7 @@ static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK
 static const char *const g_live[] = {"DM_VK_DRAW", "DM_VK_STATS", "DM_VK_HANG_S", "DM_VK_HANG_EXIT", "DM_VK_FRAME_RATE", "DM_VK_FRAME_RATE_HOLD", "DM_VK_PCACHE_SAVE_S", "DM_VK_GPL_GIVEUP", "DM_VK_GPL_PROBE", "DM_VK_PREWARM_KEEP", "DM_VK_PRETRANSFORM", "DM_VK_TEX_TRACK",
                                      "DM_VK_CHUNK", "DM_VK_PASS_CLEARS", "DM_VK_PASS_KEEP", "DM_VK_DYN_FILTER", "DM_VK_PROF", "DM_VK_ROWS", "DM_VK_SYNCLOG", "DM_VK_UBWC", "DM_VK_IMG_UPGRADE", "DM_VK_DONE_LAST", "DM_VK_AFF_REPLAY", "DM_VK_AFF_ALL",
                                      "DM_VK_NANSCAN_DUMP", "DM_VK_VB_FILTER", "DM_VK_ENC_BATCH", "DM_VK_BAR_KEEP", "DM_VK_DRV_MEMO", "DM_VK_PUSH_DELTA", "DM_VK_UPLOAD_MT", "DM_VK_UPLOAD_MT_MIN", "DM_VK_PAGEOUT", "DM_VK_PAGEOUT_S", "DM_VK_PAGEOUT_MB",
+                                     "DM_VK_DRAW_TRACE_SHADERS", "DM_VK_DRAW_TRACE_RANGE", "DM_VK_DRAW_TRACE_SLOT", "DM_VK_DRAW_TRACE_COUNT", "DM_VK_DRAW_TRACE_FRAMES",
                                      "DM_VK_BUFFER_TRACE", "DM_VK_BUFFER_TRACE_DIR", "DM_VK_BUFFER_TRACE_FRAMES", "DM_VK_BUFFER_TRACE_COUNT",
                                      "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", "DM_VK_POOL_BIND_FILTER", "DM_VK_ENC_WAKE", "DM_VK_ENC_SPIN_US", NULL};
 static int in(const char *const *t, const char *k) { for (; *t; t++) if (!strcmp(*t, k)) return 1; return 0; }
