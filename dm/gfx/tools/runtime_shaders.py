@@ -102,7 +102,9 @@ def main():
     jobs.append((mainnso, 'main'))
     print(f'{len(jobs) - 1} RomFS files and main to read', flush=True)
     shaders, loose, bad, hold = {}, [], [], []
-    with cf.ProcessPoolExecutor(int(os.environ.get('J', '8'))) as ex:
+    # The RomFS's zstd dictionaries (Pack/ZsDic.pack.zs), as the split gives its workers: without them every file compressed with one is left out (Ocarina of Time's shader packs)
+    ss.ZDICTS = ss.zs_dicts(rom)
+    with ss.pool(int(os.environ.get('J', '8')), ss.COMMON, ss.TREES, ss.ZDICTS) as ex:
         for job, (sh, lo, why) in zip(jobs, ex.map(scan, jobs, chunksize=16)):
             for k, v in sh.items(): shaders.setdefault(k, v)
             loose += lo

@@ -1,4 +1,4 @@
-"""Shaders the host saved (DM_NVN_SHDUMP) enter the split through nvn_dumps, and runtime_shaders.py reports an NVN2 control section no reader pairs. Synthetic bytes only."""
+"""Shaders the host saved (DM_NVN_SHDUMP) enter the split through nvn_dumps, and runtime_shaders.py reports an NVN2 control section no reader pairs; NVN2 BNSH task / mesh slots. Synthetic bytes only."""
 import contextlib
 import io
 import struct
@@ -89,6 +89,33 @@ class RuntimeShaders(unittest.TestCase):
     def test_switch2mac_key(self):
         ctl, code = nvn2()
         self.assertEqual(rs.s2m_key(ctl + b'tail', code), __import__('hashlib').sha256(ctl + code).hexdigest()[:16])
+
+
+class BnshExtraSlots(unittest.TestCase):
+    """An NVN2 BNSH program keeps its task and mesh stages in slots 7 (+0x40) and 8 (+0x48), after NVN's six (bnsh_nvn2_extra)"""
+    def bnsh(self, slots):
+        """A BNSH with one variation whose program has {slot: (control, code)}; each stage a descriptor {+8 control, +0x10 code, +0x18 code length, +0x1c control length}"""
+        d = bytearray(0x1000); d[:8] = b'BNSH\0\0\0\0'; d[0x60:0x64] = b'grsc'
+        struct.pack_into('<IQ', d, 0x7c, 1, 0x100)   # one variation, its table at +0x100
+        struct.pack_into('<Q', d, 0x110, 0x200)      # its program at +0x200
+        at = 0x400
+        for slot, (ctl, code) in slots.items():
+            desc = 0x300 + 0x20 * slot
+            struct.pack_into('<Q', d, 0x200 + 8 + 8 * slot, desc)
+            struct.pack_into('<QQII', d, desc + 8, at, at + 0x100, len(code), len(ctl))
+            d[at:at + len(ctl)] = ctl; d[at + 0x100:at + 0x100 + len(code)] = code; at += 0x200
+        struct.pack_into('<I', d, 0x1c, len(d))
+        return bytes(d)
+
+    def test_task_and_mesh_slots(self):
+        ps, ts, ms = nvn2(1, bytes(0x80)), nvn2(6, bytes(0x40)), nvn2(7, bytes(0xc0))
+        out = ss.bnsh_shaders(self.bnsh({4: ps, 7: ts, 8: ms}), 0, '/Shader/x.bfsha')
+        self.assertEqual([(w, st) for w, st, _, _ in out], [('/Shader/x.bfsha#BNSH@0x0#var0', s) for s in ('ps', 'ts', 'ms')])
+        self.assertEqual(out[2][2:], ms)
+
+    def test_wrong_stage_in_a_mesh_slot_stops(self):
+        with self.assertRaises(SystemExit) as e: ss.bnsh_shaders(self.bnsh({4: nvn2(1, bytes(0x80)), 8: nvn2(6, bytes(0x40))}), 0, '/Shader/x.bfsha')
+        self.assertIn('slot 8 is not an NVN2 mesh control section', str(e.exception.code))
 
 
 if __name__ == '__main__':
