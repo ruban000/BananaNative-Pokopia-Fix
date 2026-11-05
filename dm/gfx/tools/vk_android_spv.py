@@ -16,7 +16,7 @@ OP_SPEC_CONSTANT_FALSE, OP_SELECT, OP_IMAGE_READ, OP_IMAGE_WRITE = 49, 169, 98, 
 # decorations, storage classes, builtins
 DEC_SPEC_ID, DEC_BLOCK, DEC_BUFFER_BLOCK, DEC_BUILTIN, DEC_LOCATION, DEC_BINDING, DEC_SET = 1, 2, 3, 11, 30, 33, 34
 SC_UNIFORM_CONSTANT, SC_INPUT, SC_UNIFORM, SC_OUTPUT, SC_FUNCTION, SC_PUSH_CONSTANT, SC_STORAGE_BUFFER = 0, 1, 2, 3, 7, 9, 12
-BUILTIN_POSITION = 0
+BUILTIN_POSITION, BUILTIN_BASE_INSTANCE = 0, 4425
 # VkDescriptorType
 VK_SAMPLER, VK_COMBINED, VK_SAMPLED_IMAGE, VK_STORAGE_IMAGE, VK_UNIFORM_TEXEL, VK_STORAGE_TEXEL, VK_UNIFORM_BUFFER, VK_STORAGE_BUFFER = 0, 1, 2, 3, 4, 5, 6, 7
 DIM_BUFFER = 5
@@ -230,6 +230,44 @@ def vec4_const(m, f32, vals):
         if x[0] & 0xffff == OP_CONSTANT_COMPOSITE and x[1] == vt and x[3:] == ids: return x[2]
     c = m.new_id(); m._insert_decl([7 << 16 | OP_CONSTANT_COMPOSITE, vt, c, *ids])
     return c
+
+
+def vs_base_instance(m):
+    """Vertex c0+0x644 is the draw's base instance. An indirect record may be written by the GPU, so the CPU-filled driver word is not its value. Read the Vulkan
+    builtin instead, as dmsh_build.py vs_base_instance does for Metal. The translator's scalar load holds raw float bits: preserve those bits, not a numeric conversion.
+    Only this constant driver-word access is replaced; adjacent words and other stages keep their existing semantics. Return the number of loads replaced."""
+    if m.model != 'vs': return 0
+    c0 = {v for v, (_, sc) in m.vars.items() if sc == SC_UNIFORM and m.names.get(v) == 'vp_c0'}
+    ptrs = {x[2] for x in m.ins if x[0] & 0xffff in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN) and len(x) == 7
+            and x[3] in c0 and [const_int(m, i) for i in x[4:]] == [0, 100, 1]}
+    loads = {x[2] for x in m.ins if x[0] & 0xffff == OP_LOAD and x[3] in ptrs
+             and (m.int_type(x[1]) in ((32, 0), (32, 1)) or m.types.get(x[1], [0])[0] & 0xffff == OP_TYPE_FLOAT and m.types[x[1]][2] == 32)}
+    if not loads: return 0
+    base, member = m.builtin_var(SC_INPUT, BUILTIN_BASE_INSTANCE)
+    if base is None:
+        ty = m.add_type(OP_TYPE_INT, 32, 0); pt = m.add_type(OP_TYPE_POINTER, SC_INPUT, ty)
+        base = m.new_id(); m._insert_decl([4 << 16 | OP_VARIABLE, pt, base, SC_INPUT])
+        at = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_DECORATE)
+        m.ins.insert(at, [4 << 16 | OP_DECORATE, base, DEC_BUILTIN, BUILTIN_BASE_INSTANCE])
+        m.entry.append(base); m.entry[0] = len(m.entry) << 16 | OP_ENTRY_POINT
+    else:
+        ty = m.pointee(m.vars[base][0])[1]
+        if member is not None: ty = m.types[ty][2 + member]
+        if m.int_type(ty) not in ((32, 0), (32, 1)): raise ValueError('BaseInstance is not a 32-bit integer')
+    if 4427 not in m.caps: m.ins.insert(0, [2 << 16 | OP_CAPABILITY, 4427])   # DrawParameters, core in the translator's SPIR-V 1.3
+    if member is not None:
+        pt = m.add_type(OP_TYPE_POINTER, SC_INPUT, ty); ci = m.add_const(m.add_type(OP_TYPE_INT, 32, 0), member)
+    out = []
+    for x in m.ins:
+        if x[0] & 0xffff != OP_LOAD or x[2] not in loads: out.append(x); continue
+        ptr = base
+        if member is not None:
+            ptr = m.new_id(); out.append([5 << 16 | OP_ACCESS_CHAIN, pt, ptr, base, ci])
+        value = x[2] if ty == x[1] else m.new_id()
+        out.append([4 << 16 | OP_LOAD, ty, value, ptr])
+        if value != x[2]: out.append([4 << 16 | OP_BITCAST, x[1], x[2], value])
+    m.ins = out; m.index()
+    return len(loads)
 
 
 def init_outputs(m, extra_locations=()):

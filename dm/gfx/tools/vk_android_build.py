@@ -538,6 +538,7 @@ def finish(key, w, job, c1):
             rx = translate([job], w, 'int_' + key)
             if rx.returncode or not os.path.exists(sp): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
             res = json.load(open(os.path.join(w, key + '.res.json'))); m = spv.Module(open(sp, 'rb').read())
+    if stage == 'vs': spv.vs_base_instance(m)
     vcull = stage == 'gs' and spv.private_viewport_mask(m)   # before strip_unused_caps: the capability goes with the output
     dropped = spv.strip_unused_caps(m)
     added = spv.formatless_storage_caps(m)

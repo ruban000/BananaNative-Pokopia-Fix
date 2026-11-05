@@ -235,6 +235,67 @@ OpFunctionEnd
 '''
 
 
+BASE_INSTANCE_VS = '''OpCapability Shader
+OpCapability DrawParameters
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %instance %base %out
+OpName %driver "vp_c0"
+OpName %out "result"
+OpDecorate %instance BuiltIn InstanceIndex
+OpDecorate %base BuiltIn BaseInstance
+OpDecorate %out Location 0
+OpDecorate %rows ArrayStride 16
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %driver DescriptorSet 0
+OpDecorate %driver Binding 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%float = OpTypeFloat 32
+%vec = OpTypeVector %float 4
+%zero = OpConstant %int 0
+%one = OpConstant %int 1
+%two = OpConstant %int 2
+%row = OpConstant %int 100
+%nrows = OpConstant %int 160
+%stride = OpConstant %int 80
+%rows = OpTypeArray %vec %nrows
+%block = OpTypeStruct %rows
+%pblock = OpTypePointer Uniform %block
+%pf = OpTypePointer Uniform %float
+%pi = OpTypePointer Input %int
+%po = OpTypePointer Output %vec
+%driver = OpVariable %pblock Uniform
+%instance = OpVariable %pi Input
+%base = OpVariable %pi Input
+%out = OpVariable %po Output
+%main = OpFunction %void None %fn
+%label = OpLabel
+%i = OpLoad %int %instance
+%b = OpLoad %int %base
+%relative = OpISub %int %i %b
+%before = OpAccessChain %pf %driver %zero %row %zero
+%word = OpAccessChain %pf %driver %zero %row %one
+%after = OpInBoundsAccessChain %pf %driver %zero %row %two
+%f0 = OpLoad %float %before
+%f1 = OpLoad %float %word
+%f2 = OpLoad %float %after
+%n0 = OpBitcast %int %f0
+%n1 = OpBitcast %int %f1
+%n2 = OpBitcast %int %f2
+%record = OpIAdd %int %relative %n1
+%offset = OpIMul %int %record %stride
+%v0 = OpIAdd %int %offset %n0
+%v1 = OpIAdd %int %v0 %n2
+%bits = OpBitcast %float %v1
+%result = OpCompositeConstruct %vec %bits %bits %bits %bits
+OpStore %out %result
+OpReturn
+OpFunctionEnd
+'''
+
+
 @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'SPIRV-Tools not installed')
 class Rewrites(unittest.TestCase):
     def module(self, text):
@@ -249,6 +310,64 @@ class Rewrites(unittest.TestCase):
             r = subprocess.run(['spirv-val', '--target-env', 'vulkan1.3', str(p)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             return subprocess.run(['spirv-dis', str(p)], capture_output=True, text=True).stdout if shutil.which('spirv-dis') else ''
+
+    def test_base_instance_scope(self):
+        m = self.module(BASE_INSTANCE_VS)
+        base, _ = m.builtin_var(spv.SC_INPUT, spv.BUILTIN_BASE_INSTANCE)
+        self.assertEqual(spv.vs_base_instance(m), 1)
+        self.assertEqual(m.builtin_var(spv.SC_INPUT, spv.BUILTIN_BASE_INSTANCE), (base, None))
+        self.valid(m)
+        self.assertEqual(spv.vs_base_instance(m), 0)   # idempotent, including the adjacent driver words
+        for stage in (1, 2, 3, 4, 5, 5364, 5365):
+            n = self.module(BASE_INSTANCE_VS); assert n.entry is not None
+            n.entry[1] = stage; before = n.data()
+            self.assertEqual(spv.vs_base_instance(n), 0); self.assertEqual(n.data(), before)
+        n = self.module(BASE_INSTANCE_VS.replace('"vp_c0"', '"vp_c1"')); before = n.data()
+        self.assertEqual(spv.vs_base_instance(n), 0); self.assertEqual(n.data(), before)
+
+    def test_base_instance_add_builtin(self):
+        text = BASE_INSTANCE_VS.replace('OpCapability DrawParameters\n', '').replace(' %instance %base %out', ' %instance %out')
+        text = text.replace('OpDecorate %base BuiltIn BaseInstance\n', '').replace('%base = OpVariable %pi Input\n', '')
+        text = text.replace('%b = OpLoad %int %base\n', '').replace('%relative = OpISub %int %i %b', '%relative = OpCopyObject %int %i')
+        text = text.replace('%word = OpAccessChain', '%word = OpInBoundsAccessChain')
+        m = self.module(text)
+        self.assertEqual(spv.vs_base_instance(m), 1)
+        base, member = m.builtin_var(spv.SC_INPUT, spv.BUILTIN_BASE_INSTANCE)
+        self.assertIsNotNone(base); self.assertIsNone(member)
+        self.assertEqual(m.caps.count(4427), 1)
+        self.valid(m)
+
+    @unittest.skipUnless(shutil.which('spirv-opt'), 'no spirv-opt')
+    def test_base_instance_draw_values(self):
+        # Execute the reduced foliage indexing expression with constant inputs through SPIRV-Tools' optimizer. An indirect draw's CPU word stays zero while its GPU
+        # firstInstance changes; a direct draw has the same value in both. Neighboring c0 words must remain 11 and 13. No game binaries or GPU are required.
+        def result(base, relative, driver_word, fix):
+            m = self.module(BASE_INSTANCE_VS)
+            if fix: self.assertEqual(spv.vs_base_instance(m), 1)
+            uniform = {x[2]: spv.const_int(m, x[6]) for x in m.ins if x[0] & 0xffff in (spv.OP_ACCESS_CHAIN, spv.OP_IN_BOUNDS_ACCESS_CHAIN)}
+            replacements = {}
+            for x in list(m.ins):
+                if x[0] & 0xffff != spv.OP_LOAD: continue
+                builtin = m.decos.get(x[3], {}).get(spv.DEC_BUILTIN)
+                if builtin == [spv.BUILTIN_BASE_INSTANCE]: v = base
+                elif builtin == [43]: v = base + relative
+                else:
+                    component = uniform[x[3]]; assert component is not None
+                    v = (11, driver_word, 13)[component]
+                replacements[x[2]] = [4 << 16 | spv.OP_COPY_OBJECT, x[1], x[2], m.add_const(x[1], v & 0xffffffff)]
+            m.ins = [replacements.get(x[2], x) if x[0] & 0xffff == spv.OP_LOAD else x for x in m.ins]
+            self.valid(m)
+            r = subprocess.run(['spirv-opt', '-O', '-o', '-', '-'], input=m.data(), capture_output=True, check=True)
+            folded = spv.Module(r.stdout)
+            store = next(x for x in folded.ins if x[0] & 0xffff == spv.OP_STORE)
+            value = next(x for x in folded.ins if x[0] & 0xffff == spv.OP_CONSTANT_COMPOSITE and x[2] == store[2])
+            return folded.consts[value[3]][1][0]
+        for base, relative in ((0, 0), (7, 2), (12345, 19), (0x80000000, 3)):
+            expected = ((base + relative) * 80 + 24) & 0xffffffff
+            self.assertEqual(result(base, relative, base, False), expected)
+            self.assertEqual(result(base, relative, base, True), expected)
+            self.assertEqual(result(base, relative, 0, True), expected)
+        self.assertNotEqual(result(7, 2, 0, False), result(7, 2, 0, True))
 
     def test_vertex_rewrites(self):
         m = self.module(VS)
