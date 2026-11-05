@@ -37,6 +37,8 @@ def dirty = gitOut(['status', '--porcelain', '--untracked-files=no']) ? '+dirty'
 def buildTime = new Date().format('yyyy-MM-dd HH:mm')
 // Lossless Scaling frame generation (GPL-3.0-or-later, dm/gfx/vk_android/lsfg): in by default, which makes the APK GPL-3.0-or-later; -PnxLsfg=false builds without it (the packer's libdmsh_xlate.so is GPL-3.0-or-later too: android/NOTICE.md)
 def nxLsfg = providers.gradleProperty('nxLsfg').getOrElse('true') != 'false'
+// AV1 movies with dav1d (BSD-2-Clause, dm/third_party/dav1d): in by default; -PnxAv1Dav1d=false builds a host without it, whose AV1 decoders fail to initialize (docs/reference/movies.md)
+def nxAv1Dav1d = providers.gradleProperty('nxAv1Dav1d').getOrElse('true') != 'false'
 // Preparing the game on the phone (android/ONDEVICE.md): "+ Add game" on a dump without a usable pack offers Prepare, which runs PackService (a foreground service
 // in :pack) with the embedded packer: CPython 3.14 with the repository's tools, the translator (libdmsh_xlate.so) and SPIRV-Tools (libSPIRV-Tools-shared.so). Part of
 // every APK (test and play). -PnxPackStage=<android/ondevice/build.sh work dir>/stage (or NX_PACK_STAGE) names the native side's stage; -PnxPackEngine=fake builds a
@@ -98,7 +100,7 @@ android {
         buildConfigField 'String', 'NX_REWRITER', "\"$nxRewriter\""
         externalNativeBuild {
             cmake {
-                arguments "-DNX_GAMES=${nxGames.join(',')}", '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', "-DNX_LSFG=${nxLsfg ? 'ON' : 'OFF'}"
+                arguments "-DNX_GAMES=${nxGames.join(',')}", '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', "-DNX_LSFG=${nxLsfg ? 'ON' : 'OFF'}", "-DNX_AV1_DAV1D=${nxAv1Dav1d ? 'ON' : 'OFF'}"
                 // a host and its shim per game, then the custom GPU drivers' loader and hooks (DM_VK_DRIVER)
                 targets(*(nxGames.collectMany { ["nxhost_$it".toString(), "nxlaunch_$it".toString()] } + ['nxadreno', 'hook_impl', 'main_hook']))
             }

@@ -10,6 +10,7 @@ DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; re
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
+DM_AV1_THREADS	switch	`=<n>` (Android, read when a movie's AV1 decoder is initialized; default 2): dav1d's threads for the `nn::codec` AV1 decoders (`hle_codec_video.c`); `0` one a core (dav1d's choice), at most 8; frame delay 2 (1 with one thread). Fewer threads, less heat; 1080p60 likely needs more than one on a phone
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUILD_COMMIT	path	The commit the build was made from, which the host logs at start-up; the Android launcher sets it from the commit Gradle stamped into the APK (the Apple apps read `DMCommit` from Info.plist instead)
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
