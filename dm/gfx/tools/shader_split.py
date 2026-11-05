@@ -152,6 +152,7 @@ def bnsh_shaders(d, base, label):
     for v in range(nvar):
         prog = field(d, '<Q', base + pvar + 0x40 * v + 0x10, f'{where} variation {v}')[0]
         if not prog: continue
+        nvn2 = False
         for si, st in enumerate(STAGES):
             sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} variation {v} program')[0]
             if not sc: continue
@@ -159,8 +160,27 @@ def bnsh_shaders(d, base, label):
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
+            nvn2 = nvn2 or nvn2_ctl(ctl)
             if nvn2_ctl(ctl) and len(ctl) > 0x56 and NVN2_CTL_STAGE.get(ctl[0x56]) in ('ts', 'ms'): st = NVN2_CTL_STAGE[ctl[0x56]]   # filed in a graphics slot
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
+        if nvn2: out.extend(bnsh_nvn2_extra(d, base, prog, label, v))
+    return out
+
+NVN2_EXTRA = ((7, 'ts'), (8, 'ms'))   # an NVN2 program's stage slots past the six of NVN: slot 7 (+0x40) task, slot 8 (+0x48) mesh (slot 6, +0x38, is 0 in every program seen)
+def bnsh_nvn2_extra(d, base, prog, label, v):
+    """The task and mesh stages of an NVN2 BNSH program (one whose six NVN slots hold an NVN2 control section). Ocarina of Time's Model and Foliage packs keep them in slots 7 and 8,
+    after the six slots the NVN reader takes (1,683 task + mesh variations in Model): read by those six alone, 360 of its task / mesh control sections had no code area paired
+    (runtime_shaders.py). Mario Kart World files its task and mesh programs in the graphics slots instead (bnsh_shaders). Each must be an NVN2 control section of its slot's stage"""
+    where, out = f'{label} BNSH @{base:#x} variation {v}', []
+    for si, want in NVN2_EXTRA:
+        sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} program')[0]
+        if not sc: continue
+        pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} {want}')
+        ctl, code = span(d, base + pctl, nctl, f'{where} {want} control section'), span(d, base + pcode, ncode, f'{where} {want} code area')
+        if not (nvn2_ctl(ctl) and len(ctl) > 0x56 and NVN2_CTL_STAGE.get(ctl[0x56]) == want): red(f'{where}: slot {si} is not an NVN2 {STAGE_NAME[want]} control section')
+        why = check(label, want, ctl, code)
+        if why: red(f'{where} {want}: {why}')
+        out.append((f'{label}#BNSH@{base:#x}#var{v}', want, ctl, code))
     return out
 
 NVN2_CTL_STAGE = {5: 'cs', 6: 'ts', 7: 'ms'}   # NVN2 control +0x56: 0 vertex, 1 pixel, 5 compute, 6 task, 7 mesh
