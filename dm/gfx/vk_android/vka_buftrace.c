@@ -34,6 +34,7 @@ static unsigned g_bt_nsel, g_bt_count, g_bt_max_count, g_bt_frames;
 static uint64_t g_bt_total, g_bt_first = UINT64_MAX, g_bt_checked = UINT64_MAX, g_bt_session;
 static char g_bt_config[256], g_bt_dir[1024];
 static int g_bt_ended;
+static const char *bt_phase(uint32_t phase) { return phase == 2 ? "post_draw" : phase ? "post" : "pre"; }
 
 // Account the driver's actual allocation size, not just the requested buffer size.
 // Recording is single-threaded; the writer only subtracts live allocations.
@@ -65,21 +66,21 @@ static void bt_write_packet(bt_packet *p) {
         const uint8_t *bytes = p->h.p + (size_t)i * p->stride;
         char path[1280]; snprintf(path, sizeof path, "%s/f%llu-k%016llx-d%llu-%s%u-%s-a%llx-s%llu-n%u.bin", p->dir,
             (unsigned long long)r->frame, (unsigned long long)r->key, (unsigned long long)r->ordinal, r->kind ? "ubo" : "ssbo", r->reg,
-            r->phase ? "post" : "pre", (unsigned long long)r->guest, (unsigned long long)s->session, s->sequence);
+            bt_phase(r->phase), (unsigned long long)r->guest, (unsigned long long)s->session, s->sequence);
         uint64_t hash = 0xcbf29ce484222325ull; for (unsigned j = 0; j < s->bytes; j++) hash = (hash ^ bytes[j]) * 0x100000001b3ull;
         FILE *f = directory ? fopen(path, "wb") : NULL; int ok = f && fwrite(bytes, 1, s->bytes, f) == s->bytes; if (f && fclose(f)) ok = 0;
         char meta[1290]; snprintf(meta, sizeof meta, "%s.tsv", path); f = directory ? fopen(meta, "w") : NULL;
         if (f) {
-            if (fprintf(f, "frame\tkey\tordinal\tphase\tkind\treg\tbinding\telement\tguest\tsource_size\tresolved_guest\tresolved_size\tbuffer\tdescriptor_offset\tdescriptor_range\tprefix\trequested\tbytes\tfence\thash\tsession\tsequence\n"
-                "%llu\t%016llx\t%llu\t%s\t%s\t%u\t%u\t%u\t%#llx\t%llu\t%#llx\t%llu\t%#llx\t%llu\t%llu\t%llu\t%u\t%u\t%llu\t%016llx\t%llu\t%u\n",
-                (unsigned long long)r->frame, (unsigned long long)r->key, (unsigned long long)r->ordinal, r->phase ? "post" : "pre", r->kind ? "ubo" : "ssbo", r->reg, r->binding, r->element,
+            if (fprintf(f, "frame\tkey\tordinal\tphase\tkind\treg\tbinding\telement\tguest\tsource_size\tresolved_guest\tresolved_size\tbuffer\tdescriptor_offset\tdescriptor_range\tprefix\trequested\tbytes\tfence\thash\tsession\tsequence\tstage\tvertex_key\tvariant\n"
+                "%llu\t%016llx\t%llu\t%s\t%s\t%u\t%u\t%u\t%#llx\t%llu\t%#llx\t%llu\t%#llx\t%llu\t%llu\t%llu\t%u\t%u\t%llu\t%016llx\t%llu\t%u\t%u\t%016llx\t%u\n",
+                (unsigned long long)r->frame, (unsigned long long)r->key, (unsigned long long)r->ordinal, bt_phase(r->phase), r->kind ? "ubo" : "ssbo", r->reg, r->binding, r->element,
                 (unsigned long long)r->guest, (unsigned long long)r->source_size, (unsigned long long)r->resolved_guest, (unsigned long long)r->resolved_size,
                 (unsigned long long)(uintptr_t)r->descriptor.buffer, (unsigned long long)r->descriptor.offset, (unsigned long long)r->descriptor.range,
-                (unsigned long long)s->prefix, s->requested, s->bytes, (unsigned long long)s->fence, (unsigned long long)hash, (unsigned long long)s->session, s->sequence) < 0) ok = 0;
+                (unsigned long long)s->prefix, s->requested, s->bytes, (unsigned long long)s->fence, (unsigned long long)hash, (unsigned long long)s->session, s->sequence, r->stage, (unsigned long long)r->vertex_key, r->variant) < 0) ok = 0;
             if (fclose(f)) ok = 0;
         } else ok = 0;
-        if (ok) VLOG("buffer trace saved frame=%llu key=%016llx dispatch=%llu phase=%s %s%u bytes=%u/%u fence=%llu hash=%016llx path=%s",
-            (unsigned long long)r->frame, (unsigned long long)r->key, (unsigned long long)r->ordinal, r->phase ? "post" : "pre", r->kind ? "ubo" : "ssbo", r->reg,
+        if (ok) VLOG("buffer trace saved frame=%llu key=%016llx %s=%llu phase=%s %s%u bytes=%u/%u fence=%llu hash=%016llx path=%s",
+            (unsigned long long)r->frame, (unsigned long long)r->key, r->phase == 2 ? "draw" : "dispatch", (unsigned long long)r->ordinal, bt_phase(r->phase), r->kind ? "ubo" : "ssbo", r->reg,
             s->bytes, s->requested, (unsigned long long)s->fence, (unsigned long long)hash, path);
         else VRED("buffer trace: could not write %s and its metadata", path);
     }
@@ -127,20 +128,22 @@ static void bt_configure(const char *config) {
         char *end; errno = 0; uint64_t key = strtoull(s, &end, 16);
         if (errno || end == s || *end != ':' || *s == '-' || *s == '+') { bad = 1; break; } s = end + 1;
         unsigned phase, kind;
-        if (!strncmp(s, "pre:", 4)) { phase = 0; s += 4; } else if (!strncmp(s, "post:", 5)) { phase = 1; s += 5; } else { bad = 1; break; }
+        if (!strncmp(s, "pre:", 4)) { phase = 0; s += 4; } else if (!strncmp(s, "post:", 5)) { phase = 1; s += 5; } else if (!strncmp(s, "draw:", 5)) { phase = 2; s += 5; } else { bad = 1; break; }
         if (!strncmp(s, "ssbo", 4)) { kind = 0; s += 4; } else if (!strncmp(s, "ubo", 3)) { kind = 1; s += 3; } else { bad = 1; break; }
         unsigned long reg = strtoul(s, &end, 10); if (end == s || reg > 15 || *s < '0' || *s > '9') { bad = 1; break; } s = end;
-        unsigned long bytes = 224;
+        unsigned long bytes = phase == 2 ? 512 : 224;
         if (*s == ':') { s++; errno = 0; bytes = strtoul(s, &end, 10); if (errno || end == s || *s < '0' || *s > '9') { bad = 1; break; } s = end; }
         if (bytes < 4 || bytes > BT_BYTES || (bytes & 3) || (*s && *s != ',')) { bad = 1; break; }
+        if (phase == 2 && (kind != 1 || reg != 0 || bytes > 512)) { bad = 1; break; }
         // Reject duplicate selectors instead of silently producing ambiguous byte lengths.
         for (unsigned i = 0; i < g_bt_nsel; i++) if (g_bt_sel[i].key == key && g_bt_sel[i].phase == phase && g_bt_sel[i].kind == kind && g_bt_sel[i].reg == reg) bad = 1;
         if (bad) break;
         g_bt_sel[g_bt_nsel++] = (typeof(g_bt_sel[0])){key, phase, kind, (uint32_t)reg, (uint32_t)bytes};
         if (*s == ',' && !*++s) { bad = 1; break; }
     }
-    if (bad) { g_bt_nsel = 0; VRED("buffer trace: expected key:pre|post:ubo|ssbo<0..15>[:bytes4..65536], at most 8 selectors"); }
+    if (bad) { g_bt_nsel = 0; VRED("buffer trace: expected key:pre|post:ubo|ssbo<0..15>[:bytes4..65536] or key:draw:ubo0[:bytes4..512], at most 8 selectors"); }
     int n = VKA_ENV("DM_VK_BUFFER_TRACE_FRAMES", 120); g_bt_frames = n < 1 ? 1u : n > 120 ? 120u : (unsigned)n;
+    for (unsigned i = 0; i < g_bt_nsel; i++) if (g_bt_sel[i].phase == 2 && g_bt_frames > 64) g_bt_frames = 64;
     n = VKA_ENV("DM_VK_BUFFER_TRACE_COUNT", 1024); g_bt_max_count = n < 1 ? 1u : n > 1024 ? 1024u : (unsigned)n;
     g_bt_dir[0] = 0; vka_env_str("DM_VK_BUFFER_TRACE_DIR", g_bt_dir, sizeof g_bt_dir);
     if (g_bt_nsel && (!g_bt_dir[0] || g_bt_dir[0] != '/')) { g_bt_nsel = 0; VRED("buffer trace: set DIR to an absolute private game-work folder before arming"); }

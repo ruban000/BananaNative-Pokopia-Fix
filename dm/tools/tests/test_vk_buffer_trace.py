@@ -18,6 +18,12 @@ class BufferTrace(unittest.TestCase):
         sample = sample[:sample.index("uint64_t vka_buffer_trace_mask")]
         draw = (ROOT / "dm/gfx/vk_android/vka_draw.c").read_text()
         dispatch = draw[draw.index("static void buffer_trace_dispatch("):draw.index("int dm_sdk_ounce")]
+        fragment = draw[draw.index("static void buffer_trace_draw("):draw.index("static int draw_trace_overlap(")]
+        writes = draw[draw.index("static int draw_writes("):draw.index("// After a game barrier")]
+        # The hook is on the successful draw tail, before a later draw can rebind.
+        tail = draw[draw.index("    uint64_t trace_ind_size ="):draw.index("// Read descriptors actually emitted")]
+        self.assertIn("buffer_trace_draw(d, sh, trace_draw, k.fs_variant);", tail)
+        self.assertLess(tail.index("draw_resource_trace("), tail.index("buffer_trace_draw("))
         harness = r'''
 #define __ANDROID__ 1
 #define VK_NO_PROTOTYPES
@@ -67,14 +73,14 @@ static int fake_detach(pthread_t t) { (void)t;return 0; }
 #define pthread_detach fake_detach
 static struct { mock_buffer *s,*d;size_t so,off,n;int fill; } commands[8192];
 static unsigned ncommands;
-static int awaiting_copy, awaiting_war;
+static int awaiting_copy, awaiting_war, in_rendering, draw_recorded, pass_ends;
 static void copy_cmd(VkCommandBuffer cb,VkBuffer s,VkBuffer d,uint32_t n,const VkBufferCopy *r) {
- (void)cb;assert(n==1&&awaiting_copy&&!awaiting_war);assert(r->size&&!(r->size&3));
+ (void)cb;assert(!in_rendering);assert(n==1&&awaiting_copy&&!awaiting_war);assert(r->size&&!(r->size&3));
  assert(r->srcOffset+r->size<=buffer(s)->size&&r->dstOffset+r->size<=buffer(d)->size);
  commands[ncommands++]=(typeof(commands[0])){buffer(s),buffer(d),r->srcOffset,r->dstOffset,r->size,0};awaiting_copy=0;awaiting_war=1;
 }
 static void barrier_cmd(VkCommandBuffer cb,VkPipelineStageFlags s,VkPipelineStageFlags d,VkDependencyFlags dep,uint32_t nm,const VkMemoryBarrier *m,uint32_t nb,const VkBufferMemoryBarrier *b,uint32_t ni,const VkImageMemoryBarrier *im) {
- (void)cb;(void)dep;(void)m;(void)im;assert(!nm&&!ni&&nb==1);barrier_count++;
+ (void)cb;(void)dep;(void)m;(void)im;assert(!in_rendering);assert(!nm&&!ni&&nb==1);barrier_count++;
  if(b->dstAccessMask==VK_ACCESS_TRANSFER_READ_BIT) {
   assert(!awaiting_copy&&!awaiting_war);assert(s==VK_PIPELINE_STAGE_ALL_COMMANDS_BIT&&d==VK_PIPELINE_STAGE_TRANSFER_BIT);
   assert(b->srcAccessMask==VK_ACCESS_MEMORY_WRITE_BIT);awaiting_copy=1;
@@ -98,16 +104,24 @@ static void execute(void) {
 static void producer(mock_buffer *b,int value) { assert(!awaiting_copy&&!awaiting_war);commands[ncommands++]=(typeof(commands[0])){NULL,b,0,0,b->size,value}; }
 '''
         selection_types = r'''
-enum { VKA_R_BUF=1,DMSH_VK_KIND_SBUF=1,DMSH_VK_KIND_CBUF=2,DMSH_VK_KIND_UBO_PTR=3 };
+enum { VKA_NSTAGE=6,VKA_R_IMG=2,VKA_R_GMEM_LOG=3,DMSH_VK_BF_RW=1,VKA_R_BUF=1,DMSH_VK_KIND_SBUF=1,DMSH_VK_KIND_CBUF=2,DMSH_VK_KIND_UBO_PTR=3 };
 typedef struct { uint64_t addr,size; } vka_range;
-typedef struct { struct { vka_range ssbo[8][16],ubo[8][16]; } b; } vka_dstate;
+typedef struct { struct { vka_range ssbo[8][16],ubo[8][16]; } b; int rast_discard; } vka_dstate;
 typedef struct { int set,binding,kind,reg; } dmsh_vk_bind;
 typedef struct { uint32_t bind_count; } mock_entry;
-typedef struct { uint64_t key;mock_entry *e;dmsh_vk_bind *b; } vka_shader;
-typedef struct { int what,desc;uint32_t binding,elem;uint64_t addr,size; } vka_res;
-static struct { int n[8];vka_res r[8][8]; } g_wk;
+typedef struct { uint64_t key;mock_entry *e;dmsh_vk_bind *b; int gs_fx; } vka_shader;
+typedef struct { int what,desc;uint32_t binding,elem;uint64_t addr,size; unsigned flags; } vka_res;
+static struct { int n[8],pool[8];vka_res r[8][8]; } g_wk;
 static struct { uint32_t n;VkWriteDescriptorSet w[8]; } g_w;
 static VkCommandBuffer g_cb=(VkCommandBuffer)1;
+static uint64_t recording_frame;
+static uint64_t vka_exec_frame(void) { return recording_frame; }
+static void vka_rp_end(void) {
+ assert(in_rendering&&draw_recorded);in_rendering=0;pass_ends++;
+ // Other diagnostics may reuse global descriptor/walk state. The selected sample
+ // must already own its metadata and must not read g_w after this boundary.
+ g_w.n=0;g_wk.n[1]=0;
+}
 '''
         test = r'''
 static void dispose(bt_packet *p) { uint64_t n=p->h.n;vcap_hbuf_free(&p->h);free(p);atomic_fetch_sub(&g_bt_live_bytes,n); }
@@ -167,6 +181,45 @@ int main(int argc,char **argv) {
  assert(g_bt_pending->samples[0].bytes==64);execute();vka_buffer_trace_commit(125,1);fire_all();drain();
  char truncated[300];memset(truncated,'a',sizeof truncated);truncated[sizeof truncated-1]=0;
  setenv("DM_VK_BUFFER_TRACE",truncated,1);assert(!vka_buffer_trace_mask(129,0xaaaa,0));
+ // Draw captures have a separate selector, UBO0 only, and a 64-frame ceiling.
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0:480",1);
+ recording_frame=130;assert(vka_buffer_trace_mask(130,0x9bec,2)==(1ull<<16)&&g_bt_frames==64);
+ assert(!vka_buffer_trace_mask(130,0x9bec,1));
+ vka_shader vs={.key=0x8b99},fs={.key=0x9bec,.e=&entry,.b=bindings};vka_shader *sh[VKA_NSTAGE]={&vs,&fs};
+ bindings[0]=(dmsh_vk_bind){0,257,DMSH_VK_KIND_CBUF,0};entry.bind_count=1;
+ state.b.ubo[1][0]=(vka_range){0x4000,512};ub=(VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)&gpu,5120,512};
+ g_wk.n[1]=1;g_wk.r[1][0]=(vka_res){VKA_R_BUF,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,257,0,0x4000,512};
+ g_w.n=1;g_w.w[0]=(VkWriteDescriptorSet){.dstBinding=257,.pBufferInfo=&ub};
+ in_rendering=draw_recorded=1;
+ // Reject shader writes in any active stage, bindless/unresolved walks, discard,
+ // an unmatched key, missing descriptors and an invalid range without ending a pass.
+ g_wk.r[1][0].flags=DMSH_VK_BF_RW;buffer_trace_draw(&state,sh,1421,0);g_wk.r[1][0].flags=0;
+ g_wk.pool[0]=1;buffer_trace_draw(&state,sh,1421,0);g_wk.pool[0]=0;
+ g_wk.n[0]=-1;buffer_trace_draw(&state,sh,1421,0);g_wk.n[0]=0;
+ state.rast_discard=1;buffer_trace_draw(&state,sh,1421,0);state.rast_discard=0;
+ fs.key=0xdead;buffer_trace_draw(&state,sh,1421,0);fs.key=0x9bec;
+ g_w.n=0;buffer_trace_draw(&state,sh,1421,0);g_w.n=1;
+ ub.range=VK_WHOLE_SIZE;buffer_trace_draw(&state,sh,1421,0);ub.range=512;
+ assert(in_rendering&&!pass_ends&&!g_bt_pending);
+ memset(data,0x44,sizeof data);producer(&gpu,0x55);
+ buffer_trace_draw(&state,sh,1421,3);assert(!in_rendering&&pass_ends==1&&g_bt_pending);
+ bt_packet *draw_packet=g_bt_pending;
+ assert(draw_packet->samples[0].source.descriptor.offset==5120&&draw_packet->samples[0].source.stage==1);
+ assert(draw_packet->samples[0].source.vertex_key==0x8b99&&draw_packet->samples[0].source.variant==3);
+ assert(draw_packet->samples[0].bytes==480&&draw_packet->h.p[0]==0);
+ ub.offset=0;state.b.ubo[1][0].addr=0x9000;fs.key=0xdead;
+ // A later draw is allowed to reopen rendering normally. The capture inserts no
+ // submission or wait and retains its own descriptor even after global mutation.
+ in_rendering=draw_recorded=1;producer(&gpu,0x66);in_rendering=0;
+ vka_buffer_trace_commit(126,1);assert(!g_bt_ready&&completions[0].fence==126);
+ execute();assert(draw_packet->h.p[0]==0x55&&data[0]==0x66&&!g_bt_ready);
+ fire_all();assert(g_bt_ready==draw_packet);bt_write_packet(draw_packet);drain();
+ assert(vka_buffer_trace_mask(193,0x9bec,2));assert(!vka_buffer_trace_mask(194,0x9bec,2));
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo1:512",1);assert(!vka_buffer_trace_mask(195,0x9bec,2));
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ssbo0:512",1);assert(!vka_buffer_trace_mask(196,0x9bec,2));
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0:65536",1);assert(!vka_buffer_trace_mask(197,0x9bec,2));
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0",1);assert(vka_buffer_trace_mask(198,0x9bec,2));assert(g_bt_sel[0].bytes==512);
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0:4",1);assert(vka_buffer_trace_mask(199,0x9bec,2));assert(g_bt_sel[0].bytes==4);
  assert(!allocated_bytes&&!atomic_load(&g_bt_live_bytes));puts("production GPU snapshots, descriptors, bounds and exact-fence lifetime: passed");return 0;
 }
 '''
@@ -174,11 +227,25 @@ int main(int argc,char **argv) {
             c = Path(tmp) / "buffer_trace.c"
             binary = Path(tmp) / "buffer_trace"
             out = Path(tmp) / "game-work"
-            c.write_text(harness + sample + source + selection_types + dispatch + test)
+            c.write_text(harness + sample + source + selection_types + writes + fragment + dispatch + test)
             subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(ROOT / "dm/third_party/vulkan-headers/include"), str(c), "-pthread", "-o", str(binary)], check=True)
             for mode in ("normal", "failure", "loss"):
                 subprocess.run([str(binary), mode, str(out)], check=True)
-            files = list(out.glob("*.bin"))
+            # Negative control: transferring before ending rendering must be rejected.
+            bad = Path(tmp) / "inside_pass.c"
+            bad.write_text(harness + sample + source + selection_types + writes + fragment.replace("        vka_rp_end();", "") + dispatch + test)
+            subprocess.run(["cc", "-std=gnu11", "-O1", "-I", str(ROOT / "dm/third_party/vulkan-headers/include"), str(bad), "-pthread", "-o", str(binary)], check=True)
+            result = subprocess.run([str(binary), "normal", str(out)], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"!in_rendering", result.stderr)
+            draw_files = list(out.glob("*post_draw*.bin"))
+            self.assertEqual(len(draw_files), 1)
+            self.assertEqual(draw_files[0].read_bytes(), bytes([0x55]) * 480)
+            meta = Path(str(draw_files[0]) + ".tsv").read_text().splitlines()
+            values = dict(zip(meta[0].split("\t"), meta[1].split("\t")))
+            self.assertEqual((values["ordinal"], values["stage"], values["vertex_key"], values["variant"]), ("1421", "1", "0000000000008b99", "3"))
+            self.assertEqual((values["phase"], values["binding"], values["descriptor_offset"], values["descriptor_range"], values["fence"]), ("post_draw", "257", "5120", "512", "126"))
+            files = [p for p in out.glob("*.bin") if "post_draw" not in p.name]
             self.assertEqual(len(files), 1)
             self.assertEqual(files[0].read_bytes(), bytes([0x11]) * 128)
             metadata = Path(str(files[0]) + ".tsv").read_text().splitlines()

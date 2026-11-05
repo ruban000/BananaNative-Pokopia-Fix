@@ -441,7 +441,9 @@ void vka_nan_commit(uint64_t fence);
 typedef struct {
     uint64_t frame, key, ordinal, guest, source_size, resolved_guest, resolved_size;
     VkDescriptorBufferInfo descriptor;
-    uint32_t kind, reg, binding, element, phase;
+    uint32_t kind, reg, binding, element, phase; // phase: 0 pre-dispatch, 1 post-dispatch, 2 post-draw
+    uint32_t stage, variant;
+    uint64_t vertex_key;
 } vka_buffer_sample;
 uint64_t vka_buffer_trace_mask(uint64_t frame, uint64_t key, int phase);
 void vka_buffer_trace_copy(VkCommandBuffer cb, const vka_buffer_sample *sample, uint64_t prefix);
