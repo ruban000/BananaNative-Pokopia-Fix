@@ -1,5 +1,5 @@
 // AV1 decoding for the nn::codec video decoders (hle_codec_video.c) with dav1d (dm/third_party/dav1d): one temporal unit in, 8-bit I420 pictures out in display order.
-// Built only with NX_DAV1D (android/host/CMakeLists.txt NX_AV1_DAV1D); without it hle_av1_dav1d.c is empty. Not wired into the codec yet: docs/reference/movies.md
+// Built only with NX_DAV1D (android/host/CMakeLists.txt NX_AV1_DAV1D, on by default); without it hle_av1_dav1d.c is empty and AV1 Initialize fails. Used by hle_codec_video.c (cv_dec_*): docs/reference/movies.md
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

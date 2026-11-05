@@ -21,6 +21,7 @@ SHIM = r'''
 typedef uint32_t Result;
 #define DM_SYNC_NEVER 0x4e436d44u
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
+#define HLE_FORCE_BIG(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #define LOG(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define die(...) do { LOG(__VA_ARGS__); abort(); } while (0)
 void hle_bind_system_event(void *, int);
