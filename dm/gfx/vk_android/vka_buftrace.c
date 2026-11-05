@@ -134,14 +134,14 @@ static void bt_configure(const char *config) {
         unsigned long bytes = phase == 2 ? 512 : 224;
         if (*s == ':') { s++; errno = 0; bytes = strtoul(s, &end, 10); if (errno || end == s || *s < '0' || *s > '9') { bad = 1; break; } s = end; }
         if (bytes < 4 || bytes > BT_BYTES || (bytes & 3) || (*s && *s != ',')) { bad = 1; break; }
-        if (phase == 2 && (kind != 1 || reg != 0 || bytes > 512)) { bad = 1; break; }
+        if (phase == 2 && (kind != 1 || bytes > 512)) { bad = 1; break; }
         // Reject duplicate selectors instead of silently producing ambiguous byte lengths.
         for (unsigned i = 0; i < g_bt_nsel; i++) if (g_bt_sel[i].key == key && g_bt_sel[i].phase == phase && g_bt_sel[i].kind == kind && g_bt_sel[i].reg == reg) bad = 1;
         if (bad) break;
         g_bt_sel[g_bt_nsel++] = (typeof(g_bt_sel[0])){key, phase, kind, (uint32_t)reg, (uint32_t)bytes};
         if (*s == ',' && !*++s) { bad = 1; break; }
     }
-    if (bad) { g_bt_nsel = 0; VRED("buffer trace: expected key:pre|post:ubo|ssbo<0..15>[:bytes4..65536] or key:draw:ubo0[:bytes4..512], at most 8 selectors"); }
+    if (bad) { g_bt_nsel = 0; VRED("buffer trace: expected key:pre|post:ubo|ssbo<0..15>[:bytes4..65536] or key:draw:ubo<0..15>[:bytes4..512], at most 8 selectors"); }
     int n = VKA_ENV("DM_VK_BUFFER_TRACE_FRAMES", 120); g_bt_frames = n < 1 ? 1u : n > 120 ? 120u : (unsigned)n;
     for (unsigned i = 0; i < g_bt_nsel; i++) if (g_bt_sel[i].phase == 2 && g_bt_frames > 64) g_bt_frames = 64;
     n = VKA_ENV("DM_VK_BUFFER_TRACE_COUNT", 1024); g_bt_max_count = n < 1 ? 1u : n > 1024 ? 1024u : (unsigned)n;

@@ -1705,9 +1705,9 @@ static void view_desc_locked(int id, VkImageView view, char *out, size_t size) {
     const view_ent *hit = NULL;
     for (const view_ent *v = im ? im->views : NULL; v; v = v->next) if (v->v == view) { hit = v; break; }
     if (!hit) { snprintf(out, size, "serial=%llu view=%p actual-view=unresolved image=%p", (unsigned long long)serial, (void *)view, im ? (void *)im->img : NULL); return; }
-    snprintf(out, size, "serial=%llu view=%p image=%p actual-format=%d type=%d aspect=%#x level=%u+%u layer=%u+%u base=%u vmin=%u shape=%ux%ux%u",
+    snprintf(out, size, "serial=%llu view=%p image=%p actual-format=%d type=%d aspect=%#x level=%u+%u layer=%u+%u base=%u vmin=%u shape=%ux%ux%u depth=%u",
              (unsigned long long)serial, (void *)view, (void *)im->img, hit->f, hit->t, hit->asp, hit->l0, hit->nl, hit->a0, hit->na,
-             im->base, im->vmin, im->w, im->h, im->layers);
+             im->base, im->vmin, im->w, im->h, im->layers, im->depth);
 }
 void vka_tex_view_desc(int id, VkImageView view, char *out, size_t size) {
     pthread_mutex_lock(&g_tmu); view_desc_locked(id, view, out, size); pthread_mutex_unlock(&g_tmu);

@@ -116,11 +116,18 @@ static struct { uint32_t n;VkWriteDescriptorSet w[8]; } g_w;
 static VkCommandBuffer g_cb=(VkCommandBuffer)1;
 static uint64_t recording_frame;
 static uint64_t vka_exec_frame(void) { return recording_frame; }
+static VkDescriptorBufferInfo *clobber_descriptors[2];
+static vka_dstate *clobber_state;
+static vka_shader *clobber_shader;
 static void vka_rp_end(void) {
  assert(in_rendering&&draw_recorded);in_rendering=0;pass_ends++;
  // Other diagnostics may reuse global descriptor/walk state. The selected sample
  // must already own its metadata and must not read g_w after this boundary.
  g_w.n=0;g_wk.n[1]=0;
+ for(unsigned i=0;i<2;i++) if(clobber_descriptors[i]) memset(clobber_descriptors[i],0,sizeof *clobber_descriptors[i]);
+ if(clobber_state) memset(clobber_state,0,sizeof *clobber_state);
+ if(clobber_shader) clobber_shader->key=0;
+ memset(g_w.w,0,sizeof g_w.w);memset(g_wk.r[1],0,sizeof g_wk.r[1]);
 }
 '''
         test = r'''
@@ -181,7 +188,7 @@ int main(int argc,char **argv) {
  assert(g_bt_pending->samples[0].bytes==64);execute();vka_buffer_trace_commit(125,1);fire_all();drain();
  char truncated[300];memset(truncated,'a',sizeof truncated);truncated[sizeof truncated-1]=0;
  setenv("DM_VK_BUFFER_TRACE",truncated,1);assert(!vka_buffer_trace_mask(129,0xaaaa,0));
- // Draw captures have a separate selector, UBO0 only, and a 64-frame ceiling.
+ // Draw captures have a separate selector and a 64-frame ceiling; the old UBO0 case remains.
  setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0:480",1);
  recording_frame=130;assert(vka_buffer_trace_mask(130,0x9bec,2)==(1ull<<16)&&g_bt_frames==64);
  assert(!vka_buffer_trace_mask(130,0x9bec,1));
@@ -215,11 +222,41 @@ int main(int argc,char **argv) {
  execute();assert(draw_packet->h.p[0]==0x55&&data[0]==0x66&&!g_bt_ready);
  fire_all();assert(g_bt_ready==draw_packet);bt_write_packet(draw_packet);drain();
  assert(vka_buffer_trace_mask(193,0x9bec,2));assert(!vka_buffer_trace_mask(194,0x9bec,2));
- setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo1:512",1);assert(!vka_buffer_trace_mask(195,0x9bec,2));
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo16:512",1);assert(!vka_buffer_trace_mask(195,0x9bec,2));
  setenv("DM_VK_BUFFER_TRACE","9bec:draw:ssbo0:512",1);assert(!vka_buffer_trace_mask(196,0x9bec,2));
  setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0:65536",1);assert(!vka_buffer_trace_mask(197,0x9bec,2));
  setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0",1);assert(vka_buffer_trace_mask(198,0x9bec,2));assert(g_bt_sel[0].bytes==512);
  setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo0:4",1);assert(vka_buffer_trace_mask(199,0x9bec,2));assert(g_bt_sel[0].bytes==4);
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo15:32",1);assert(vka_buffer_trace_mask(200,0x9bec,2)==(1ull<<31));
+ setenv("DM_VK_BUFFER_TRACE","9bec:draw:ubo-1:32",1);assert(!vka_buffer_trace_mask(201,0x9bec,2));
+ // Two actual slots: descriptor binding order is opposite to walk order. Ending
+ // rendering destroys all shared inputs, so both samples must own their data first.
+ setenv("DM_VK_BUFFER_TRACE","a403:draw:ubo0:80,a403:draw:ubo1:32",1);
+ recording_frame=202;assert(vka_buffer_trace_mask(202,0xa403,2)==(3ull<<16));
+ uint8_t data2[1024];memset(data2,0x22,sizeof data2);mock_buffer gpu2={data2,sizeof data2,0};
+ fs.key=0xa403;entry.bind_count=2;
+ bindings[0]=(dmsh_vk_bind){0,262,DMSH_VK_KIND_UBO_PTR,1};bindings[1]=(dmsh_vk_bind){0,263,DMSH_VK_KIND_CBUF,0};
+ state.b.ubo[1][0]=(vka_range){0x6000,128};state.b.ubo[1][1]=(vka_range){0x7010,32};
+ ub=(VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)&gpu,1024,128};
+ VkDescriptorBufferInfo ub1={(VkBuffer)(uintptr_t)&gpu2,256,48};
+ g_wk.n[1]=2;g_wk.r[1][0]=(vka_res){VKA_R_BUF,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,262,0,0x7000,48};
+ g_wk.r[1][1]=(vka_res){VKA_R_BUF,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,263,0,0x6000,128};
+ g_w.n=2;g_w.w[0]=(VkWriteDescriptorSet){.dstBinding=263,.pBufferInfo=&ub};g_w.w[1]=(VkWriteDescriptorSet){.dstBinding=262,.pBufferInfo=&ub1};
+ clobber_descriptors[0]=&ub;clobber_descriptors[1]=&ub1;clobber_state=&state;clobber_shader=&fs;
+ in_rendering=draw_recorded=1;unsigned old_ends=pass_ends;
+ producer(&gpu,0x77);producer(&gpu2,0x88);buffer_trace_draw(&state,sh,827,0);
+ assert(!in_rendering&&pass_ends==old_ends+1&&g_bt_count==2&&g_bt_total==112);
+ bt_packet *dynamic=g_bt_pending,*env=dynamic->next;
+ assert(dynamic->n==1&&env&&env->n==1&&!env->next);
+ assert(dynamic->samples[0].source.key==0xa403&&dynamic->samples[0].source.reg==1&&dynamic->samples[0].source.binding==262);
+ assert(dynamic->samples[0].source.descriptor.offset==256&&dynamic->samples[0].prefix==16&&dynamic->samples[0].bytes==32);
+ assert(env->samples[0].source.key==0xa403&&env->samples[0].source.reg==0&&env->samples[0].source.binding==263);
+ assert(env->samples[0].source.descriptor.offset==1024&&env->samples[0].bytes==80);
+ assert(dynamic->h.p[0]==0&&env->h.p[0]==0&&!g_bt_ready);
+ producer(&gpu,0x99);producer(&gpu2,0xaa);vka_buffer_trace_commit(127,1);
+ assert(ncompletions==2&&completions[0].fence==127&&completions[1].fence==127&&!g_bt_ready);
+ execute();assert(dynamic->h.p[0]==0x88&&env->h.p[0]==0x77&&data[0]==0x99&&data2[0]==0xaa&&!g_bt_ready);
+ fire_all();bt_write_packet(dynamic);bt_write_packet(env);drain();
  assert(!allocated_bytes&&!atomic_load(&g_bt_live_bytes));puts("production GPU snapshots, descriptors, bounds and exact-fence lifetime: passed");return 0;
 }
 '''
@@ -233,18 +270,30 @@ int main(int argc,char **argv) {
                 subprocess.run([str(binary), mode, str(out)], check=True)
             # Negative control: transferring before ending rendering must be rejected.
             bad = Path(tmp) / "inside_pass.c"
-            bad.write_text(harness + sample + source + selection_types + writes + fragment.replace("        vka_rp_end();", "") + dispatch + test)
+            bad.write_text(harness + sample + source + selection_types + writes + fragment.replace("    vka_rp_end();", "") + dispatch + test)
             subprocess.run(["cc", "-std=gnu11", "-O1", "-I", str(ROOT / "dm/third_party/vulkan-headers/include"), str(bad), "-pthread", "-o", str(binary)], check=True)
             result = subprocess.run([str(binary), "normal", str(out)], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"!in_rendering", result.stderr)
-            draw_files = list(out.glob("*post_draw*.bin"))
+            draw_files = list(out.glob("*k0000000000009bec*post_draw*.bin"))
             self.assertEqual(len(draw_files), 1)
             self.assertEqual(draw_files[0].read_bytes(), bytes([0x55]) * 480)
             meta = Path(str(draw_files[0]) + ".tsv").read_text().splitlines()
             values = dict(zip(meta[0].split("\t"), meta[1].split("\t")))
             self.assertEqual((values["ordinal"], values["stage"], values["vertex_key"], values["variant"]), ("1421", "1", "0000000000008b99", "3"))
             self.assertEqual((values["phase"], values["binding"], values["descriptor_offset"], values["descriptor_range"], values["fence"]), ("post_draw", "257", "5120", "512", "126"))
+            fog_files = list(out.glob("*k000000000000a403*post_draw*.bin"))
+            self.assertEqual(len(fog_files), 2)
+            for fog in fog_files:
+                lines = Path(str(fog) + ".tsv").read_text().splitlines()
+                row = dict(zip(lines[0].split("\t"), lines[1].split("\t")))
+                self.assertEqual((row["frame"], row["ordinal"], row["fence"]), ("202", "827", "127"))
+                if row["reg"] == "0":
+                    self.assertEqual((row["binding"], row["descriptor_offset"], row["prefix"]), ("263", "1024", "0"))
+                    self.assertEqual(fog.read_bytes(), bytes([0x77]) * 80)
+                else:
+                    self.assertEqual((row["reg"], row["binding"], row["descriptor_offset"], row["prefix"]), ("1", "262", "256", "16"))
+                    self.assertEqual(fog.read_bytes(), bytes([0x88]) * 32)
             files = [p for p in out.glob("*.bin") if "post_draw" not in p.name]
             self.assertEqual(len(files), 1)
             self.assertEqual(files[0].read_bytes(), bytes([0x11]) * 128)

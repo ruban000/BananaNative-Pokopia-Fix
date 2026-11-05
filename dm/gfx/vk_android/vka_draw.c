@@ -1113,27 +1113,33 @@ static int mdi_count_draw(uint64_t ind, uint32_t rec, uint64_t cnt, uint32_t n, 
 static void buffer_trace_draw(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], uint64_t ordinal, uint32_t variant) {
     if (!sh[1] || d->rast_discard) return;
     uint64_t frame = vka_exec_frame();
-    if (!(vka_buffer_trace_mask(frame, sh[1]->key, 2) & (1ull << 16))) return;
+    uint64_t mask = vka_buffer_trace_mask(frame, sh[1]->key, 2) & (0xffffull << 16);
+    if (!mask) return;
     if (draw_writes(sh, d)) return;
     for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st] && (g_wk.pool[st] || g_wk.n[st] < 0)) return;
+    struct { vka_buffer_sample source; uint64_t prefix; } samples[16];
+    unsigned count = 0;
     for (int i = 0; i < g_wk.n[1]; i++) {
         const vka_res *r = &g_wk.r[1][i];
         if (r->what != VKA_R_BUF || r->desc != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) continue;
         const dmsh_vk_bind *b = NULL;
         for (uint32_t j = 0; j < sh[1]->e->bind_count; j++) if (sh[1]->b[j].set == 0 && sh[1]->b[j].binding == r->binding) { b = &sh[1]->b[j]; break; }
-        if (!b || b->reg != 0 || (b->kind != DMSH_VK_KIND_CBUF && b->kind != DMSH_VK_KIND_UBO_PTR)) continue;
+        if (!b || b->reg < 0 || b->reg >= 16 || !(mask & (1ull << (16 + b->reg))) ||
+            (b->kind != DMSH_VK_KIND_CBUF && b->kind != DMSH_VK_KIND_UBO_PTR)) continue;
         const VkDescriptorBufferInfo *bi = NULL;
         for (uint32_t j = 0; j < g_w.n; j++) if (g_w.w[j].dstBinding == r->binding && g_w.w[j].dstArrayElement == r->elem) { bi = g_w.w[j].pBufferInfo; break; }
-        const vka_range *source = &d->b.ubo[1][0];
+        const vka_range *source = &d->b.ubo[1][b->reg];
         if (!bi || !bi->buffer || !source->addr || source->addr < r->addr || bi->range == VK_WHOLE_SIZE) continue;
         uint64_t prefix = source->addr - r->addr;
         if (prefix >= bi->range || bi->offset > UINT64_MAX - prefix || ((bi->offset + prefix) & 3)) continue;
-        vka_buffer_sample sample = {frame, sh[1]->key, ordinal, source->addr, source->size, r->addr, r->size,
-            *bi, 1, 0, r->binding, r->elem, 2, 1, variant, sh[0] ? sh[0]->key : 0};
-        vka_rp_end();
-        vka_buffer_trace_copy(g_cb, &sample, prefix);
-        return; // one fragment UBO0 snapshot for this successful draw
+        samples[count].source = (vka_buffer_sample){frame, sh[1]->key, ordinal, source->addr, source->size, r->addr, r->size,
+            *bi, 1, (uint32_t)b->reg, r->binding, r->elem, 2, 1, variant, sh[0] ? sh[0]->key : 0};
+        samples[count++].prefix = prefix;
+        mask &= ~(1ull << (16 + b->reg)); // at most one descriptor per selected UBO slot
     }
+    if (!count) return;
+    vka_rp_end();
+    for (unsigned i = 0; i < count; i++) vka_buffer_trace_copy(g_cb, &samples[i].source, samples[i].prefix);
 }
 
 // Bounded draw evidence from the existing resource walk and resolved descriptor writes; no second walk or memory read.
