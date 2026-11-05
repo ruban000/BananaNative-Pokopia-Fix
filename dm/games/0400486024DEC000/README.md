@@ -49,6 +49,16 @@ Current (2026-11-05): `scripts/pack_android.py` on the Linux machine (`patch_nso
 
 The sdk's 5 observation gates are the general ones (VammManager::AllocateAddressRegion entry and result, FreeAddressRegion, StandardAllocator::Initialize's two forms). The SDK-wide function-matched cuts of `dm/tools/sdk_patches.py` find no matching function in this `sdk` and are skipped, and none is needed ([Memory](#memory)).
 
+## Android shader library
+
+Current (2026-11-05, Linux x86_64): `scripts/pack_android.py -J 16` built it from the split above (`vk_android_build.py --target vulkan`, about 40 minutes): library version `v-06c4db29ef11` (chain `812184d12231`, profile inputs `c6746b0b98cc`), `dmsh_vk.lib` 1,235.9 MB (6,292.8 MB of SPIR-V), SHA-256 `2d5eee49bae0545f2d3e6ce23fbe70e65dc1ede767cb2fcfe2a327a10057c3bb`; the pack is 1,280 MiB.
+
+- **42,724 of 42,829 translate**: compute 4,084 / 4,101, mesh 487 / 500, pixel 22,350 / 22,356, task 19 / 20, vertex 15,784 / 15,852.
+- 31 fail in the translator (open): Ampere opcode `0x243` in 10 compute and 8 mesh programs, `0x3a9` in 6 compute, `0x481` in 1 compute; a stage memory access of mode `0xb800` in 1 task program; and the 5 mesh programs without a layout ([Shaders](#shaders)).
+- 74 are refused by `spirv-val` (open): 68 vertex and 6 pixel shaders, all of `Effect/`, "Vector access is out of bounds, vector size is 2, but access index is 2": a translator bug on a 2-component value, not yet looked at.
+- 52,467 modules (base 42,724, `uint` 9,258, `uint_mixed` 485), every one valid for `spirv-val --target-env vulkan1.3`, again with `--check` (74 s).
+- Flags: `alpha_test` 22,243, `gl_depth` 16,271, `int_out` 8,994, `subgroup` 3,485, `hmma` 52, `mesh_prim` 6. Capabilities: `DrawParameters` 15,784, `Int64` / `PhysicalStorageBufferAddresses` 2,207 (`gmem_map`), `MeshShadingEXT` 509, `StorageImageWriteWithoutFormat` 307, `StorageImageReadWithoutFormat` 56; no 64-bit float. Bindings: no undecoded slot, no unknown kind. These are the rows of [`readiness.tsv`](readiness.tsv).
+
 ## Memory
 
 Read from the code, none of it measured:
