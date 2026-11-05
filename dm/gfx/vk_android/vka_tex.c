@@ -848,6 +848,12 @@ static uint8_t *unmapped_content(const tex_t *t) {
                                                               (unsigned long long)u, (unsigned long long)((nbytes + 4095) >> 12), (const void *)t->mem);
     return c;
 }
+static void pageout_start(void);
+static void storage_read_touch(vka_img *im) {
+    // Partial row copies read the same storage as full uploads. Neither an
+    // allocation failure nor GPU-only reuse makes that storage recently read.
+    im->po_off = 0; im->up_ns = now_ns(); pageout_start();
+}
 static void upload_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb) {   // stamp, protect, then read (nvn_mtl.m pkg_upload): a write during the copy is seen at the next check
     im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);
     if (vka_nan_on()) im->hash_valid = mem_hash_mapped(t->mem, nvn_tex_data_size(&t->d), &im->hash);
@@ -876,6 +882,7 @@ static int upload_rows_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb, 
     im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // stamp, protect, then read (upload_tracked)
     vka_span s; if (!vka_scratch(pitch * (r1 - r0), 16, &s)) return 1;
     for (uint32_t y = r0; y < r1; y++) memcpy(s.ptr + (size_t)(y - r0) * pitch, t->mem + (size_t)y * st, pitch);
+    if (pitch && r1 > r0) storage_read_touch(im);
     uint32_t y0 = r0 * f->bh, y1 = r1 * f->bh > im->h ? im->h : r1 * f->bh;
     VkBufferImageCopy c = {s.off, bx * f->bw, (r1 - r0) * f->bh, {im->aspect, 0, 0, 1}, {0, (int32_t)y0, 0}, {im->w, y1 - y0, 1}};
     vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
@@ -1627,12 +1634,11 @@ cut:;
     }
     free(pc);
     *nbytes = bytes;
+    if (bytes) storage_read_touch(im);
     return 1;
 }
-static void pageout_start(void);
 static void upload(vka_img *im, const tex_t *t, VkCommandBuffer cb) {
     uint64_t t0 = now_ns(), nb = 0; upload_(im, t, cb, &nb);
-    im->po_off = 0; im->up_ns = now_ns(); pageout_start();   // (its storage was just read: paged out again once it has been left alone)
     atomic_fetch_add_explicit(&g_up_ns, now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_up_bytes, nb, memory_order_relaxed);
 }
 static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *nbytes) {
@@ -1653,6 +1659,7 @@ static void upload_(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t *n
             vka_span s; if (!vka_scratch(piece, 16, &s)) { free(part); return; }
             if (linear) { size_t st = d->stride ? d->stride : pitch; for (uint32_t y = 0; y < by; y++) memcpy(s.ptr + y * pitch, src + y * st, pitch); }
             else if (nvn_deswizzle(d, lv, ly, src, s.ptr, pitch)) { VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(part); return; }
+            if (piece) storage_read_touch(im);
             if (d->format >= 0x79 && d->format <= 0x94 && vka_nan_on()) {   // DM_VK_NANSCAN: all-zero blocks of ASTC textures (an all-zero ASTC block is an error block)
                 uint64_t zb = 0, nb = piece / 16; for (uint64_t k = 0; k < nb; k++) if (!mem_any(s.ptr + 16 * k, 16)) zb++;
                 const char *dm = getenv("DM_VK_NANSCAN_DUMP"); static _Atomic int nd;   // <format>x<w>: level 0 of such textures written to DM_TEMP (diagnostic, at most 64)
