@@ -42,7 +42,27 @@ static prog_t *rp_pr; static cap_prog *rp_prc; static uint32_t rp_npr;
 static dpool_t *rp_dp; static uint32_t rp_ndp;
 static sync_t *rp_sy; static uint32_t rp_nsy;
 static uint8_t **rp_seg; static uint32_t rp_nseg;
+typedef struct rp_segments { struct rp_segments *next; uint8_t **p; uint32_t n; } rp_segments;
+static rp_segments *rp_retired;
 static uint64_t rp_bad;
+
+// The worker copies handles, not command bytes. Keep each decoded submission (including CALL/JUMP targets and inline payloads) through the frame's existing finish.
+static void retire_segments(void) {
+    if (!rp_seg) return;
+    rp_segments *b = malloc(sizeof *b);
+    if (!b) RFAIL("cannot retain decoded command segments");   // process exit keeps pending worker reads alive until every thread stops
+    *b = (rp_segments){rp_retired, rp_seg, rp_nseg}; rp_retired = b;
+    rp_seg = NULL; rp_nseg = 0;
+}
+static void release_segments(void) {
+    // mtl_finish is void and its underlying wait can fail. Do not free borrowed bytes after an incomplete finish.
+    if (vka_done() < vka_fence_last()) RFAIL("command segments still in use after the frame's finish");
+    while (rp_retired) {
+        rp_segments *b = rp_retired; rp_retired = b->next;
+        for (uint32_t i = 0; i < b->n; i++) free(b->p[i]);
+        free(b->p); free(b);
+    }
+}
 
 static int dec_addr(void *ctx, uint64_t *field, uint64_t len, int writable) {
     (void)ctx; (void)writable;
@@ -394,11 +414,12 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
             mtl_exec_rest(NULL, 0); mtl_sub_commit();
             exec_ns += mono() - t1;
             if (sync || s == nsub || has_state[s + 1]) mtl_finish();   // the capture read the next submit's inputs after the GPU finished this one
-            free(hs); for (uint32_t i = 0; i < rp_nseg; i++) { free(rp_seg[i]); rp_seg[i] = NULL; }
+            free(hs); retire_segments();
         }
         double wall = (mono() - tw0) / 1e6;
         uint64_t d1, s1, p1, n1; vka_draw_stats(&d1, &s1, &p1, &n1); dd = d1 - d0; ds = s1 - s0;
         mtl_set_frame(fno + 1); mtl_sub_begin(); mtl_sub_commit(); mtl_finish();   // collects the frame's GPU timestamps
+        release_segments();
         double gpu = mtl_gpu_ms(fno), cpu = exec_ns / 1e6;
         tex_t pt; uint64_t pv = pres->tex; if (!dec_obj(NULL, CAP_K_TEX, &pv, NULL, 0)) RFAIL("the presented texture is not in the capture"); pt = *(const tex_t *)(uintptr_t)pv;
         uint8_t md[32]; uint64_t bytes; uint32_t w, h, pf; char out[65], pngp[1200]; cap_buf mine = {0};
