@@ -61,9 +61,14 @@ add_library(vpx STATIC ${VPX_C})
 target_include_directories(vpx PRIVATE ${TP}/libvpx ${TP}/libvpx/config)
 target_compile_options(vpx PRIVATE -O2 -w)
 
-# dav1d (AV1 movies, BSD-2-Clause), OFF by default: its sources are not in the tree until dm/third_party/dav1d/vendor.sh has put them there (pinned version and hash in its README),
-# and hle_codec_video.c does not call it yet (the wrapper dm/host/hle_av1_dav1d.c is built and tested only). Gradle: -PnxAv1Dav1d would pass -DNX_AV1_DAV1D=ON once it is wired
-option(NX_AV1_DAV1D "AV1 movies decoded with dav1d (needs dm/third_party/dav1d/vendor.sh)" OFF)
+# dav1d (AV1 movies, BSD-2-Clause, dm/third_party/dav1d, vendored): ON by default when its sources are in the tree. hle_codec_video.c then decodes the nn::codec AV1
+# decoders with it (hle_av1_dav1d.c; Zelda: Ocarina of Time's movies); OFF (Gradle -PnxAv1Dav1d=false) builds a host whose AV1 Initialize fails, as before
+if(EXISTS ${TP}/dav1d/src/lib.c)
+  set(NX_AV1_DAV1D_DEFAULT ON)
+else()
+  set(NX_AV1_DAV1D_DEFAULT OFF)
+endif()
+option(NX_AV1_DAV1D "AV1 movies decoded with dav1d (dm/third_party/dav1d)" ${NX_AV1_DAV1D_DEFAULT})
 if(NX_AV1_DAV1D)
   add_subdirectory(${TP}/dav1d dav1d)
 endif()

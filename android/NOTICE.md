@@ -19,6 +19,8 @@ games' own shaders translated, not part of this code. The other translator files
 therefore a GPL-3.0-or-later work whatever `nxLsfg` says, and the Mac and iPhone builds stay MIT only as apps: the committed translator `dm/gfx/tools/dmsh_xlate_bin` they run to
 build shader libraries is the same GPL combined work.
 
+The host links [dav1d](https://code.videolan.org/videolan/dav1d) 1.5.4 by VideoLAN and the dav1d authors (AV1 movies, [`dm/third_party/dav1d`](../dm/third_party/dav1d/README.md)), BSD 2-Clause ([LICENSE](../dm/third_party/dav1d/LICENSE)), unmodified; an APK that carries it carries that notice. `-PnxAv1Dav1d=false` builds a host without it (AV1 movies then fail to start).
+
 Some fixes follow other projects' findings without copying their code: [kartnative](https://github.com/pahorema/kartnative) by pahorema (MIT) for
 GPU-written sparse textures (`dm/gfx/vk_android/vka_tex.c`) and the per-primitive header of mesh programs (`dm/gfx/tools/shader_split.py`), and
 [switch2mac](https://github.com/azmasm/switch2mac) by azmasm (MIT outside `nx2_lower`) for the SPIR-V mesh entry points marked in the translator. Thanks to them.
