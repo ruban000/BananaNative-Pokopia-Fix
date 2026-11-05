@@ -68,6 +68,11 @@ int main(void) {
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000, false) && id == 1);
     assert(h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 1000 && !eos);
+    {   // SDK 19.3's overload with a colour space: the same answer, the colour space written (0); an unfilled buffer leaves every output alone
+        uint16_t w2 = 0, h2 = 0, cw2 = 0, ch2 = 0; uint32_t cs = 7; int64_t ts2 = 0; bool eos2 = true;
+        assert(!h_cv_vp9props_cs(&w2, &h2, &cw2, &ch2, &cs, &ts2, &eos2, dec, 0) && w2 == 16 && h2 == 16 && cw2 == 16 && ch2 == 16 && cs == 0 && ts2 == 1000 && !eos2);
+        cs = 7; assert(h_cv_vp9props_cs(&w2, &h2, &cw2, &ch2, &cs, &ts2, &eos2, dec, 1) == CV_NONE && cs == 7);
+    }
     uint8_t nv12[16 * 16 * 3 / 2], rgba[16 * 16 * 4];
     assert(!h_cv_nv12(pool[0], 0, 0, 0, 16, 16, nv12, 16, 256, nv12 + 256, 16, 128));
     for (int i = 0; i < 256; i++) assert(abs(nv12[i] - 81) <= 3);

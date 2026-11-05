@@ -332,6 +332,37 @@ CV_FAMILY(h264, CV_H264, "_ZN2nn5codec30CalculateH264DecoderWorkBufferEPmS1_mtt"
     "_ZN2nn5codec30AcquireH264DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_15H264DecoderTypeE", "_ZN2nn5codec30ReleaseH264DecoderOutputBufferEPNS0_15H264DecoderTypeEjNS_2gs16NativeSyncHandleE",
     "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj")
 #undef CV_FAMILY
+// SDK 19.3 (Mario Kart World's registered build, sdk 90ebba18…) has only this overload of the properties call: the picture's nn::movie::ColorSpace comes before its time and the
+// buffer index moves to the stack (a 32-bit word at [sp]). The SDK's body (sdk+0x2ca110 → +0x2ca800) answers from a cache of 0x30-byte records at type+0x120, one a buffer, and
+// otherwise asks the decoder service for the next finished picture (TIPC 213: buffer slot, size, crop size, colour space, time, end of stream) on the session in the type's first
+// word, which holds the host decoder: SendSyncRequest on 0x56436d44 ('DmCV'), then an nn::diag abort at sdk+0x141e2c. Its contract: every output written on success, none on an
+// error (3604 until the buffer holds a picture). The colour space's numeric values are not known: no header, firmware or server implementation available shows the enum
+// (docs/reference/movies.md). It is written as 0, the value Mario Kart World's player stores there before the call and the only one it can see (main+0x19e63b4 / +0x19e701c zero
+// it; neither caller reads it back); the stream's own colour space goes to a red line once
+static Result cv_dec_props_cs(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    Result r = cv_dec_props(w, h, cw, ch, ts, eos, t, i);
+    if (r) return r;
+    *cs = 0;
+    static atomic_int once;
+    if (!atomic_exchange(&once, 1)) {
+        cv_dec *d = cv_of(t); int vcs = -1, range = -1;
+        if (d) {
+            pthread_mutex_lock(&d->mu);
+            const cv_pool *p = d->buf[i].pool; const vpx_image_t *im = p && d->buf[i].pidx < p->count ? p->img[d->buf[i].pidx] : NULL;
+            if (im) { vcs = (int)im->cs; range = (int)im->range; }
+            pthread_mutex_unlock(&d->mu);
+        }
+        LOG("[RED] nn::codec::Get…DecoderOutputBufferProperties: nn::movie::ColorSpace answered 0, its values are not known (the stream: libvpx colour space %d, range %d)", vcs, range);
+    }
+    return 0;
+}
+#define CV_PROPS_CS(tag, s_props)                                                                                                                                       \
+    HLE_FORCE(s_props, "the filled buffer's picture size, colour space, time and end of stream (SDK 19.3)", Result, h_cv_##tag##props_cs, uint16_t *w, uint16_t *h,      \
+              uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) { return cv_dec_props_cs(w, h, cw, ch, cs, ts, eos, t, i); }
+CV_PROPS_CS(vp9, "_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj")
+CV_PROPS_CS(vp8, "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj")
+CV_PROPS_CS(h264, "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj")
+#undef CV_PROPS_CS
 HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
           "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint64_t out,
           uint64_t mode, const void *csd, uint64_t csd_n) {   // (out, mode, csd, csd_n on the stack in 8-byte slots: uint64_t so that Apple's arm64 ABI reads them there too)
