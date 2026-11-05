@@ -251,7 +251,7 @@ static void window_take(void) {   // g_pmu held
 }
 
 // ---------- The present queue ----------
-typedef struct { tex_t t; double period; int crop[4], has_crop; uint64_t ticket, fence; vka_img *src; double hold; } pq_item;   // src, hold: a generated frame (vka_framegen.c)
+typedef struct { tex_t t; double period; int crop[4], has_crop; uint64_t ticket, fence, frame; vka_img *src; double hold; } pq_item;   // src, hold: a generated frame (vka_framegen.c)
 static pq_item g_pq[PQ];
 static uint64_t g_pq_in, g_pq_read, g_pq_done, g_pq_fill;   // tickets: reserved, taken by the present thread, shown; filled (a ticket is reserved by the game's present, filled when the replay reaches it: vka_worker.c)
 
@@ -369,7 +369,7 @@ static int present_one(const pq_item *it) {
                           fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     } else if (im && !blit) VRED_ONCE("window texture serial %llu (format %#x) cannot be blitted to the swapchain: presented black", (unsigned long long)im->serial, im->d.format);
     if (blit >= 0) vka_img_barrier(cb, g_simg[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (!it->src) vka_ctl_shot_record(cb, im, cx, cy, cw, ch);   // the game's own frames only
+    if (!it->src) vka_ctl_shot_record(cb, im, cx, cy, cw, ch, it->frame);   // the game's own frames only
     vk.vkEndCommandBuffer(cb);
     VkSemaphore ws[2] = {g_fr[k].acq, V.tl}; uint64_t wv[2] = {0, it->fence}; VkPipelineStageFlags st[2] = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};   // the image's first barrier is ALL_COMMANDS
     VkTimelineSemaphoreSubmitInfo ti = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, .waitSemaphoreValueCount = 2, .pWaitSemaphoreValues = wv, .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = wv};
@@ -451,12 +451,12 @@ uint64_t vka_present_reserve(void) {
     pthread_mutex_unlock(&g_pmu);
     return tk;
 }
-void vka_present_fill(uint64_t tk, const tex_t *t, double period_s, const int crop[4]) {
+void vka_present_fill(uint64_t tk, uint64_t frame, const tex_t *t, double period_s, const int crop[4]) {
     vka_perf_frame(period_s);
     pthread_mutex_lock(&g_pmu);
     if (!g_thread_up || tk <= g_pq_fill) { pthread_mutex_unlock(&g_pmu); return; }
     pq_item *it = &g_pq[(tk - 1) % PQ];
-    it->t = *t; it->period = period_s; it->has_crop = crop != NULL; if (crop) memcpy(it->crop, crop, sizeof it->crop);
+    it->frame = frame; it->t = *t; it->period = period_s; it->has_crop = crop != NULL; if (crop) memcpy(it->crop, crop, sizeof it->crop);
     // The last submission handed to the queue, not the last fence reserved: a submission another thread is still recording (its fence taken at the top of mtl_sub_commit) would
     // be queued after this copy, which then waits for it forever (a wait-before-signal on one queue). On the Adreno 840 phone that froze the queue while the first level loaded
     // (fence N+2 never reached at N, android-perf c1ff15fa, three runs), and the compositor waiting on the frame restarted the system server
@@ -469,7 +469,7 @@ void vka_present_fill(uint64_t tk, const tex_t *t, double period_s, const int cr
     pthread_cond_broadcast(&g_pcv);
     pthread_mutex_unlock(&g_pmu);
 }
-uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]) { uint64_t tk = vka_present_reserve(); vka_present_fill(tk, t, period_s, crop); return tk; }
+uint64_t vka_present_inline(uint64_t frame, const tex_t *t, double period_s, const int crop[4]) { uint64_t tk = vka_present_reserve(); vka_present_fill(tk, frame, t, period_s, crop); return tk; }
 void mtl_present_wait(uint64_t tk) { pthread_mutex_lock(&g_pmu); while (g_pq_done < tk) pthread_cond_wait(&g_pcv, &g_pmu); pthread_mutex_unlock(&g_pmu); }
 void mtl_present_flush(void) { pthread_mutex_lock(&g_pmu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pmu); mtl_present_wait(h); }
 // The acquire sync of a window image (hle_nvn.c WindowAcquireTexture): the fence of the commits that drew it when it was last presented, not every commit so far. By the time

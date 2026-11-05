@@ -125,8 +125,8 @@ void vka_rp_queue_forget(uint64_t serial);
 void vka_rp_set_queue_origin(int on);
 int vka_worker_on(void);                              // DM_VK_WORKER (default 1): submissions are replayed on the replay worker thread
 uint64_t vka_present_reserve(void);
-void vka_present_fill(uint64_t tk, const tex_t *t, double period_s, const int crop[4]);
-uint64_t vka_present_inline(const tex_t *t, double period_s, const int crop[4]);
+void vka_present_fill(uint64_t tk, uint64_t frame, const tex_t *t, double period_s, const int crop[4]);
+uint64_t vka_present_inline(uint64_t frame, const tex_t *t, double period_s, const int crop[4]);
 uint64_t vka_hang_ns(void);                         // how long a fence may make no progress before it is a hang (DM_VK_HANG_S, default 6 s)
 int vka_hung(void);
 int vka_queue_idle(void);                           // vkQueueWaitIdle bounded by the hang time (0 = not idle: hung or timed out)                                 // 1 = a GPU hang was declared (vka_dev.c): nothing more is submitted, waits return at once
@@ -275,7 +275,7 @@ void vka_gp_commit(VkCommandBuffer cb, uint64_t fence);
 void vka_gp_sub_frame(uint64_t f);
 void vka_img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to);
 // The control line "screenshot" (vka_ctl.c): the present copies the window texture's crop into its command buffer, then hands the texels to the PNG writer once that submission is done
-void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch);
+void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch, uint64_t frame);
 void vka_ctl_shot_done(VkFence fence);
 
 VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // texture ID id as a view of shape dim (DMSH_VK_DIM_*); VK_NULL_HANDLE = none fits
