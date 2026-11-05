@@ -714,7 +714,14 @@ static void exec(const uint8_t *p, int depth) {
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_cur_fence ? g_cur_fence : vka_fence_last() + 1; s->fenced = 1; break; }   // the fence this submission commits with
         case OP_RENDER_COND: { const p_render_cond *rc = a;
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
-            else { uint64_t x, y; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); }
+            else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y);
+                   if (VKA_ENV("DM_VK_RC_LOG", 0) > 0) {   // diagnostic: each condition as evaluated while recording, with this submission's reports to its pair
+                       static _Atomic long left = -1; if (atomic_load(&left) < 0) atomic_store(&left, (long)VKA_ENV("DM_VK_RC_LOG", 0));
+                       if (atomic_fetch_sub(&left, 1) > 0) { int t0 = -1, t1 = -1; for (int i = 0; i < g_npost; i++) if (g_post[i].kind == 2) { if (g_post[i].addr == rc->addr) t0 = (int)g_post[i].type; if (g_post[i].addr == rc->addr + 16) t1 = (int)g_post[i].type; }
+                           VLOG("rc: frame %llu mode %u pair %#llx: %#llx / %#llx%s → %s; reports in this submission: type %d / %d", (unsigned long long)g_frame, rc->mode, (unsigned long long)rc->addr,
+                                (unsigned long long)x, (unsigned long long)y, known ? "" : " (not readable)", S.rc_skip ? "not drawn" : "drawn", t0, t1); } }
+                   if (!VKA_ENV("DM_VK_RENDER_COND", 1)) S.rc_skip = 0;   // diagnostic (live): conditions ignored, everything drawn
+            }
             break; }
         case OP_RESET_COUNTER: break;
         case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
