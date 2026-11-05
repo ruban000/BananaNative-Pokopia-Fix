@@ -217,7 +217,7 @@ static int burst_buf(VkDeviceSize n) {
     g_bsize = n; return 1;
 }
 static int shot_bpp(VkFormat f);
-static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch) {
+static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch, uint64_t frame) {
     g_burst_done = 0;
     if (!g_burst_n) {
         int n = atomic_exchange_explicit(&g_burst_want, 0, memory_order_relaxed); if (n <= 0) return;
@@ -226,7 +226,7 @@ static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
         if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; cw = (int)im->w; ch = (int)im->h; }
         if (!burst_buf((VkDeviceSize)n * cw * ch * 4)) { VLOG("ctl: burst: no host-visible buffer of %d frames of %d x %d", n, cw, ch); return; }
         g_burst_n = n; g_burst_i = 0; g_burst_w = cw; g_burst_h = ch; g_burst_fmt = im->f.vk; g_burst_flip = vka_origin_ll();
-        VLOG("ctl: burst of %d frames begins at frame %llu (%dx%d)", n, (unsigned long long)vka_frame(), cw, ch);
+        VLOG("ctl: burst of %d frames begins at frame %llu (%dx%d)", n, (unsigned long long)frame, cw, ch);
     }
     if (im->f.vk != g_burst_fmt || (int)im->w < g_burst_w || (int)im->h < g_burst_h) { VLOG("ctl: burst: the window texture changed after %d frames: stopped", g_burst_i); g_burst_n = g_burst_i; g_burst_done = g_burst_i > 0; return; }
     if (cx < 0 || cy < 0 || cw != g_burst_w || ch != g_burst_h || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; }
@@ -235,7 +235,7 @@ static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
     vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_bbuf, 1, &r);
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    g_burst_frame[g_burst_i++] = vka_frame();
+    g_burst_frame[g_burst_i++] = frame;
     if (g_burst_i == g_burst_n) g_burst_done = 1;
 }
 typedef struct { uint8_t *rgb; int w, h; char path[1100]; uint64_t frame; } shot_job;
@@ -264,9 +264,9 @@ static void burst_done(VkFence fence) {   // present thread, after the submissio
     VLOG("ctl: burst done: %d frames %llu-%llu → %s/ctl-burst-<frame>.png", n, (unsigned long long)g_burst_frame[0], (unsigned long long)g_burst_frame[n - 1], g_ctl_dir);
 }
 
-void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch) {   // present thread, before vkEndCommandBuffer
+void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch, uint64_t frame) {   // present thread, before vkEndCommandBuffer
     g_rec_shot.on = 0;
-    if (im && im->inited && (g_burst_n || atomic_load_explicit(&g_burst_want, memory_order_relaxed))) burst_record(cb, im, cx, cy, cw, ch);
+    if (im && im->inited && (g_burst_n || atomic_load_explicit(&g_burst_want, memory_order_relaxed))) burst_record(cb, im, cx, cy, cw, ch, frame);
     if (!atomic_load_explicit(&g_shot_want, memory_order_relaxed) || !im || !im->inited) return;
     atomic_store(&g_shot_want, 0);
     int bpp = shot_bpp(im->f.vk);
@@ -278,7 +278,7 @@ void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
     vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_sbuf, 1, &r);
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    g_rec_shot.on = 1; g_rec_shot.w = cw; g_rec_shot.h = ch; g_rec_shot.fmt = im->f.vk; g_rec_shot.flip = vka_origin_ll(); g_rec_shot.frame = vka_frame();
+    g_rec_shot.on = 1; g_rec_shot.w = cw; g_rec_shot.h = ch; g_rec_shot.fmt = im->f.vk; g_rec_shot.flip = vka_origin_ll(); g_rec_shot.frame = frame;
 }
 static void put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
 static void chunk(FILE *f, const char *type, const uint8_t *d, uint32_t n) {

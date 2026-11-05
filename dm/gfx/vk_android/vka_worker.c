@@ -80,7 +80,7 @@ static void *worker_main(void *arg) {
             for (int i = 0; i < j.nh; i++) vka_rp_exec(j.h[i], j.fence);
             vka_rp_sub_commit(j.fence);
             free(j.h);
-        } else if (j.kind == J_PRESENT) vka_present_fill(j.ticket, &j.t, j.period, j.has_crop ? j.crop : NULL);
+        } else if (j.kind == J_PRESENT) vka_present_fill(j.ticket, j.frame, &j.t, j.period, j.has_crop ? j.crop : NULL);
         else if (j.kind == J_FORGET) vka_rp_queue_forget(j.serial);
         uint64_t t2 = wns(); g_busy_ns += t2 - t1; if (j.kind == J_SUB) { g_sub_ns += t2 - t1; atomic_fetch_add_explicit(&g_sub_all, t2 - t1, memory_order_relaxed); atomic_fetch_add_explicit(&g_sub_cpu_all, thread_cpu_ns() - c1, memory_order_relaxed); }
         if (j.kind == J_PRESENT && j.ticket % 300 == 0) {
@@ -161,8 +161,11 @@ static void present_sync(void) {
     uint64_t f = vka_fence_last(); if (f) vka_wait_done(f, 2000000000ull);
 }
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    if (!up()) { uint64_t tk = vka_present_inline(t, period_s, crop); present_sync(); return tk; }
-    job_t j = {J_PRESENT}; j.ticket = vka_present_reserve(); j.t = *t; j.period = period_s; j.has_crop = crop != NULL; if (crop) memcpy(j.crop, crop, sizeof j.crop);
+    // Called directly by the game's QueuePresentTexture, before either asynchronous queue.
+    // Reading the live frame on the present thread instead can repeat labels and overwrite burst PNGs.
+    uint64_t frame = vka_frame();
+    if (!up()) { uint64_t tk = vka_present_inline(frame, t, period_s, crop); present_sync(); return tk; }
+    job_t j = {J_PRESENT}; j.frame = frame; j.ticket = vka_present_reserve(); j.t = *t; j.period = period_s; j.has_crop = crop != NULL; if (crop) memcpy(j.crop, crop, sizeof j.crop);
     push(&j);
     present_sync();
     return j.ticket;
