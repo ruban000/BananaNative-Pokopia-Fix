@@ -48,13 +48,15 @@ extern void nvn_big_entry(void);
 void *nvn_big_real[NVN_NFUNC];            // the real implementation of functions that run on the big host stack (nvn_entry.S nvn_big_entry)
 void *nvn_real[NVN_NFUNC];               // DM_NVN_PROF: the real implementation called by the timing wrapper
 _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // DM_NVN_PROF: cumulative time of each function (cntvct counts)
-static uint8_t g_unimpl_seen[NVN_NFUNC];
+static _Atomic uint8_t g_unimpl_seen[NVN_NFUNC];
 
 static void nvn_shading_rate_note(const char *name, uint64_t cmd, uint64_t x1, uint64_t x2, uint64_t x3);
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     unsigned i = (unsigned)(slot - nvn_slot);
     nvn_shading_rate_note(nvn_names[i], x0, x1, x2, x3);
-    if (!g_unimpl_seen[i]++) LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
+    // Once per function, including concurrent callers; an already-seen call only reads the flag.
+    if (!atomic_load_explicit(&g_unimpl_seen[i], memory_order_relaxed) &&
+        !atomic_exchange_explicit(&g_unimpl_seen[i], 1, memory_order_relaxed)) LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
     return 0;
 }
 
@@ -1244,8 +1246,8 @@ NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, u
     p_clear_ds *r = REC(c, OP_CLEAR_DS, p_clear_ds); *r = (p_clear_ds){depth, (int)B(dmask), stencil, smask};
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
-    if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
-    p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
+    if (first < 0 || first > 16 || n < 0 || n > 16 - first) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
+    p_viewports *r = RECN(c, OP_VIEWPORTS, p_viewports, v, n); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
@@ -3090,8 +3092,8 @@ NVN(nvnCommandBufferSetDepthClamp, void, NVNcommandBuffer *c, uint32_t en) { REC
 // Absolum (FNA3D's NVN driver) keeps the lower-left window origin and sets viewport 0's swizzle every frame (NEGATIVE_Y: clip y negated, how a GL-heritage renderer flips its picture).
 // Ignored, its whole picture came out upside down. The replay applies it to the viewport (draw in nvn_mtl.m)
 NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, int n, const NVNviewportSwizzle *s) {
-    if (n < 0 || first < 0 || first + n > 16) { LOG("[RED] SetViewportSwizzles first=%d n=%d", first, n); return; }
-    p_vp_swizzle *r = REC(c, OP_VP_SWIZZLE, p_vp_swizzle); r->first = first; r->n = n;
+    if (first < 0 || first > 16 || n < 0 || n > 16 - first) { LOG("[RED] SetViewportSwizzles first=%d n=%d", first, n); return; }
+    p_vp_swizzle *r = RECN(c, OP_VP_SWIZZLE, p_vp_swizzle, sw, n); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
 NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }
