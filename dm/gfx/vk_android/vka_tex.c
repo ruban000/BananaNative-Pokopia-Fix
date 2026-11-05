@@ -619,8 +619,8 @@ static int nvn2_sampled_content(const tex_t *t, const vka_fmt *f, unsigned pf, i
     if (d->flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
     return !gpu_image_over(t->mem);
 }
-static uint64_t g_nvn2_first[2], g_nvn2_zero_bytes;   // textures taken from their storage at a first sample (nvn2_sampled_content): [0] with data, [1] storage all zero (tracked from zeros)
-static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int cpuw, int sampled) {   // c: the storage's content as the GPU will see it (t->mem or gw_content's copy)
+static uint64_t g_nvn2_mode[2];   // eligible sampled-storage decisions: [0] image first use, [1] lazy eligibility check (not unique images)
+static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int cpuw, int sampled, int lazy) {   // lazy: only querying deferred-image eligibility; c: the storage's content as the GPU will see it (t->mem or gw_content's copy)
     const nvn_texdesc *d = &t->d;
     if (!t->mem || d->samples > 1 || f->kind >= 3 || d->target == NVN_TEXTURE_TARGET_BUFFER) return ST_ZERO;
     // A sparse virtual pool's texture (nvn_mtl.m tex_from_storage): a sampled one holds what the CPU wrote into the physical pages mapped behind it (streamed textures), read
@@ -634,9 +634,11 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
     else if (linear && t->pool) want = ST_TRACK;
     else if (comp && !(d->flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_SPARSE)) && mem_any_mapped(c, t)) want = ST_TRACK;
     else if (nvn2_sampled_content(t, f, pf, sampled)) {
-        int any = mem_any_mapped(c, t); uint64_t k = g_nvn2_first[!any]++; want = ST_TRACK; if (!any) g_nvn2_zero_bytes += t->L.size;
-        if (any && k < 4) VLOG("texture serial %llu %ux%ux%u format %#x pool flags %#x: written by the CPU before its first use, a sample (NVN2): uploaded from its storage, re-uploaded when it changes (%llu so far, %llu more with empty storage)",
-                               (unsigned long long)t->serial, d->width, d->height, d->depth, d->format, pf, (unsigned long long)k + 1, (unsigned long long)g_nvn2_first[1]);
+        // Zero storage needs the same tracking as nonzero storage: later CPU fills of a reused slot must reach the shared image.
+        // Do not scan texels merely to classify diagnostic counts; lazy_ok may query this before the actual first use too.
+        uint64_t k = g_nvn2_mode[lazy != 0]++; want = ST_TRACK;
+        if (!lazy && k < 4) VLOG("texture serial %llu %ux%ux%u format %#x pool flags %#x: first sampled use takes storage content (NVN2), tracking when available (%llu first-use decisions)",
+                                (unsigned long long)t->serial, d->width, d->height, d->depth, d->format, pf, (unsigned long long)k + 1);
     }
     else if (!(d->flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && t->pool && ((pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED)) || nvn_flushed(t->mem, t->L.size))
              && mem_any_mapped(c, t)) want = ST_FILL;
@@ -1167,7 +1169,7 @@ static void img_first_use(vka_img *im, const tex_t *t, VkCommandBuffer cb, int c
     vka_img_barrier(cb, im->img, im->aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     im->inited = 1;
     uint64_t seen; uint8_t *c = im->samples == 1 && t->mem && !im->vpool ? ut_gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;   // the content the mode's "holds data" checks look at
-    int mode = im->samples == 1 ? storage_mode(t, c ? c : t->mem, &im->f, cpu, g_first_sampled) : ST_ZERO;
+    int mode = im->samples == 1 ? storage_mode(t, c ? c : t->mem, &im->f, cpu, g_first_sampled, 0) : ST_ZERO;
     free(c);
     if (mode != ST_ZERO) im->from_mem = 1;
     im->mode = (uint8_t)mode;
@@ -1215,7 +1217,7 @@ static int lazy_ok(const tex_t *t, const vka_fmt *f) {   // caller holds g_tmu (
     if (!on || !t->mem || f->kind >= 3 || compressed(f) || d->samples > 1 || d->target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if ((double)t->L.size < VKA_ENVF("DM_VK_LAZY_MB", 1.0) * 1048576.0 || cpuw_has(t->serial)) return 0;
     uint64_t seen; uint8_t *c = !(t->pool && pool_sparse(t->pool)) ? ut_gw_content(t->mem, nvn_tex_data_size(&t->d), &seen) : NULL;
-    int mode = storage_mode(t, c ? c : t->mem, f, 0, 1);
+    int mode = storage_mode(t, c ? c : t->mem, f, 0, 1, 1);
     free(c);
     return mode == ST_ZERO;
 }
@@ -1259,8 +1261,8 @@ void vka_tex_top(char *b, size_t n) {
         while (k > 0 && (!t[k - 1] || t[k - 1]->bytes < im->bytes)) k--;
         if (k < K) { memmove(&t[k + 1], &t[k], (size_t)(K - 1 - k) * sizeof *t); t[k] = im; } }
     for (int i = 0; i < g_nlazy; i++) lz += g_lazy[i].t.L.size;
-    o += (size_t)snprintf(b + o, n - o, "deferred textures: %d now (%.0f MB of storage), %llu so far, %llu made later (%.0f MB); first sampled from storage: %llu with data, %llu all zero (%.0f MB); largest images:", g_nlazy, lz / 1e6,
-                          (unsigned long long)g_lazy_total, (unsigned long long)g_lazy_made, g_lazy_made_bytes / 1e6, (unsigned long long)g_nvn2_first[0], (unsigned long long)g_nvn2_first[1], g_nvn2_zero_bytes / 1e6);
+    o += (size_t)snprintf(b + o, n - o, "deferred textures: %d now (%.0f MB of storage), %llu so far, %llu made later (%.0f MB); NVN2 sampled-storage decisions: %llu first-use, %llu lazy checks; largest images:", g_nlazy, lz / 1e6,
+                          (unsigned long long)g_lazy_total, (unsigned long long)g_lazy_made, g_lazy_made_bytes / 1e6, (unsigned long long)g_nvn2_mode[0], (unsigned long long)g_nvn2_mode[1]);
     static const char *const mn[4] = {"zero", "fill", "track", "sparse"};
     for (int k = 0; k < K && t[k] && o < n; k++) { const vka_img *im = t[k];
         o += (size_t)snprintf(b + o, n - o, " %llu %ux%ux%u+%u fmt %#x fl %#x %s%s%s %.0f MB;", (unsigned long long)im->serial, im->w, im->h, im->layers, im->base, im->d.format, im->d.flags,
