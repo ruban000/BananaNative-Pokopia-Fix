@@ -633,7 +633,8 @@ static void map_image(module_t *m, const char *dir) {
 // is embedded there as signed code (map_image above).
 // A third form, "pair" (wfn = ~0 here): the size is an entry of a table of u32 width, height pairs in main's data, which the game indexes by operation mode and graphics scale
 // (Ocarina of Time's main+0x3f58540, 640x480 to 3840x2160, read only by main+0x112c5e0; docked at the host's graphics scale 1 it takes entry 5, main+0x3f58568, 2560x1440): the
-// host checks that the pair holds the game's own size and writes the asked size into it
+// host checks that the pair holds the game's own size and writes the asked size into it. The game then takes the smaller of the pair and its settings' size per axis and
+// crops its 2560x1440 nvnWindow textures to it (nvnWindowSetCrop: 2048x1152 at the game's own size, 1920x1080 at DM_WINDOW_SIZE=1920x1080, 2026-11-06)
 static void window_size(module_t *m) {
     const char *e = getenv("DM_WINDOW_SIZE");
     static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
@@ -653,6 +654,8 @@ static void window_size(module_t *m) {
         if (p[0] != rows[r].w || p[1] != rows[r].h) { LOG("[RED] window_fn: main+%#llx holds %ux%u, not the game's own %ux%u: the window stays the game's", (unsigned long long)o, p[0], p[1], rows[r].w, rows[r].h); return; }
         p[0] = w; p[1] = h;
         LOG("window: %ux%u (%s; the size table entry main+%#llx; the game's own %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE", (unsigned long long)o, rows[r].w, rows[r].h);
+        // The game's output size is the smaller of the entry and the size its own settings give, per axis (main+0x6505ec; Ocarina of Time's settings give 2048x1152 docked):
+        // a size above that cannot raise it, and the nvnWindow textures keep the game's own allocation (the game crops them, nvnWindowSetCrop)
         if (!own && (w > rows[r].w || h > rows[r].h)) LOG("[RED] DM_WINDOW_SIZE=%s: above the game's own %ux%u; the game takes the smaller of this and the size its settings allow", e, rows[r].w, rows[r].h);
         return;
     }
