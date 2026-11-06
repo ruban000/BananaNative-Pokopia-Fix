@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x3a9, InstName.Atom, AAtomgCas, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
@@ -315,6 +316,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand res = EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), lo, hi, Register(x.Rb, RegisterType.Gpr));
 
             ASet(context, x, res);
+        }
+
+        // ATOMG.E.CAS Pu, Rd, [Ra + offset], Rb, Rc (0x3a9): the word at the address becomes Rc where it equals Rb, and Rd is the word it held (CUDA's atomicCAS). Fields (nvdisasm -b SM86,
+        // one bit flipped at a time on Ocarina of Time's encodings): Rc 64..71, .E (a 64-bit address, Ra:Ra+1) 72, size 73..75 (0 U32, 1 S32, 2 64-bit), the predicate Pu 81..83 (PT here), the
+        // signed offset 40..63. Ocarina of Time's 6 compute programs use the 32-bit form in a retry loop (ATOMG.E.CAS.STRONG.GPU PT, R30, [R38], R30, R31); the 64-bit form and a written
+        // predicate are refused
+        public static void AAtomgCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(73, 76) > 1 || x.Bits(81, 84) != 7 || x.Bit(91))
+            {
+                throw AFail(context, "ATOMG.CAS form other than 32-bit without a predicate");
+            }
+
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 72, 64, 0);
+            Operand expected = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(x.Rb, RegisterType.Gpr));
+            Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
+
+            ASet(context, x, context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, expected, value));
         }
 
         // MEMBAR: the order of this thread's memory operations
@@ -947,6 +968,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
             (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
             SamplerType type = bindless ? SamplerType.Texture2D : context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
             TextureFlags flags = bindless ? TextureFlags.Bindless : TextureFlags.None;
+
+            // The dimension query reads the texture header, whatever shape the shader samples: component 2 is its depth or layer count. A plain 2D type (the answer table's, or the
+            // guess for a texture only this query reads) has no third component, and its SPIR-V size query has two: an index of 2 was invalid SPIR-V. Ocarina of Time's Effect shaders
+            // (68 vertex, 6 pixel) read the layer count of a flipbook array they never sample, for a frame index modulo it. Declared a 2D array instead, the binding takes a 2D array view:
+            // of a 2D array its layers, of a 2D image one layer, the 1 a 2D header holds
+            if (query == 0 && (mask & 4) != 0 && type == SamplerType.Texture2D && !bindless)
+            {
+                type |= SamplerType.Array;
+                context.TranslatorContext.GpuAccessor.RecordLayerQuery(handle);
+            }
 
             int count = BitOperations.PopCount((uint)mask);
             Operand[] results = new Operand[count];
