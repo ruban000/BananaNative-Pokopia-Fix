@@ -126,8 +126,11 @@ SWITCH_BINDING = [
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
-    ('window_fn', '', {'what': "the window size's two getter functions, or the height bound of a game that derives the width, set at load (DM_WINDOW_SIZE, the Android launcher's Game resolution)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+    ('window_fn', '', {'what': "the window size's two getter functions, the height bound of a game that derives the width, or the size table entry its output size comes from, set at load (DM_WINDOW_SIZE, the Android launcher's Game resolution)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own constant window size (or height bound), at fixed offsets per main build; a function fingerprint (two leaf functions returning the size, or the movz of the bound in the function that fills the size table, found from their callers) could carry it over the game's updates"}),
+    ('dynres_fn', '', {'what': "the dynamic-resolution controller's own disabled branch, taken at load unless DM_DYNAMIC_RESOLUTION=1", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'checked': "Ocarina of Time's update main e0f3ccfa: the instruction at the offset and the branch target, 2026-11-06",
+     'why': "a choice the player makes (the game's controller follows the GPU time of its timestamp reports, so a fixed full size costs frame rate on a slow GPU); the controller's enable-bit test could be found by a function fingerprint over the game's updates"}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),
 ]
 
