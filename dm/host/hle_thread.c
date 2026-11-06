@@ -313,6 +313,7 @@ static void *thread_main(void *p) {
     t->mport = plat_thread_of(pthread_self()); t->host_work = &dm_host_work;
     pthread_mutex_unlock(&G);
     crash_thread_init();
+    dm_pac_guest(1);   // before any frame that returns: thread_main never does (thread.c)
     guest_thread_init(); guest_thread_set_id(t->id);
     guest_gate_stack(1);   // the guest runs on its own stack from dm_thread_enter on: this pthread's stack below this frame is where its SVCs run
     pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
