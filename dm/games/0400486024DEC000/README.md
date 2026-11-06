@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (`0400486024DEC000`)
 
-A Switch 2 game: update v131072 (the dump's content version; no `control.nacp`, so no display version), SDK 22.2.8 built for the Switch 2 (`spec: Ounce`), NVN2 API 231.40. Nintendo EPD's engine (sead / agl / gsys, Havok, CRIWARE), modules `main`, `subsdk0` (NintendoSDK movie: the AV1 movies) and `sdk`; every NSO segment is ZBIC-compressed. **In bring-up: packed for Android (2026-11-05), never run** on any host. Everything below about memory, movies and rendering is read from the files, not measured.
+A Switch 2 game: update v131072 (the dump's content version; no `control.nacp`, so no display version), SDK 22.2.8 built for the Switch 2 (`spec: Ounce`), NVN2 API 231.40. Nintendo EPD's engine (sead / agl / gsys, Havok, CRIWARE), modules `main`, `subsdk0` (NintendoSDK movie: the AV1 movies) and `sdk`; every NSO segment is ZBIC-compressed. **In bring-up: reaches the title screen on Android (2026-11-06)**, 60 fps over the title movie, with the menu's compute programs missing from the shader library ([Boot (Android)](#boot-android)). Not run on the Mac.
 
 ## What it needs
 
@@ -33,7 +33,7 @@ A Switch 2 game: update v131072 (the dump's content version; no `control.nacp`, 
 
 - **What they are** (`ffprobe` and `trace_headers` over all 26): AV1 Main 8-bit 4:2:0, 1920x1080 at 60 fps, BT.709 matrix and primaries, sRGB transfer, limited range, no film grain, no audio track; encoded with SVT-AV1 and remuxed by QuickTime into Matroska. 1,394 s and 83,630 pictures in all, 1.64 GB, 2.8 to 21.5 Mbit/s. Each packet is a temporal unit without a temporal delimiter; every key frame packet repeats the sequence header (a key frame about every 5 s). From 9 s (the 8 `Dm_MelodyGet_*` jingles) to 311 s (`Dm_StaffCredit_0000`); `Dm_Title_*` are the title screen's background loops (99 s, then 30 s loops), on screen for as long as the player idles.
 - **Who plays them:** the pack's movie module is `subsdk0` (NintendoSDK movie 22.2.8). The game's player (main +0x3b5f08c…) asks `movie::VideoDecoder` for NV12 pictures in plain buffers (output format 3, pixel storage type 1, w*h*3/2 bytes a frame, one image pool per `VideoFrame`); the movie library's wrapper (subsdk0 +0xf6d0…) picks the codec by the decoder kind at +0x400 (3 = AV1) and calls the 14 `nn::codec` AV1 exports of the sdk module, then `ReadDecoderOutputImageNv12`. It aborts on any error of the AV1 Initialize (subsdk0 +0xf900 / +0xf9c0), so without an AV1 decoder the first movie would end the game.
-- **Status: implemented, unverified on a device (2026-11-05).** The Android host decodes them with dav1d ([AV1 movies on SDK 22.2](../../../docs/reference/movies.md#av1-movies-on-sdk-222-implemented-unverified-on-a-device)): all 14 entry points of this sdk build are taken over, pictures are bit-exact with ffmpeg's dav1d in the Linux test (and on 90 packets each of `Dm_MelodyGet_Sun_05`, `Dm_Title_0005` and `Dm_StaffCredit_0000`, decoded by the wrapper by hand). `DM_AV1_THREADS` sets dav1d's threads (default 2). Decode cost on one Ryzen 9 7950X core (ffmpeg's libdav1d, x86 assembly): 3.1 ms a picture (`Dm_StaffCredit_0000`), 4.4 ms (`Dm_Title_0075`), 6.4 ms (`Dm_Title_0065`, the hardest); on the phone not measured (estimated 8 to 22 ms a picture on one core).
+- **Status: plays on the phone (2026-11-06):** the title movie is decoded and presented at 60 fps, the Initialize taken is by transfer memory, about 9 ms of CPU a picture over dav1d's two threads ([Boot (Android)](#boot-android)). Before (2026-11-05): implemented, unverified on a device. The Android host decodes them with dav1d ([AV1 movies on SDK 22.2](../../../docs/reference/movies.md#av1-movies-on-sdk-222-implemented-unverified-on-a-device)): all 14 entry points of this sdk build are taken over, pictures are bit-exact with ffmpeg's dav1d in the Linux test (and on 90 packets each of `Dm_MelodyGet_Sun_05`, `Dm_Title_0005` and `Dm_StaffCredit_0000`, decoded by the wrapper by hand). `DM_AV1_THREADS` sets dav1d's threads (default 2). Decode cost on one Ryzen 9 7950X core (ffmpeg's libdav1d, x86 assembly): 3.1 ms a picture (`Dm_StaffCredit_0000`), 4.4 ms (`Dm_Title_0075`), 6.4 ms (`Dm_Title_0065`, the hardest); on the phone measured since (above).
 - **What the first boot should log:** `[codec] image pool 1920x1080 format 3, 1 picture(s)`, then `[codec] AV1 decoder 1: 1920x1080, input format N, output format 3, by transfer memory` (or `by remote memory`: which one the game takes is not known from the disassembly) `(dav1d, 2 thread(s) on the host)`, `[codec] AV1 decoder 1: first picture 1920x1080 into buffer 0`, and at the end of a movie `end of stream after N pictures` with N = 60 a second (570 for a 9.5 s jingle). No `[RED] nn::codec` line. A title loop shows a Flush or Stop and a new first picture, or a Finalize and an Initialize in the same memory.
 
 ## Shaders
@@ -66,9 +66,29 @@ Current (2026-11-05, Linux x86_64): `scripts/pack_android.py -J 16` built it fro
 - 52,467 modules (base 42,724, `uint` 9,258, `uint_mixed` 485), every one valid for `spirv-val --target-env vulkan1.3`, again with `--check` (74 s).
 - Flags: `alpha_test` 22,243, `gl_depth` 16,271, `int_out` 8,994, `subgroup` 3,485, `hmma` 52, `mesh_prim` 6. Capabilities: `DrawParameters` 15,784, `Int64` / `PhysicalStorageBufferAddresses` 2,207 (`gmem_map`), `MeshShadingEXT` 509, `StorageImageWriteWithoutFormat` 307, `StorageImageReadWithoutFormat` 56; no 64-bit float. Bindings: no undecoded slot, no unknown kind. These are the rows of [`readiness.tsv`](readiness.tsv).
 
+## Boot (Android)
+
+Runs on the AYN Thor (Snapdragon 8 Gen 2, Adreno 740, Turnip), `bn-oot test -t 75 -e DM_LSFG=0`, test saves in `saves-test/0400486024DEC000`; run folders under `sx2/logs/runs/`.
+
+| Run | What it showed | Cause and fix |
+|---|---|---|
+| 2026-11-05 21:52 (`20261105-215225`) | NVN2 device, window, audio renderer, saves; abort 0xa99 at `sdk+0x1f61ac` (`ListVirtualInputDevices`) | `auddmg:u` not served: [The Switch 2 audio device manager](../../../docs/reference/services.md#the-switch-2-audio-device-manager-auddmgu) (a24041f7) |
+| 2026-11-05 22:05 (`20261105-220544`) | first frames; then the game's `abort()` from gRPC (`main+0x21f0c7c`, thread `Porter`) | no poll engine without `EventFd`: [Event descriptors of the bsd service](../../../docs/reference/services.md#event-descriptors-of-the-bsd-service) (209ccd76) |
+| 2026-11-05 22:11 (`20261105-221111`) | SIGILL at `autiasp`, `sdk+0x16d40c`, on `nn.npln.Worker` | [Pointer authentication keys differ between threads on Android](../../../docs/reference/threads.md#pointer-authentication-keys-differ-between-threads-on-android) (bcf960f2) |
+| 2026-11-06 10:24 (`20261106-102408`) | **75 s without a crash: the title screen** (logo over the `Dm_Title` movie), 59.7 fps, 16 draws a frame of which 14 skipped, 3 passes, recording 0.75 ms, GPU 0.79 ms; PSS 3.42 GiB (Graphics 2.08, Unknown = guest 1.17, Native 0.13) | the prompt bar under the logo is empty: 11 programs are not in the shader library (below) |
+| 2026-11-06 10:27 (`20261106-102723`) | A pressed at 45, 52 and 60 s: a second AV1 decoder (the next movie), then a black picture to the end (5 draws a frame, 14 skipped), no crash; PSS 6.98 GiB (Graphics 3.50, guest 3.26) | the same 11 programs; saved with `DM_NVN_SHDUMP` (now in the Vulkan replay too) |
+
+- **Missing programs (current, open):** 11 compute programs (control stage byte 5; keys `0a56002cdc7e1fce 49dff010b9832251 4f41ccf24f163e0d 5a7d69b067a7f011 7f7ff0f36b54d90f 9442573ee4ace011 a8b4fb48fee0ccf8 ba079f68ae288dba d15370a382630d4e e2eebd7ba18fe35f e6be82d835fbe4d3`, code areas of 1.8 to 69 KB) bound from the title on; their dispatches are what the replay skips (0 dispatches run). `runtime_shaders.py --dump` finds none of them in the `Nin_Ounce_NVN2` files, nor in the decompressed modules: their source is not known (files outside its default `--name`, or members it does not search). The dumps are in `<work folder>/nvn_shdump-20261106`; `shader_split.py` takes them from `<version dir>/nvn_shdump` (or `DM_NVN_SHDUMP_DIR`), then the library is rebuilt and the pack pushed (a separate pack task).
+- **AV1 movies:** the game takes the **by transfer memory** Initialize (`[codec] AV1 decoder 1: 1920x1080, input format 3, output format 3, by transfer memory (dav1d, 2 thread(s) on the host)`); pictures are presented (the title's smoke background). At 1080p60 the two dav1d workers used 26 to 28.5% of a core each (`top -H`, 10 s windows): about 0.55 core, 9 ms of CPU a picture; the game held 59.6 to 59.7 fps. No end of stream within 75 s (the title loop is 99 s).
+- **Audio:** AAudio 48 kHz stereo, 0 underruns; the devmgr lists no input device.
+- **PAC:** every guest thread after the first logged keys A and B different, generic the same.
+- The NVN2 `nvn*AcquireTimeout` lookups (`[RED] NVN address lookup of an unknown name`) are harmless: `main`'s loader stores the four pointers (`main+0x129eb08`…`+0x129eda4`) and no code loads them again.
+- The `fs: … is not a folder` lines (`Pack/GeneralFormat`, `Lib/Phive`, `UI/LayoutArchive`, `Sound/Env/GrassLeafFluctuatorSetting`) are probes for folders neither the base nor the update ships.
+- `nvnCommandBufferSetComputeWorkloadPriority` is called once and not implemented (red stub, no effect seen).
+
 ## Memory
 
-Read from the code, none of it measured:
+Read from the code, then measured on the phone ([Boot (Android)](#boot-android)): the heap request is 6.20 GB in the 7.5 GB heap region, as computed; the alias region's high-water mark was +2.09 GB at the title and **+3.75 GB of 5 GB** after the menu's next movie (2.0 GB mapped), so 5 GB may be short in game (open: watch `[mem] alias region mapped up to`).
 
 - **The heap.** `nninitStartup` (`main+0x260bb10` in v131072, `+0x25bbbf0` in the base) sets the heap to `align_down(total − used, 2 MB) − 0xaf200000` (`0xb0a00000` in the base) from `QueryMemoryInfo`, hands the whole heap to `AllocateMemoryBlock`, and takes 36 MB of it for an allocator of its own. With the 9 GB pool and the host's 64 MB of used memory the request is 0x18ce00000 (6.20 GB). The heap region is 7.5 GB, so the request fits with 1.3 GB to spare; the rewritten modules (about 105 MB) leave `SetHeapSize`'s check against the pool far from its limit, so no `mem_used`.
 - **The alias region.** The 2.74 GB `nninitStartup` keeps out of the heap is the game's memory beside it; with virtual address memory on, regions it maps in the alias region are its likely user, as on Mario Kart World (not traced). The SDK's AddressRegionManager constructor (`sdk+0x16ba30` in both builds) keeps the 1 GB node area (`mov w8, #0x3fe00000` at `+0x16ba48`, the occupied length at `+0x16bad4`) at the start of the alias region. 5 GB holds the node area, the 2.74 GB and 1.26 GB for fragmentation.
@@ -77,7 +97,7 @@ Read from the code, none of it measured:
 
 ## Open
 
-- **First boot (Android):** heap request and `SetHeapSize` result, the alias region's high-water mark, the first frame. Nothing has run yet.
+- **Android:** the menu's 11 compute programs ([Boot (Android)](#boot-android)); the alias region's headroom in game; the window size constant.
 - **AV1 movies** ([Movies](#movies)): decoded with dav1d, not run yet. To see on the first boot: which Initialize overload the game takes, the decode time and the CPU threads' load at 1080p60 on the phone (`[longframe]`, per-thread CPU), the heat over the title loop, whether the title loop plays and loops, and whether the player keeps 60 fps. Then the hardware decoder (MediaCodec `video/av01`, if the phone has `c2.qti.av1.decoder`) for heat. The movie library's other machinery (its event manager thread, sync point events, `movie::VideoFrame` sync handles) has only run with Bananza's VP9 player.
 - **Mesh and task programs:** 500 mesh and 20 task programs; on a phone without `VK_EXT_mesh_shader` the replay runs them as compute (`DM_VK_MESH_CS`), checked only on Mario Kart World.
 - Audio, the save path and input are untested.
@@ -85,5 +105,8 @@ Read from the code, none of it measured:
 
 ## Found on this game
 
+- [The Switch 2 audio device manager (`auddmg:u`)](../../../docs/reference/services.md#the-switch-2-audio-device-manager-auddmgu): its first boot lists the input devices.
+- [Event descriptors of the bsd service](../../../docs/reference/services.md#event-descriptors-of-the-bsd-service): gRPC's poll engine (NPLN) needs one.
+- [Pointer authentication keys differ between threads on Android](../../../docs/reference/threads.md#pointer-authentication-keys-differ-between-threads-on-android): NPLN's fibers.
 - [AV1 movies on SDK 22.2](../../../docs/reference/movies.md#av1-movies-on-sdk-222-implemented-unverified-on-a-device): the host's AV1 decoder (dav1d) was made for its 26 movies.
 - [NVN2 task and mesh stages in a BNSH program's slots 7 and 8](../../../docs/reference/shaders.md#nvn2-task-and-mesh-stages-in-a-bnsh-programs-slots-7-and-8): 491 mesh and 17 task programs the split did not take; `runtime_shaders.py` found nothing in a RomFS that uses zstd dictionaries.

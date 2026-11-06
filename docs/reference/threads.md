@@ -149,6 +149,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** during the bring-up the thread's ThreadLocalRegion showed +0x110 at 0 with +0x1F8 set; with the fix the allocator's first lock takes the fast path and the boot reaches `nnMain`.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0). Any SDK 22+ game that locks a mutex before `nnMain` would hit this; a game whose mutexes are all taken by a thread that already owns them would not notice.
 
+### Pointer authentication keys differ between threads on Android
+
+- **Symptom:** SIGILL (`ILL_ILLOPN`) at `autiasp` in `nn::os::detail::DispatchFiberContext` (`sdk+0x16d40c`, SDK 22.2.8) on a game thread (`nn.npln.Worker`), the link register a signed pointer to `sdk+0x169240`; the context's own `pacga` check just before it passed.
+- **Cause:** Horizon gives a process one set of pointer authentication keys, and SDK 22's fibers rely on it: `FiberImplByHorizon::Initialize` (`sdk+0x16d0d0`) signs the new fiber's entry with `pacia` (modifier: its stack top) on the creating thread, and `DispatchFiberContext` authenticates it with `autiasp` (and a suspended fiber's return with `autib`) on the thread that switches to it. On the phone (Android, Snapdragon 8 Gen 2, PAuth with FPAC) each guest thread has its own A and B keys; the generic key is the same: measured with a fingerprint of `pacia1716` / `pacib1716` / `pacga` on fixed inputs at each guest thread's start (`[RED] PAC: this guest thread's keys differ from the first guest thread's (A different, B different, generic same)`). A process cannot set its keys, only reset them to random ones.
+- **Fix:** guest threads switch the instruction keys A and B off (`PR_PAC_SET_ENABLED_KEYS`) at their start, before any frame that returns (`dm_pac_guest` in `thread.c`, from `thread_main` and `guest_main`, which switches them back before it returns): `pacia` / `pacib` / `autia` / `autib` / `retab` then leave pointers unchanged on every guest thread alike. The SDK's own `pacga` checks keep working (the generic key is not affected). `DM_PAC_KEYS=1` keeps the keys on. In this game's modules the A key appears only in the fiber code (2 `pacia`, 1 `autiasp`, 1 `autia1716` in `sdk`), the B key in every function's return (`pacibsp` / `retab`).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (gRPC's dispatcher fibers in NPLN).
+
 ## Yields and spin waits
 
 The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_nso.py` "Spin waits", `dm_spin_wait` in `hle_thread.c`), with their measurements, are in [development.md](../development.md#power) ("Yield loops", "Spin loops").
