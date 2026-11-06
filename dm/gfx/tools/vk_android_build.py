@@ -7,7 +7,7 @@
 # the alpha test constant and the integer-output / dual-source modules of pixel shaders, the viewport mask of emulated passthrough kept in the shader,
 # reflection from the SPIR-V, every module checked by spirv-val --target-env vulkan1.3, and one library file the replay (dm/gfx/vk_android) maps.
 # This tool is not one of DMSH_CHAIN's files: the Apple libraries do not change with it. Its own version DMSH_VK_CHAIN (dm/gfx/nvn/dmsh_chain_vk.h) covers this file,
-# vk_android_spv.py, dmsh_abi_vk.h and DMSH_CHAIN itself: it is their hash (the tools digest), or, when vk_android_same.tsv has a row for that digest, the earlier version
+# vk_android_spv.py, vk_android_opt.py, vk_android_tensor.py, dmsh_abi_vk.h and DMSH_CHAIN itself: it is their hash (the tools digest), or, when vk_android_same.tsv has a row for that digest, the earlier version
 # whose libraries a full build with these tools reproduced byte for byte (a change that cannot change the output, such as the result cache below, then keeps every library
 # already made valid). A row is added only after that comparison (android/SHADERS.md#versions); a change of output gets no row and moves the version.
 # Usage: vk_android_build.py --target vulkan <Switch package dir> <output cache dir> [key...]   (no keys = all; output in <output cache dir>/v-<DMSH_VK_CHAIN>/)
@@ -18,6 +18,7 @@
 #   DMSH_VK_LOOSE=1 also writes each module as spv/<key>[_gl].spv beside the library (for spirv-dis)
 #   XLATE / SPIRV_VAL naming a shared library (.so / .dylib) call it in this process through ctypes instead of starting a program (the phone, android/ONDEVICE.md): XLATE the
 #   translator's libdmsh_xlate (dmsh_xlate_android, export dmsh_xlate_main), SPIRV_VAL SPIRV-Tools' libSPIRV-Tools-shared (spvValidateWithOptions, Vulkan 1.3 environment)
+#   SPIRV_OPT names spirv-opt or libSPIRV-Tools-opt.so (pinned 2026.4); required only for software HMMA modules, cleaned into local SSA before driver compilation
 #   DMSH_VK_RESULTS the result folder (default <output>/v-<V>/results), DMSH_VK_BATCH shaders per translator call (default 64), DMSH_VK_PROGRESS a file the progress is also
 #   written to (JSON, replaced by rename), DMSH_VK_KEEP=0 deletes the result folder once the library is written, DMSH_VK_XLATE_J translator calls at once (default 1
 #   for the library form, J for the program), DMSH_VK_REQUIRE_ALL=1 writes no library unless every shader built (exit 1)
@@ -34,14 +35,15 @@
 import ast, collections, concurrent.futures as cf, ctypes, hashlib, json, mmap, os, re, shutil, struct, subprocess, sys, tempfile, threading
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-import dmsh_chain, dmsh_abi as abi, dmsh_ampere, tool_lock, vk_android_spv as spv
+import dmsh_chain, dmsh_abi as abi, dmsh_ampere, tool_lock, vk_android_spv as spv, vk_android_opt as spv_opt
+import vk_android_tensor as tensor
 
 try: from compression import zstd   # Python 3.14; before it, pip install backports.zstd (shader_split.py needs it too)
 except ImportError:
     try: from backports import zstd   # pyright: ignore[reportMissingImports]
     except ImportError: zstd = None
 ABI_VK = os.path.join(GFX, 'nvn', 'dmsh_abi_vk.h'); HEADER_VK = os.path.join(GFX, 'nvn', 'dmsh_chain_vk.h')
-VK_FILES = ['tools/vk_android_build.py', 'tools/vk_android_spv.py', 'nvn/dmsh_abi_vk.h']
+VK_FILES = ['tools/vk_android_build.py', 'tools/vk_android_spv.py', 'tools/vk_android_opt.py', 'tools/vk_android_tensor.py', 'nvn/dmsh_abi_vk.h']
 SAME_TSV = os.path.join(HERE, 'vk_android_same.tsv')
 _DEFINE = re.compile(r'#define DMSH_VK_([A-Z][A-Z0-9_]*)[ \t]+(0x[0-9A-Fa-f]+|[1-9][0-9]*|0|"[^"\\]*")(?:[ \t]+//.*)?')
 
@@ -87,7 +89,7 @@ def vk_version():
 
 def header_text(v):
     return ('// Generated file (dm/gfx/tools/vk_android_build.py --header): the Android Vulkan shader library version this source tree expects. It covers DMSH_CHAIN\n'
-            '// (the translator front half), vk_android_build.py, vk_android_spv.py and dmsh_abi_vk.h; the replay loads only <library dir>/v-<V>/dmsh_vk.lib\n'
+            '// (the translator front half), vk_android_build.py, vk_android_spv.py, vk_android_opt.py, vk_android_tensor.py and dmsh_abi_vk.h; the replay loads only <library dir>/v-<V>/dmsh_vk.lib\n'
             f'#define DMSH_VK_CHAIN "{v}"\n')
 
 
@@ -543,7 +545,8 @@ def finish(key, w, job, c1):
     dropped = spv.strip_unused_caps(m)
     added = spv.formatless_storage_caps(m)
     n_precise = spv.precise_minmax(m)
-    try: spv.compact_hmma(m)
+    tensor_report = {}
+    try: n_hmma = tensor.prepare(m, tensor_report)
     except ValueError as e: return 'tensor helper rewrite failed', str(e)[:160], None
     binds = [classify(stage, r, res, m) for r in m.resources()]
     storage_slots(stage, binds, res)
@@ -564,6 +567,11 @@ def finish(key, w, job, c1):
     if stage == 'ps':   # the variants of the same module (dmsh_abi_vk.h DMSH_VK_MOD_*)
         mods_, uint_mask = ps_variants(key, m)
         mods += mods_
+    if n_hmma:
+        # DCE may remove unused descriptors. Keep their original reflection/layout and
+        # binding numbers; Vulkan permits unused bindings and the tested module stays exact.
+        try: mods = [(variant, tensor.finish(data)) for variant, data in mods]
+        except ValueError as e: return 'tensor helper rewrite failed', str(e)[:160], None
     for variant, data in mods:
         err = validate(data, w, f'{key}_{variant}')
         if err: return 'spirv-val failed', err, None
@@ -583,6 +591,7 @@ def finish(key, w, job, c1):
     refl = {'key': key, 'stage': stage, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'c1': c1.hex(), 'local': job.get('local') or [1, 1, 1], 'shared': shared,
             'notes': res['notes'], 'vs_pad': pad, 'mesh': res.get('mesh'), 'ps_prim': prim, 'caps_dropped': dropped, 'caps_added': added, 'precise': n_precise, 'drv_reads': drv_reads(binds, m), 'tf': job.get('tf'), **fa,
             'bindings': [{kk: v for kk, v in e.items() if kk not in ('id', 'tbind', 'index')} for e in binds]}
+    if tensor_report: refl['tensor'] = tensor_report
     loose = os.environ.get('DMSH_VK_LOOSE') == '1'
     return 'ok', '', (refl, [(variant, len(data), *pack_module(data), data if loose else None) for variant, data in mods])   # compressed here, in parallel
 
@@ -678,13 +687,17 @@ def result_head(path):
             if len(d) != 12 or d[:8] != RESULT_MAGIC: return None
             h = json.loads(f.read(struct.unpack('<I', d[8:])[0]))
     except (OSError, ValueError): return None
-    return h if (h.get('vk'), h.get('inputs'), h.get('raw'), h.get('val'), h.get('key')) == (TOOLS, INPUTS, RAW, VAL_ID, os.path.basename(path)[:-2]) else None
+    if (h.get('vk'), h.get('inputs'), h.get('raw'), h.get('val'), h.get('key')) != (TOOLS, INPUTS, RAW, VAL_ID, os.path.basename(path)[:-2]): return None
+    if h.get('st') == 'tensor helper rewrite failed': return None  # missing/wrong optimizer can be corrected on a resumable build
+    if h.get('opt') is not None and h['opt'] != spv_opt.optimizer().identity: return None
+    return h
 
 
 def write_result(key, st, err, r, ps_in):
     """One shader's result, as fin() gives it, to <RES>/<key>.r: written to a temporary name, then renamed (a killed build leaves a whole file or none)"""
     refl, modules = r if r else (None, [])
-    h = {'vk': TOOLS, 'inputs': INPUTS, 'raw': RAW, 'val': VAL_ID, 'key': key, 'stage': STAGE_OF[key], 'st': st, 'err': err, 'ps_inputs': sorted(ps_in) if ps_in is not None else None,
+    h = {'vk': TOOLS, 'inputs': INPUTS, 'raw': RAW, 'val': VAL_ID, 'opt': spv_opt.optimizer().identity if refl and refl.get('tensor', {}).get('status') == 'optimized' else None,
+         'key': key, 'stage': STAGE_OF[key], 'st': st, 'err': err, 'ps_inputs': sorted(ps_in) if ps_in is not None else None,
          'refl': refl, 'modules': [[variant, size, len(stored), codec] for variant, size, stored, codec, _ in modules]}
     j = json.dumps(h, separators=(',', ':')).encode()
     tmp = result_path(key) + '.tmp'

@@ -15,6 +15,7 @@ import struct
 import unittest
 
 from dm.tools.tests import test_ampere_lowerings as base
+import vk_android_opt as opt
 
 spv = base.spv
 _libm = ctypes.CDLL(ctypes.util.find_library('m'))
@@ -149,7 +150,9 @@ class HmmaArithmetic(unittest.TestCase):
         self.assertEqual(barrier_signature(compact), barriers, 'production barrier scopes/semantics changed')
         data = sum((fragments(*case) for case in cases), [])
         want = sum((oracle(*case, repeats=repeats) for case in cases), [])
-        for label, module in [('original', original), ('compact', compact)]:
+        optimized = spv.Module(opt.optimizer()(compact.data()))
+        self.assertEqual(barrier_signature(optimized), barriers, 'optimized barrier scopes/semantics changed')
+        for label, module in [('original', original), ('compact', compact), ('optimized', optimized)]:
             arithmetic_fixture(module)
             p = self.tmp / f'{path.stem}_{label}.spv'
             p.write_bytes(module.data())
