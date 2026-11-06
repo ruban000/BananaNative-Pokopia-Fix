@@ -630,9 +630,11 @@ static void map_image(module_t *m, const char *dir) {
 // DM_WINDOW_SIZE=<w>x<h> writes that size into them (the Android launcher's Game resolution); unset, empty or "original" writes the game's own size from the profile, so a pack
 // rewritten with the older cut of the constants gives the game's size too. Only for the main build the row names, while the text is still writable (map_image, before the
 // seal), and after checking each instruction's shape (a leaf getter, or a movz holding the game's own value): fixed addresses never run on another build. Not on iOS: the text
-// is embedded there as signed code (map_image above)
-static void window_apply(module_t *m) {
-    if (strcmp(m->name, "main") || m->nro) return;
+// is embedded there as signed code (map_image above).
+// A third form, "pair" (wfn = ~0 here): the size is an entry of a table of u32 width, height pairs in main's data, which the game indexes by operation mode and graphics scale
+// (Ocarina of Time's main+0x3f58540, 640x480 to 3840x2160, read only by main+0x112c5e0; docked at the host's graphics scale 1 it takes entry 5, main+0x3f58568, 2560x1440): the
+// host checks that the pair holds the game's own size and writes the asked size into it
+static void window_size(module_t *m) {
     const char *e = getenv("DM_WINDOW_SIZE");
     static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
     int r = -1, own = !e || !*e || !strcmp(e, "original");
@@ -643,6 +645,16 @@ static void window_apply(module_t *m) {
         unsigned a, b; char x;
         if (sscanf(e, "%ux%u%c", &a, &b, &x) != 2 || !a || !b || a > 0xFFFF || b > 0xFFFF) LOG("[RED] DM_WINDOW_SIZE=%s: must be <width>x<height> or original; the window stays %ux%u", e, w, h);
         else w = a, h = b;
+    }
+    if (rows[r].wfn == ~0ull) {   // a width, height pair in main's data (not its text)
+        uint64_t o = rows[r].hfn;
+        if (o < m->text_end || o + 8 > m->size || (o & 3)) { LOG("[RED] window_fn: main+%#llx is not a size pair in main's data; the window stays the game's", (unsigned long long)o); return; }
+        uint32_t *p = (uint32_t *)(m->base + o);
+        if (p[0] != rows[r].w || p[1] != rows[r].h) { LOG("[RED] window_fn: main+%#llx holds %ux%u, not the game's own %ux%u: the window stays the game's", (unsigned long long)o, p[0], p[1], rows[r].w, rows[r].h); return; }
+        p[0] = w; p[1] = h;
+        LOG("window: %ux%u (%s; the size table entry main+%#llx; the game's own %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE", (unsigned long long)o, rows[r].w, rows[r].h);
+        if (!own && (w > rows[r].w || h > rows[r].h)) LOG("[RED] DM_WINDOW_SIZE=%s: above the game's own %ux%u; the game takes the smaller of this and the size its settings allow", e, rows[r].w, rows[r].h);
+        return;
     }
     uint64_t fn[2] = {rows[r].wfn, rows[r].hfn}; unsigned v[2] = {w, h}, mine[2] = {rows[r].w, rows[r].h}, was[2] = {0, 0};
     for (int i = 0; i < 2; i++) {
@@ -667,6 +679,33 @@ static void window_apply(module_t *m) {
     }
     LOG("window: %ux%u (%s; main+%#llx / +%#llx; the game's own %ux%u, the pack's %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE",
         (unsigned long long)fn[0], (unsigned long long)fn[1], rows[r].w, rows[r].h, was[0], was[1]);
+}
+
+// The game's dynamic-resolution controller (profile key dynres_fn): one instruction of it, and the instruction that takes the controller's own "dynamic resolution disabled"
+// branch instead (Ocarina of Time's main+0x805bd0: tbz w8,#0 on the controller's enable bit, made a b to the path that returns a scale of 1.0, the full size of its render
+// targets; the community "Max Resolution" patch, as Lichii's built-in one). DM_DYNAMIC_RES=off writes it at load (main's text still writable, before the seal), after checking
+// that the instruction is the game's own; unset, empty or "on" leaves the controller, which follows the GPU time of the game's timestamp reports. Only for the main build the row
+// names: fixed addresses never run on another build
+static void dynres_apply(module_t *m) {
+    static const struct { const char *build; uint64_t off; uint32_t orig, fixed; } rows[] = DM_GAME_DYNRES_FN;
+    int r = -1;
+    for (int i = 0; i < DM_GAME_NDYNRES_FN; i++) if (!strcmp(rows[i].build, m->build_id)) r = i;
+    const char *e = getenv("DM_DYNAMIC_RES");
+    int off = e && !strcmp(e, "off");
+    if (e && *e && !off && strcmp(e, "on")) LOG("[RED] DM_DYNAMIC_RES=%s: must be on or off; the game's controller stays", e);
+    if (r < 0) { if (off) LOG("[RED] DM_DYNAMIC_RES=off: the profile has no dynres_fn row for main build %s; the game's controller stays", m->build_id); return; }
+    if (!off) { LOG("dynamic resolution: the game's controller (DM_DYNAMIC_RES=off takes its fixed full-size branch at main+%#llx)", (unsigned long long)rows[r].off); return; }
+    if (rows[r].off + 4 > m->text_end) { LOG("[RED] dynres_fn: main+%#llx is outside main's text; the game's controller stays", (unsigned long long)rows[r].off); return; }
+    uint32_t *p = (uint32_t *)(m->base + rows[r].off);
+    if (*p != rows[r].orig) { LOG("[RED] dynres_fn: main+%#llx is %08x, not the game's %08x: the game's controller stays", (unsigned long long)rows[r].off, *p, rows[r].orig); return; }
+    *p = rows[r].fixed;
+    LOG("dynamic resolution: off (DM_DYNAMIC_RES; main+%#llx %08x -> %08x, the controller's own disabled branch: full size)", (unsigned long long)rows[r].off, rows[r].orig, rows[r].fixed);
+}
+
+// main's load-time settings, at the place map_image calls them (the key page installed, the text still writable)
+static void window_apply(module_t *m) {
+    if (strcmp(m->name, "main") || m->nro) return;
+    dynres_apply(m); window_size(m);
 }
 
 // Read into the final anonymous mapping: a full-file malloc followed by memcpy kept two
