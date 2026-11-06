@@ -1,5 +1,5 @@
 """loader.c's load-time settings of main, run on a synthetic image: window_fn's size pair in main's data (Ocarina of Time's form) and dynres_fn's
-instruction (DM_DYNAMIC_RES=off). The production functions are compiled with a minimal module type and the profile rows given here; the leaf-getter
+instruction (full resolution unless DM_DYNAMIC_RESOLUTION=1). The production functions are compiled with a minimal module type and the profile rows given here; the leaf-getter
 and height-bound forms keep their behaviour (one check each)."""
 import os
 from pathlib import Path
@@ -75,7 +75,7 @@ class WindowDynres(unittest.TestCase):
             struct.pack_into('<II', img, PAIR, *pair); struct.pack_into('<I', img, INSN, insn)
         p = self.dir / 'image.bin'; p.write_bytes(img)
         r = subprocess.run([str(self.binary(rows or self.ROWS)), str(p), build], capture_output=True, text=True,
-                           env={k: v for k, v in os.environ.items() if k not in ('DM_WINDOW_SIZE', 'DM_DYNAMIC_RES')} | env)
+                           env={k: v for k, v in os.environ.items() if k not in ('DM_WINDOW_SIZE', 'DM_DYNAMIC_RESOLUTION')} | env)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = p.read_bytes()
         return r.stdout.splitlines(), struct.unpack_from('<II', out, PAIR), struct.unpack_from('<I', out, INSN)[0], out
@@ -105,21 +105,21 @@ class WindowDynres(unittest.TestCase):
         self.assertEqual(pair, (3840, 2160)); self.assertTrue(any(l.startswith('[RED] DM_WINDOW_SIZE=3840x2160: above') for l in log), log)
 
     def test_dynres(self):
-        log, _, insn, _ = self.run_image({})
-        self.assertEqual(insn, TBZ); self.assertTrue(any(l.startswith("dynamic resolution: the game's controller") for l in log), log)
-        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RES': 'on'})
-        self.assertEqual(insn, TBZ)
-        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RES': 'off'})
-        self.assertEqual(insn, B_FIXED); self.assertTrue(any(l.startswith(f'dynamic resolution: off (DM_DYNAMIC_RES; main+{INSN:#x} 360041e8 -> 1400020f') for l in log), log)
-        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RES': 'off'}, insn=0xd503201f)   # not the game's instruction: left alone
+        for env in ({}, {'DM_DYNAMIC_RESOLUTION': '0'}):   # the default: full resolution, the controller's own disabled branch
+            log, _, insn, _ = self.run_image(env)
+            self.assertEqual(insn, B_FIXED, env)
+            self.assertTrue(any(l.startswith(f'dynamic resolution: off, full resolution') and f'main+{INSN:#x} 360041e8 -> 1400020f' in l for l in log), log)
+        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RESOLUTION': '1'})
+        self.assertEqual(insn, TBZ); self.assertTrue(any(l.startswith("dynamic resolution: on, the game's controller") for l in log), log)
+        log, _, insn, _ = self.run_image({}, insn=0xd503201f)   # not the game's instruction: left alone
         self.assertEqual(insn, 0xd503201f); self.assertTrue(any(l.startswith('[RED] dynres_fn') for l in log), log)
-        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RES': 'off'}, build='0' * 32)
-        self.assertEqual(insn, TBZ); self.assertTrue(any('has no dynres_fn row' in l for l in log), log)
-        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RES': 'fixed'})
-        self.assertEqual(insn, TBZ); self.assertTrue(any(l.startswith('[RED] DM_DYNAMIC_RES=fixed: must be on or off') for l in log), log)
+        log, _, insn, _ = self.run_image({}, build='0' * 32)   # another build: nothing written, nothing said
+        self.assertEqual(insn, TBZ); self.assertFalse([l for l in log if 'dynamic resolution' in l or 'dynres_fn' in l], log)
+        log, _, insn, _ = self.run_image({'DM_DYNAMIC_RESOLUTION': 'fixed'})
+        self.assertEqual(insn, B_FIXED); self.assertTrue(any(l.startswith('[RED] DM_DYNAMIC_RESOLUTION=fixed: must be 0 or 1') for l in log), log)
 
     def test_other_forms_unchanged(self):
-        # Donkey Kong Bananza's getters and Mario Kart World's height bound, with no dynres_fn row: as before, and DM_DYNAMIC_RES unset says nothing
+        # Donkey Kong Bananza's getters and Mario Kart World's height bound, with no dynres_fn row: as before, and nothing said of dynamic resolution
         img = bytearray(SIZE)
         struct.pack_into('<II', img, GETW, 0x52800000 | (2880 << 5), 0xd65f03c0); struct.pack_into('<II', img, GETH, 0x52800000 | (1620 << 5), 0xd65f03c0)
         struct.pack_into('<I', img, BOUND, 0x52800015 | (1440 << 5))

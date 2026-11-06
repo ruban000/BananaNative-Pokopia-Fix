@@ -156,7 +156,7 @@ def header(g):
             if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
             wfn.append('{' + q(r[0]) + f', {"0" if r[1] == "-" else "~0ull" if r[1] == "pair" else r[1]}, {r[2]}, {w}, {h}' + '}')
     drf = []   # the dynamic-resolution controller's own "disabled" branch, one row per main build: <main build ID> <offset> <the instruction there> <the instruction that takes the branch>
-    # (loader.c dynres_apply: DM_DYNAMIC_RES=off writes it at load, after checking the original; on or unset = the game's controller)
+    # (loader.c dynres_apply: DM_DYNAMIC_RESOLUTION unset or 0 writes it at load, after checking the original; 1 = the game's controller)
     if g.get('dynres_fn', ''):
         for r in g.values('dynres_fn'):
             if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[1]) or not all(re.fullmatch(r'[0-9a-fA-F]{8}', x) for x in r[2:]) or int(r[1], 16) % 4:

@@ -686,23 +686,24 @@ static void window_size(module_t *m) {
 
 // The game's dynamic-resolution controller (profile key dynres_fn): one instruction of it, and the instruction that takes the controller's own "dynamic resolution disabled"
 // branch instead (Ocarina of Time's main+0x805bd0: tbz w8,#0 on the controller's enable bit, made a b to the path that returns a scale of 1.0, the full size of its render
-// targets; the community "Max Resolution" patch, as Lichii's built-in one). DM_DYNAMIC_RES=off writes it at load (main's text still writable, before the seal), after checking
-// that the instruction is the game's own; unset, empty or "on" leaves the controller, which follows the GPU time of the game's timestamp reports. Only for the main build the row
-// names: fixed addresses never run on another build
+// targets; the community "Max Resolution" patch, as Lichii's built-in one). DM_DYNAMIC_RESOLUTION as for NieR:Automata (hle_fpslock.c): unset or 0 keeps full resolution, so
+// the host writes the branch at load (main's text still writable, before the seal) after checking that the instruction is the game's own; 1 leaves the game's controller, which
+// follows the GPU time between the game's timestamp reports. Only for the main build the row names: fixed addresses never run on another build. Without a row nothing is said
+// (NieR's builds read the same switch)
 static void dynres_apply(module_t *m) {
     static const struct { const char *build; uint64_t off; uint32_t orig, fixed; } rows[] = DM_GAME_DYNRES_FN;
     int r = -1;
     for (int i = 0; i < DM_GAME_NDYNRES_FN; i++) if (!strcmp(rows[i].build, m->build_id)) r = i;
-    const char *e = getenv("DM_DYNAMIC_RES");
-    int off = e && !strcmp(e, "off");
-    if (e && *e && !off && strcmp(e, "on")) LOG("[RED] DM_DYNAMIC_RES=%s: must be on or off; the game's controller stays", e);
-    if (r < 0) { if (off) LOG("[RED] DM_DYNAMIC_RES=off: the profile has no dynres_fn row for main build %s; the game's controller stays", m->build_id); return; }
-    if (!off) { LOG("dynamic resolution: the game's controller (DM_DYNAMIC_RES=off takes its fixed full-size branch at main+%#llx)", (unsigned long long)rows[r].off); return; }
+    if (r < 0) return;
+    const char *e = getenv("DM_DYNAMIC_RESOLUTION");
+    if (e && *e && strcmp(e, "0") && strcmp(e, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", e);
+    if (e && !strcmp(e, "1")) { LOG("dynamic resolution: on, the game's controller (DM_DYNAMIC_RESOLUTION=1; main+%#llx kept)", (unsigned long long)rows[r].off); return; }
     if (rows[r].off + 4 > m->text_end) { LOG("[RED] dynres_fn: main+%#llx is outside main's text; the game's controller stays", (unsigned long long)rows[r].off); return; }
     uint32_t *p = (uint32_t *)(m->base + rows[r].off);
     if (*p != rows[r].orig) { LOG("[RED] dynres_fn: main+%#llx is %08x, not the game's %08x: the game's controller stays", (unsigned long long)rows[r].off, *p, rows[r].orig); return; }
     *p = rows[r].fixed;
-    LOG("dynamic resolution: off (DM_DYNAMIC_RES; main+%#llx %08x -> %08x, the controller's own disabled branch: full size)", (unsigned long long)rows[r].off, rows[r].orig, rows[r].fixed);
+    LOG("dynamic resolution: off, full resolution (%s; main+%#llx %08x -> %08x, the controller's own disabled branch; DM_DYNAMIC_RESOLUTION=1 keeps the controller)",
+        e && *e ? "DM_DYNAMIC_RESOLUTION" : "the default", (unsigned long long)rows[r].off, rows[r].orig, rows[r].fixed);
 }
 
 // main's load-time settings, at the place map_image calls them (the key page installed, the text still writable)
