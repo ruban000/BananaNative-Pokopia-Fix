@@ -57,8 +57,10 @@ static class SwshXlate
         // The same for a texture (Princess Peach: Showtime!'s size query on a volume it also samples, 1,463 of its shaders). A handle ORs a texture word and a sampler word, and the query's has
         // another sampler word than the sample's, so Ryujinx's merge by handle (MergeTextureMeta) keeps them apart and the query gets its own binding, typed 2D, of a 3D texture: a binding Metal
         // does not define. So the types go by texture slot, as the answer table does (Slot). A binding whose handle a query guessed counts only when it is not the guess: then an instruction typed
-        // it, through that merge. A slot two instructions give different types is left out. Only a slot a query guessed and another instruction types otherwise is returned, as nothing else would change
-        readonly Dictionary<int, SamplerType> _textureTypes; readonly HashSet<int> _guessedHandles = new();
+        // it, through that merge. A slot two instructions give different types is left out. Only a slot a query guessed and another instruction types otherwise is returned, as nothing else would change.
+        // A 2D array binding of a guessed handle whose query read the layer component (RecordLayerQuery) is the guess too: the query declared it so, no other instruction did
+        readonly Dictionary<int, SamplerType> _textureTypes; readonly HashSet<int> _guessedHandles = new(), _layerQueries = new();
+        public void RecordLayerQuery(int handle) => _layerQueries.Add(handle);
         public Dictionary<int, SamplerType> TextureTypesOf(ShaderProgram p)
         {
             var types = new Dictionary<int, SamplerType>(); var mixed = new HashSet<int>();
@@ -67,7 +69,8 @@ static class SwshXlate
                 if (t.ArrayLength != 1) continue;
                 SamplerType ty = t.Type & (SamplerType.Mask | SamplerType.Array | SamplerType.Multisample);
                 int slot = Slot(t.HandleIndex, t.CbufSlot, false);
-                if (slot < 0 || (ty == SamplerType.Texture2D && _guessedHandles.Contains(t.HandleIndex))) continue;
+                bool guess = ty == SamplerType.Texture2D || (ty == (SamplerType.Texture2D | SamplerType.Array) && _layerQueries.Contains(t.HandleIndex));
+                if (slot < 0 || (guess && _guessedHandles.Contains(t.HandleIndex))) continue;
                 if (types.TryGetValue(slot, out SamplerType seen) && seen != ty) mixed.Add(slot); else types[slot] = ty;
             }
             var guessed = new HashSet<int>(_guessedHandles.Select(h => Slot(h, -1, false)));

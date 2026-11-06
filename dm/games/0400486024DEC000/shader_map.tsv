@@ -28118,6 +28118,17 @@ ps_lib.bin	4709	pixel	338b536303eeebf9	/Lib/gsys/gsys_resource.Nin_Ounce_NVN2.re
 ps_lib.bin	4710	pixel	53b2a30425f71b0d	/Lib/gsys/gsys_resource.Nin_Ounce_NVN2.release.sarc.zs/common.sharcb#BAHS@0xd1c0
 vs_lib.bin	592	vertex	66fb51ea12511428	/Lib/gsys/gsys_resource.Nin_Ounce_NVN2.release.sarc.zs/common.sharcb#BAHS@0xf390
 vs_lib.bin	593	vertex	f7d849c7b92dd819	/Lib/gsys/gsys_resource.Nin_Ounce_NVN2.release.sarc.zs/common.sharcb#BAHS@0xfa10
+cs_other.bin	0	compute	0a56002cdc7e1fce	/nvn_shdump/0a56002cdc7e1fce
+cs_other.bin	1	compute	49dff010b9832251	/nvn_shdump/49dff010b9832251
+cs_other.bin	2	compute	4f41ccf24f163e0d	/nvn_shdump/4f41ccf24f163e0d
+cs_other.bin	3	compute	5a7d69b067a7f011	/nvn_shdump/5a7d69b067a7f011
+cs_other.bin	4	compute	7f7ff0f36b54d90f	/nvn_shdump/7f7ff0f36b54d90f
+cs_other.bin	5	compute	9442573ee4ace011	/nvn_shdump/9442573ee4ace011
+cs_other.bin	6	compute	a8b4fb48fee0ccf8	/nvn_shdump/a8b4fb48fee0ccf8
+cs_other.bin	7	compute	ba079f68ae288dba	/nvn_shdump/ba079f68ae288dba
+cs_other.bin	8	compute	d15370a382630d4e	/nvn_shdump/d15370a382630d4e
+cs_other.bin	9	compute	e2eebd7ba18fe35f	/nvn_shdump/e2eebd7ba18fe35f
+cs_other.bin	10	compute	e6be82d835fbe4d3	/nvn_shdump/e6be82d835fbe4d3
 ps_shader.bin	0	pixel	523fe9b7e92e0966	/Shader/ApplicationPackage.Nin_Ounce_NVN2.release.sarc.zs/AglShader.sharcb#BAHS@0x100050
 ps_shader.bin	1	pixel	61bb7caff4c51c74	/Shader/ApplicationPackage.Nin_Ounce_NVN2.release.sarc.zs/AglShader.sharcb#BAHS@0x1002e0
 ps_shader.bin	2	pixel	a94be797e14f3c31	/Shader/ApplicationPackage.Nin_Ounce_NVN2.release.sarc.zs/AglShader.sharcb#BAHS@0x100ac0

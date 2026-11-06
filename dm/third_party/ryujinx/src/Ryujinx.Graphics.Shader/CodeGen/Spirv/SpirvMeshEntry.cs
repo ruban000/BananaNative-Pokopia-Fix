@@ -285,6 +285,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 SpvInstruction isVertex = context.ULessThan(tBool, word, U((uint)mesh.PrimitiveBaseWord));
                 Guarded(isVertex, () => Scatter(word, mesh.VertexChunkWords, mesh.MaxVertices, mesh.Planes, (v, plane) =>
                 {
+                    if (plane == MeshShaderInfo.NoOutput)
+                    {
+                        return;
+                    }
+
                     context.Store(plane < 4
                         ? context.AccessChain(pOutF32, posVar, v, U(0), U((uint)plane))
                         : context.AccessChain(pOutF32, generics[(plane - 4) >> 2], v, U((uint)(plane & 3))), f);

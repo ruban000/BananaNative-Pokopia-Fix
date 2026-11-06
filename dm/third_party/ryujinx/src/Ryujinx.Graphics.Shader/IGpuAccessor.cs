@@ -487,6 +487,15 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// nxnative: a size query of the texture handle reads the depth / layer component of a texture typed plain 2D, and its binding was declared a 2D array instead
+        /// (Instructions/InstEmitAmpereMem.cs ATxq): the array is the query's, not a type another instruction gave the texture.
+        /// </summary>
+        /// <param name="handle">Texture handle</param>
+        void RecordLayerQuery(int handle)
+        {
+        }
+
+        /// <summary>
         /// Gets the size in bytes of a bound constant buffer for the current shader stage.
         /// </summary>
         /// <param name="slot">The number of the constant buffer to get the size from</param>

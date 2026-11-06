@@ -1649,6 +1649,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     dimensions++;
                 }
 
+                // A component past the image's dimensions (a size query of a shape the shader's other instructions gave the binding, InstEmitAmpereMem.cs ATxq): the header's extent of a
+                // dimension the image does not have, 1. Extracting it from the query's smaller vector was invalid SPIR-V ("Vector access is out of bounds")
+                if (texOp.Index >= dimensions)
+                {
+                    return new OperationResult(AggregateType.S32, context.Constant(context.TypeS32(), 1));
+                }
+
                 SpvInstruction resultType = dimensions == 1 ? context.TypeS32() : context.TypeVector(context.TypeS32(), dimensions);
 
                 SpvInstruction result;

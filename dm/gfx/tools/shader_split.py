@@ -2597,9 +2597,11 @@ def mesh_facts(key, st, ctl, code, keys, mesh_pairs):
     if not threads: return warn('control +0x58 thread count is 0')
     if st == 'ts': return {'local': [threads, 1, 1], 'shared': 0, 'mesh': [0, 0, payload], 'pair': pairs}
     # the planes are counted from position and the generic vectors only: an output-map bit of another output (system values before position at 0x30..0x35 bits 0..3,
-    # colours / clip distances after the generics) would be a plane of its own and shift every one after it. None in Mario Kart World 1.8.0's 19 mesh programs
-    if any(code[0x30:0x35]) or code[0x35] & 0xf or any(code[0x46:0x50]): return warn('its SPH output map has outputs besides position and the generic vectors, whose planes are not known')
-    planes = [c for c in range(4) if code[0x35] >> (4 + c) & 1] + [4 + i for i in range(128) if code[0x36 + i // 8] >> (i % 8) & 1]
+    # colours / clip distances after the generics) would be a plane of its own and shift every one after it. None in Mario Kart World 1.8.0's 19 mesh programs.
+    # The point size (0x35 bit 3, the word before position.x as in the input map's system values B) is a plane the translator drops (-3): the programs output
+    # triangles, which do not use it. Ocarina of Time's 5 Foliage and AglShader mesh programs write it as their first plane (0x35 = 0xf8)
+    if any(code[0x30:0x35]) or code[0x35] & 0x7 or any(code[0x46:0x50]): return warn('its SPH output map has outputs besides the point size, position and the generic vectors, whose planes are not known')
+    planes = [-3] * (code[0x35] >> 3 & 1) + [c for c in range(4) if code[0x35] >> (4 + c) & 1] + [4 + i for i in range(128) if code[0x36 + i // 8] >> (i % 8) & 1]
     layout = [maxv, maxp, payload, *planes]
     flats, reads = set(), set()
     for ps in pairs:
