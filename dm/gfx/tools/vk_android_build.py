@@ -543,6 +543,8 @@ def finish(key, w, job, c1):
     dropped = spv.strip_unused_caps(m)
     added = spv.formatless_storage_caps(m)
     n_precise = spv.precise_minmax(m)
+    try: spv.compact_hmma(m)
+    except ValueError as e: return 'tensor helper rewrite failed', str(e)[:160], None
     binds = [classify(stage, r, res, m) for r in m.resources()]
     storage_slots(stage, binds, res)
     try: place(stage, binds, m)
