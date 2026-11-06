@@ -939,8 +939,16 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
         r = VK_ERROR_FEATURE_NOT_PRESENT; over = 1;
         static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute program %016llx takes %u bytes of shared memory, the device at most %u: not made, its dispatches are skipped (the first 16 are logged; the count is in the pipeline line)", (unsigned long long)cs->key, cs->e->shared, smax);
     } else {
+        // Log before entering the compiler too: a driver allocation failure can crash before it returns a result. Bounded to the first 64 creations when enabled.
+        static _Atomic unsigned compile_trace_count;
+        unsigned trace = VKA_ENV("DM_VK_CS_COMPILE_LOG", 0) ? atomic_fetch_add(&compile_trace_count, 1) + 1 : 0;
+        if (trace && trace <= 64) VLOG("compute compile begin %u: key %016llx module %#llx layout %#llx local %u,%u,%u shared %u bindings %u flags %#x pin %u prewarm %d tid %d",
+            trace, (unsigned long long)cs->key, (unsigned long long)(uintptr_t)ci.stage.module, (unsigned long long)(uintptr_t)ci.layout,
+            cs->e->local[0], cs->e->local[1], cs->e->local[2], cs->e->shared, cs->e->bind_count, cs->e->flags, pin, prewarm, (int)gettid());
         if (cs->xform) VLOG("mesh draws as compute: making the pipeline of %s shader %016llx's compute twin", cs->xform == VKA_XF_TASK ? "task" : "mesh", (unsigned long long)cs->key);
         r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, &ci, NULL, &p);
+        if (trace && trace <= 64) VLOG("compute compile end %u: key %016llx result %d pipeline %#llx %.1f ms", trace, (unsigned long long)cs->key,
+            (int)r, (unsigned long long)(uintptr_t)p, (now_ns() - t0) / 1e6);
         if (cs->xform) VLOG("mesh draws as compute: %016llx's pipeline %s in %.1f ms", (unsigned long long)cs->key, r ? "failed" : "made", (now_ns() - t0) / 1e6);
     }
     pthread_mutex_lock(&g_mu);
