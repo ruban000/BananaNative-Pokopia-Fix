@@ -19,7 +19,8 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
     // The layout (IGpuAccessor.QueryMeshShaderLayout, the job's "mesh"): max vertices, max primitives, payload bytes, the per-vertex plane codes in the order of the
     // planes (the SPH's output map: 0-3 position x y z w, 4 + 4 g + c generic g component c), then optionally -1 and the per-primitive value codes (same numbering,
     // generic only; -3 for a value the program writes that no output takes: the count sets the chunk stride, values x 0x80), then optionally -2 and the generic locations to declare as per-vertex outputs although the program writes none of their components (the
-    // pixel shader reads them: they hold (0, 0, 0, 1))
+    // pixel shader reads them: they hold (0, 0, 0, 1)). A per-vertex plane may be -3 too: the point size (SPH output map byte 0x35 bit 3), which triangles do not use (Ocarina of Time's
+    // 5 Foliage and AglShader mesh programs write it as their first plane)
     class MeshShaderInfo
     {
         public const string PayloadName = "task_payload";
@@ -76,8 +77,8 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     throw new NotSupportedException($"mesh program with {MaxVertices} vertices / {MaxPrimitives} primitives at most (1-256 each)");
                 }
 
-                if (Planes.Any(p => p < 0 || p >= 4 + 4 * 32) || PrimitivePlanes.Any(p => p != NoOutput && (p < 4 || p >= 4 + 4 * 32)) || PadLocations.Any(g => g < 0 || g >= 32) ||
-                    Planes.Distinct().Count() != Planes.Length || PrimitivePlanes.Where(p => p != NoOutput).Distinct().Count() != PrimitivePlanes.Count(p => p != NoOutput))
+                if (Planes.Any(p => p != NoOutput && (p < 0 || p >= 4 + 4 * 32)) || PrimitivePlanes.Any(p => p != NoOutput && (p < 4 || p >= 4 + 4 * 32)) || PadLocations.Any(g => g < 0 || g >= 32) ||
+                    Planes.Where(p => p != NoOutput).Distinct().Count() != Planes.Count(p => p != NoOutput) || PrimitivePlanes.Where(p => p != NoOutput).Distinct().Count() != PrimitivePlanes.Count(p => p != NoOutput))
                 {
                     throw new NotSupportedException($"mesh layout with a plane code out of range or repeated ({string.Join(", ", layout)})");
                 }
