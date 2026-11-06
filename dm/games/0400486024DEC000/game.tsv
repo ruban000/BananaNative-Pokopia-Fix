@@ -51,3 +51,8 @@ shader_note	The Legend of Zelda: Ocarina of Time shaders
 # ---- Graphics ----
 # agl's render buffer binding: Donkey Kong Bananza's clears are wrapped in render conditions (its game.tsv); the same engine, not yet checked on this game
 render_cond	on
+# Window size (the note, Window size and dynamic resolution): main+0x112c5e0 takes the output size from a table of u32 pairs at main+0x3f58540 (640x480 ... 3840x2160) by operation
+# mode and nn::oe::GetCurrentGraphicsScale (docked: 6 - scale, the host's scale 1 = entry 5, 2560x1440; handheld: 1920x1080 or 1280x720); DM_WINDOW_SIZE writes the docked entry
+window_fn	e0f3ccfaf50065ae4ea01eb5aeb13b1a	pair	0x3f58568	2560x1440
+# The dynamic-resolution controller main+0x805aa0: tbz w8,#0 on its enable bit at main+0x805bd0; b main+0x80640c takes its own disabled branch (scale 1.0). DM_DYNAMIC_RES=off only
+dynres_fn	e0f3ccfaf50065ae4ea01eb5aeb13b1a	0x805bd0	360041e8	1400020f
