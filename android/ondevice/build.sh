@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Builds the on-device packer's native side (android/ONDEVICE.md) on the Mac or on Linux x86_64 (one bash script for both), the stage the APK takes (build.gradle -PnxPackStage=<work dir>/stage):
 #   python: the official CPython 3.14 Android build, Capstone 5 and python-lz4 built with the NDK, and libnxpack.so (dm_pack.c)
-#   tools:  the translator (dm/gfx/tools/dmsh_xlate_android/build.sh lib: libdmsh_xlate.so, NativeAOT, .NET 10 SDK) and SPIRV-Tools' validator
-#           (build_spirv_tools.sh: libSPIRV-Tools-shared.so), which vk_android_build.py loads through ctypes on the phone
+#   tools:  the translator (dm/gfx/tools/dmsh_xlate_android/build.sh lib: libdmsh_xlate.so, NativeAOT, .NET 10 SDK) and SPIRV-Tools' validator and optimizer
+#           (build_spirv_tools.sh: libSPIRV-Tools-shared.so, libSPIRV-Tools-opt.so, libSPIRV-Tools.so, libc++_shared.so), loaded through ctypes on the phone
 # Usage: build.sh <work dir> [all|python|tools]   (default all; downloads and intermediate files go into the work dir: put it on the dump drive, not in the home folder)
 # → <work dir>/stage/
-#     lib/libpython3.14.so, libnxpack.so, libdmsh_xlate.so, libSPIRV-Tools-shared.so   the app's jniLibs (arm64-v8a)
+#     lib/libpython3.14.so, libnxpack.so, libdmsh_xlate.so and the four SPIRV-Tools libraries above   the app's jniLibs (arm64-v8a)
 #     python/lib/python3.14/                   the Python home: the standard library with lib-dynload/, site-packages/capstone (+ lib/libcapstone.so), site-packages/lz4
 #     bin/dm_pack_cli                          the adb shell test runner (dm_pack_cli.c)
 # The sources are pinned by version and SHA-256 (below; SPIRV-Tools by its Vulkan SDK tag); a mismatch stops the build. "python" makes the stage afresh, so run
@@ -64,6 +64,6 @@ if [[ $WHAT == all || $WHAT == tools ]]; then
   G=$HERE/../../dm/gfx/tools/dmsh_xlate_android
   bash $G/build.sh $W/xlate lib > $W/xlate.log 2>&1 || { tail -20 $W/xlate.log; echo "[RED] the translator did not build (log: $W/xlate.log)"; exit 1; }
   bash $G/build_spirv_tools.sh $W/spvtools > $W/spvtools.log 2>&1 || { tail -20 $W/spvtools.log; echo "[RED] SPIRV-Tools did not build (log: $W/spvtools.log)"; exit 1; }
-  cp $W/xlate/lib/libdmsh_xlate.so $W/spvtools/libSPIRV-Tools-shared.so $S/lib/
+  cp $W/xlate/lib/libdmsh_xlate.so $W/spvtools/libSPIRV-Tools-shared.so $W/spvtools/libSPIRV-Tools-opt.so $W/spvtools/libSPIRV-Tools.so $W/spvtools/libc++_shared.so $S/lib/
 fi
 du -sh $S/lib/* $S/python $S/bin/*

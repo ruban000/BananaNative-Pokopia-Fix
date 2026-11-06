@@ -152,7 +152,7 @@ tasks.register('apk', Copy) {
 // The on-device packer's native side (android/ONDEVICE.md "In the APK"; not with -PnxPackEngine=fake). android/ondevice/build.sh makes its stage on the Mac;
 // -PnxPackStage=<that stage> (or the environment's NX_PACK_STAGE) names it. Into the APK go:
 //   lib/arm64-v8a/libpython3.14.so, libnxpack.so      (jniLibs: loaded by PackNative in the :pack process only)
-//   lib/arm64-v8a/libdmsh_xlate.so, libSPIRV-Tools-shared.so   the translator and the validator, which vk_android_build.py loads through ctypes in that process
+//   lib/arm64-v8a/libdmsh_xlate.so, libSPIRV-Tools{,-shared,-opt}.so, libc++_shared.so   translator, validator, optimizer and their runtime dependencies
 //   assets/pack/python.zip   the Python home (lib/python3.14 with lib-dynload, capstone, lz4), unpacked to filesDir by PackNative
 //   assets/pack/tools.zip    the repository's tools the job runs (scripts, dm/tools, dm/games/<game>, dm/gfx/tools without the Mac binaries, and the other sources DMSH_CHAIN
 //                            hashes), likewise
@@ -162,10 +162,10 @@ if (nxPackEngine == 'native') {
     if (!stageProp) throw new GradleException('The APK carries the on-device packer: pass -PnxPackStage=<android/ondevice/build.sh work dir>/stage (or set NX_PACK_STAGE); -PnxPackEngine=fake builds a simulated one instead')
     def stage = file(stageProp)
     def nxPack = layout.buildDirectory.dir('nxpack')
-    def need = ['lib/libpython3.14.so', 'lib/libnxpack.so', 'lib/libdmsh_xlate.so', 'lib/libSPIRV-Tools-shared.so', 'python/lib/python3.14/os.py']
+    def need = ['lib/libpython3.14.so', 'lib/libnxpack.so', 'lib/libdmsh_xlate.so', 'lib/libSPIRV-Tools-shared.so', 'lib/libSPIRV-Tools-opt.so', 'lib/libSPIRV-Tools.so', 'lib/libc++_shared.so', 'python/lib/python3.14/os.py']
     need.each { if (!new File(stage, it).isFile()) throw new GradleException("$stage has no $it: run android/ondevice/build.sh <work dir> (it makes <work dir>/stage)") }
     def jni = tasks.register('nxPackJni', Sync) {
-        from(new File(stage, 'lib')) { include 'libpython3.14.so', 'libnxpack.so', 'libdmsh_xlate.so', 'libSPIRV-Tools-shared.so' }
+        from(new File(stage, 'lib')) { include 'libpython3.14.so', 'libnxpack.so', 'libdmsh_xlate.so', 'libSPIRV-Tools-shared.so', 'libSPIRV-Tools-opt.so', 'libSPIRV-Tools.so', 'libc++_shared.so' }
         into nxPack.map { it.dir('jni/arm64-v8a') }
     }
     def pyZip = tasks.register('nxPackPython', Zip) {

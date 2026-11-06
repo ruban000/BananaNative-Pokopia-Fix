@@ -425,6 +425,7 @@ public final class PackService extends Service {
         PackEngine.setenv("DMSH_VK_RESULTS", xlate.getPath());
         PackEngine.setenv("XLATE", "libdmsh_xlate.so");
         PackEngine.setenv("SPIRV_VAL", "libSPIRV-Tools-shared.so");
+        PackEngine.setenv("SPIRV_OPT", "libSPIRV-Tools-opt.so");
         PackEngine.setenv("DMSH_VK_REQUIRE_ALL", "1");   // a library without every shader is a failed step, never a finished one
         PackEngine.setenv("DMSH_VK_XLATE_J", "1");       // one translator call at a time (one thread was faster on the phone); the env file below can change it
         // Tests: ondevice/env.txt, KEY=VALUE lines, overrides any of the above for the tools (e.g. DMSH_VK_XLATE_J=6 to compare the translator's threads)
