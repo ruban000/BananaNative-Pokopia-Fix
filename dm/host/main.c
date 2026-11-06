@@ -13,6 +13,7 @@ static void *req(const char *n){ void *p=guest_sym(n); if(!p) die("missing symbo
 static char *g_argv[64] = {"game"}; static int g_argc = 1;
 
 static void guest_main(void) {
+    dm_pac_guest(1);   // the guest's pointer authentication keys (thread.c); switched back before this function returns to the host's frames, which signed with them
     guest_thread_init();
     guest_gate_stack(0);   // the guest code runs on this thread's own stack: its SVCs get a stack of their own
     { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(0); }   // DM_OODLE_SERVE tool mode: the game's own Oodle decoder over stdin / stdout (hle_oodle.c, exits when the input ends)
@@ -35,6 +36,7 @@ static void guest_main(void) {
     { void dm_oodle_job_maybe(void); dm_oodle_job_maybe(); }   // DM_OODLE_JOB: decode a job file with the game's own Oodle and exit (hle_oodle.c, for the offline shader tools)
     LOG(">>> nnMain"); ((fn0)req("nnMain"))();
     LOG("nnMain returned");
+    dm_pac_guest(0);
 }
 
 struct dm_flags g_flag;

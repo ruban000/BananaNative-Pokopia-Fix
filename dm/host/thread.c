@@ -4,6 +4,7 @@
 // written in, and its ID once the thread table has one (guest_thread_set_id)
 #include "dm.h"
 #include <sys/mman.h>
+#include <stdatomic.h>
 #define TLS_SIZE 8192
 #define TLR_SIZE 0x200
 #define THREAD_OBJ_SIZE 0x400
@@ -26,6 +27,46 @@ void guest_thread_init(void) {
     void **prev = pthread_getspecific(g_keyown); if (prev) own_free(prev);   // re-initialised on the same thread: free the previous set first (the new one is what the slots now point to)
     pthread_setspecific(g_keyown, own);
 }
+// Pointer authentication keys of guest threads (Android on arm64 with PAuth). Horizon gives a process one set of keys; the guest relies on it across threads: SDK 22's fibers
+// (nn::os::detail::FiberImplByHorizon::Initialize, sdk+0x16d0d0 in 22.2.8) sign a new fiber's entry with pacia on the creating thread, and DispatchFiberContext (sdk+0x16d214)
+// authenticates it with autiasp, and a suspended fiber's return with autib, on whichever thread switches to it. On the phone that check failed (SIGILL at autiasp, sdk+0x16d40c,
+// Ocarina of Time's nn.npln.Worker) although the context's own pacga signature matched: the A key the signing thread used was not the switching thread's. The host cannot
+// give its threads one key (Linux keeps them per thread and can only reset them to random values), so guest threads run with the instruction keys A and B switched off
+// (PR_PAC_SET_ENABLED_KEYS): pacia / pacib / autia / autib / retab then leave pointers as they are on every guest thread, consistently. The generic key (pacga) is not affected
+// and is the same on every thread. dm_pac_guest(1) on a guest thread's own start (its earlier frames never return: thread_main, or guest_main which calls dm_pac_guest(0) before it
+// returns); DM_PAC_KEYS=1 keeps the keys on. Each thread's key fingerprint is compared with the first guest thread's, and a difference is logged (the evidence for the above).
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#include <sys/prctl.h>
+#ifndef PR_PAC_SET_ENABLED_KEYS
+#define PR_PAC_SET_ENABLED_KEYS 60
+#endif
+#define PAC_IA (1ul << 0)
+#define PAC_IB (1ul << 1)
+static void pac_fingerprint(uint64_t fp[3]) {   // pacia1716 / pacib1716 (hints: no-ops with the key off) and pacga x16, x16, x17 on fixed inputs
+    register uint64_t x16 __asm__("x16"), x17 __asm__("x17");
+    x16 = 0x55; x17 = 0x1000; __asm__ volatile(".inst 0xd503211f" : "+r"(x17) : "r"(x16)); fp[0] = x17;   // pacia1716: x17 signed with modifier x16, key IA
+    x16 = 0x55; x17 = 0x1000; __asm__ volatile(".inst 0xd503215f" : "+r"(x17) : "r"(x16)); fp[1] = x17;   // pacib1716
+    x16 = 0x1000; x17 = 0x55; __asm__ volatile(".inst 0x9ad13210" : "+r"(x16) : "r"(x17)); fp[2] = x16;   // pacga x16, x16, x17
+}
+void dm_pac_guest(int on) {
+    static int has = -1, keep;
+    if (has < 0) { unsigned long hw = getauxval(AT_HWCAP); has = (hw >> 30 & 1) && (hw >> 31 & 1); const char *e = getenv("DM_PAC_KEYS"); keep = e && atoi(e); }   // HWCAP_PACA, HWCAP_PACG
+    if (!has) return;
+    if (on) {
+        static uint64_t first[3]; static _Atomic int set, nlog;
+        uint64_t fp[3]; pac_fingerprint(fp);
+        if (!atomic_exchange(&set, 1)) { memcpy(first, fp, sizeof fp); LOG("PAC: guest threads run with the instruction keys A and B %s (DM_PAC_KEYS=1 keeps them)", keep ? "on" : "off"); }
+        else if (memcmp(first, fp, sizeof fp) && atomic_fetch_add(&nlog, 1) < 8)
+            LOG("[RED] PAC: this guest thread's keys differ from the first guest thread's (A %s, B %s, generic %s)", fp[0] == first[0] ? "same" : "different",
+                fp[1] == first[1] ? "same" : "different", fp[2] == first[2] ? "same" : "different");
+    }
+    if (keep) return;
+    if (prctl(PR_PAC_SET_ENABLED_KEYS, PAC_IA | PAC_IB, on ? 0 : PAC_IA | PAC_IB, 0, 0)) { static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("[RED] PAC: PR_PAC_SET_ENABLED_KEYS failed (errno %d): guest threads keep their own keys", errno); }
+}
+#else
+void dm_pac_guest(int on) { (void)on; }
+#endif
 // The thread's kernel ID at TLR[0x110], the one svcGetThreadId answers (hle_thread.c's thr_t id, never 0: 0 is the owner word of an unlocked mutex). Without it every
 // unlocked SDK 22 mutex reads as the caller's and the first heap lock aborts (docs/reference/threads.md)
 void guest_thread_set_id(uint64_t id) { *(uint32_t *)((uint8_t *)dm_slot_get(tlr) + 0x110) = (uint32_t)id; }
