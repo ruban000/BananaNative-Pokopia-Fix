@@ -32,6 +32,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x111, InstName.F2i, AF2i64);
             alu(0x112, InstName.I2f, AI2f64);
             alu(0x045, InstName.I2f, AI2fp);
+            alu(0x043, InstName.F2i, AF2ip);
             alu(0x107, InstName.F2f, AFrnd);
             alu(0x104, InstName.F2f, AF2f);
             alu(0x03e, InstName.F2f, AF2fp);
@@ -275,6 +276,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Operand r = Register(x.Rd, RegisterType.Gpr);
                 context.Copy(r, signed ? context.IClampS32(r, Const(-128), Const(127)) : context.IClampU32(r, Const(0), Const(255)));
             }
+        }
+
+        // F2IP.{U8,S8}.F32 Rd, Ra, b, Rc (0x243 and its other forms): two floats converted to bytes and packed, b's byte in bits 0..7 and Ra's in bits 8..15. Fields (nvdisasm -b SM86, one
+        // bit flipped at a time on Ocarina of Time's encodings): Rc 64..71 with .H1 at 72, .NTZ 74, .RELU 75, .S8 76, rounding 78..79 (0 nearest even, 3 .TRUNC; 1 and 2 are invalid). Each byte is
+        // the float rounded and saturated to the byte's range, NaN 0 under .NTZ. Rc would fill bits 16..31 as PTX's cvt.pack does ({c, a, b}); only RZ occurs, and other Rc are refused. Ocarina of
+        // Time packs unorm colours already scaled by 255 with it (10 compute programs: F2IP.U8.F32.NTZ R39, R44, R39, RZ, then PRMT 0x5410 of two of them; 8 mesh programs: .TRUNC with Ra = RZ).
+        // The byte order and the rounding agree with Lichii's lowering (src/shader_recompiler/frontend/ampere/lower_to_maxwell.h, case 0x243, commit f356d39ba3, GPL-3.0-or-later)
+        public static void AF2ip(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+            int round = x.Bits(78, 80);
+
+            if (!c.IsZeroReg || x.Bit(73) || !x.Bit(74) || x.Bit(77) || round is 1 or 2)
+            {
+                throw AFail(context, "F2IP form other than .NTZ to a byte pair with Rc = RZ");
+            }
+
+            bool signed = x.Bit(76);
+            float lo = signed && !x.Bit(75) ? -128f : 0f, hi = signed ? 127f : 255f;
+
+            Operand Byte(ASrc s)
+            {
+                Operand f = AFloat(context, s);
+                Operand r = round == 0 ? context.FPRound(f) : context.FPTruncate(f);
+                Operand i = context.FP32ConvertToS32(context.FPMinimum(context.FPMaximum(r, ConstF(lo)), ConstF(hi)));
+
+                return context.BitwiseAnd(context.ConditionalSelect(context.IsNan(f), Const(0), i), Const(0xff));
+            }
+
+            Operand low = Byte(b);
+
+            ASet(context, x, a.IsZeroReg ? low : context.BitwiseOr(low, context.ShiftLeft(Byte(a), Const(8))));
         }
 
         // I2F: source signed (74) and size (84..86), destination size (75..77), byte / half select of a narrow source (60..62)
