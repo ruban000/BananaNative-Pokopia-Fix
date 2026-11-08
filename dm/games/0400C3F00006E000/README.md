@@ -15,17 +15,21 @@ A Switch 2 game: version 1.8.0, from a dump of one Application content (version 
 
 ## Builds
 
+Two builds of one game, both registered and treated alike (2026-11-08): nothing in the profile or the host is keyed to one of them, and a dump of either packs and plays.
+
 | Version | Display | Modules (build IDs) | Status |
 |---|---|---|---|
-| `v0` | 1.8.0 | main `d00e4f39…`, subsdk0 `746302f4…` (movie), subsdk1 `8dec9c0b…` (ecli), sdk `7a68b13d…` | registered (`build v0 1.8.0`); rewritten for Android, no cuts; pack in the work folder (`android-pack-1.8.0`, 244.9 MiB) |
-| `v0` (earlier dump) | not known (no control data) | main `9e244438c3d8ef1c703a6a85ef99c4f0`, subsdk0 `d39a7a3d44530bb61b35690e5b0383d5` (ecli), sdk `90ebba182862b9ecdc21fcb87b999012`, SDK 19.3.3 | no longer registered: both dumps are version 0, and a profile has one row a version. It had no build-keyed cuts, gates or host fixes, so nothing is lost; packing it now gives the "not the profile's build" red lines |
+| `v0` | 1.0.0 | main `9e244438c3d8ef1c703a6a85ef99c4f0`, subsdk0 `d39a7a3d44530bb61b35690e5b0383d5` (ecli), sdk `90ebba182862b9ecdc21fcb87b999012`, SDK 19.3.3 | **registered** (`build v0 1.0.0`): a dump of the base game with no separate update and no control data (the display version is the release's name; the SDK is that of the launch build). Run on the AYN Thor; no build-keyed cuts, gates or host fixes |
+| `v524288` | 1.8.0 | main `d00e4f399e411d0613aa8d26b1c02fef`, subsdk0 `746302f49f095cfca3d2188423c2bd77` (movie), subsdk1 `8dec9c0b1bed821364e77b10a07b9a28` (ecli), sdk `7a68b13d88183767fb9c7babffe89f3d`, SDK 21.4.0 | **registered** (`build v524288 1.8.0`); rewritten for Android, no cuts. It was `v0` before: a dump that keeps this code in `base/` is the same build all the same, because the launcher and the packer compare build IDs, not version numbers. Not run on the AYN Thor |
 
-The rewriter (`patch_nso.py --target android`) needs no cut on any 1.8.0 module ([Rewrite of 1.8.0](#rewrite-of-180)), and the profile has no `patches.py`: nothing was carried over with `nso_fnmap.py`. The addresses in this note from before 1.8.0 (`main+0x68524c`, `main+0xc10170`) are the earlier build's.
+The tables (`shader_map.tsv`, `shader_facts.tsv`, `pso_pairs.tsv`; `shader_pairs.tsv` is the same for both) are the union of the two builds' 11,714 shaders: 11,451 in both, 110 only in 1.0.0 and 153 only in 1.8.0. `shader_optional.tsv` names the 263 that only one build has, `key<TAB>build`; a dump of one build lacks the other's ([`dm/games/README.md`](../README.md)). A key both builds have keeps the 1.8.0 split's row and facts. Open: six keys have other facts in a 1.0.0 split (five texture formats the newer translator found, one mesh program's shader pair, which is a dump's own); they are not merged here.
+
+The rewriter (`patch_nso.py --target android`) needs no cut on any module of either build ([Rewrite of 1.8.0](#rewrite-of-180)), and the profile has no `patches.py`: nothing was carried over with `nso_fnmap.py`. The addresses in this note from before 1.8.0 (`main+0x68524c`, `main+0xc10170`) are 1.0.0's.
 
 ## Files
 
 - 1.8.0 dump: `ExeFS` (main, main.npdm, rtld, sdk, subsdk0, subsdk1), RomFS of 206,326 files (22.4 GB), `control.nacp` (display version 1.8.0) and the icon. The tools take a dump folder (`base/exefs`, `base/romfs`): links to the extraction in the work folder do.
-- Shaders: `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, as Donkey Kong Bananza. The tables (`shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv`) are from the 1.8.0 split: 11,604 shaders (compute 730, domain 13, pixel 7,301, vertex 3,560; the earlier build had 11,561). The Apple (Metal) libraries have not been built for either build, so the Mac host has no shaders.
+- Shaders: `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, as Donkey Kong Bananza. The tables (`shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv`) are the union of the two builds' splits ([Builds](#builds)): the 1.8.0 split's 11,604 shaders (compute 730, domain 13, pixel 7,301, vertex 3,560; the 1.0.0 build had 11,561) and the 110 only 1.0.0 has. The Apple (Metal) libraries have not been built for either build, so the Mac host has no shaders.
 - The shaders switch2mac lists as "run-time shaders" for 1.0.0 (321) are agl BAHS programs and a few BNSH the split already reads: `dm/gfx/tools/runtime_shaders.py` on 1.8.0 finds 11,604 NVN2 shaders in 103 files and `main`, pairs every NVN2 control section, and reproduces 300 of switch2mac's 321 keys (compute 95, pixel 119, vertex 81, and 5 mesh programs filed as domain); the other 21 are `Shader/Drive` shaders 1.8.0 changed. All 11,604 are in the 1.8.0 map ([NVN2 shaders bound at run time from agl's BAHS containers](../../../docs/reference/shaders.md#nvn2-shaders-bound-at-run-time-from-agls-bahs-containers)).
 - No file is missing at boot of the earlier build: the "not found" paths under `DM_FS=1` (`ProductME` heap table, `RSDB/FastTravel.*`, `Extended` performance config, some `Gyml` actor parameters) are probes for files it does not ship.
 

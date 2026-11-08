@@ -189,7 +189,11 @@ class Manifest(unittest.TestCase):
             self.assertEqual(delta.manifest_problems(text), [], f)
             m = delta.parse_manifest(text)
             self.assertEqual(m['game'], f.parent.name, f)
-            self.assertEqual(set(m['hashes']), profile_keys(f.parent), f'{f}: not the keys a phone builds (its shader_map.tsv, or its shader_seen.tsv with their pairs)')
+            keys = profile_keys(f.parent)
+            opt_file = f.parent / 'shader_optional.tsv'   # a game with several registered builds: the manifest of one build lacks the keys only the others have
+            opt = {l.split('\t')[0] for l in opt_file.read_text().splitlines() if l and not l.startswith('#')} if opt_file.is_file() else set()
+            have = set(m['hashes'])
+            self.assertTrue(have <= keys and not (keys - have - opt), f'{f}: not the keys a phone builds (its shader_map.tsv, or its shader_seen.tsv with their pairs; less the keys of shader_optional.tsv)')
             hdr = (REPO / 'dm/gfx/nvn/dmsh_chain_vk.h').read_text()
             if f'"{m["version"]}"' not in hdr: print(f'\n{f} is of version {m["version"]}, older than this tree\'s: phones make a full build until it is published again', file=sys.stderr)
             self.assertNotIn(m['version'], m['from'])
