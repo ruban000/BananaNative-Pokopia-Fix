@@ -278,39 +278,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // F2IP.{U8,S8}.F32 Rd, Ra, b, Rc (0x243 and its other forms): two floats converted to bytes and packed, b's byte in bits 0..7 and Ra's in bits 8..15. Fields (nvdisasm -b SM86, one
-        // bit flipped at a time on Ocarina of Time's encodings): Rc 64..71 with .H1 at 72, .NTZ 74, .RELU 75, .S8 76, rounding 78..79 (0 nearest even, 3 .TRUNC; 1 and 2 are invalid). Each byte is
-        // the float rounded and saturated to the byte's range, NaN 0 under .NTZ. Rc would fill bits 16..31 as PTX's cvt.pack does ({c, a, b}); only RZ occurs, and other Rc are refused. Ocarina of
-        // Time packs unorm colours already scaled by 255 with it (10 compute programs: F2IP.U8.F32.NTZ R39, R44, R39, RZ, then PRMT 0x5410 of two of them; 8 mesh programs: .TRUNC with Ra = RZ).
-        // The byte order and the rounding agree with Lichii's lowering (src/shader_recompiler/frontend/ampere/lower_to_maxwell.h, case 0x243, commit f356d39ba3, GPL-3.0-or-later)
-        public static void AF2ip(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
-            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
-            int round = x.Bits(78, 80);
-
-            if (!c.IsZeroReg || x.Bit(73) || !x.Bit(74) || x.Bit(77) || round is 1 or 2)
-            {
-                throw AFail(context, "F2IP form other than .NTZ to a byte pair with Rc = RZ");
-            }
-
-            bool signed = x.Bit(76);
-            float lo = signed && !x.Bit(75) ? -128f : 0f, hi = signed ? 127f : 255f;
-
-            Operand Byte(ASrc s)
-            {
-                Operand f = AFloat(context, s);
-                Operand r = round == 0 ? context.FPRound(f) : context.FPTruncate(f);
-                Operand i = context.FP32ConvertToS32(context.FPMinimum(context.FPMaximum(r, ConstF(lo)), ConstF(hi)));
-
-                return context.BitwiseAnd(context.ConditionalSelect(context.IsNan(f), Const(0), i), Const(0xff));
-            }
-
-            Operand low = Byte(b);
-
-            ASet(context, x, a.IsZeroReg ? low : context.BitwiseOr(low, context.ShiftLeft(Byte(a), Const(8))));
-        }
-
         // I2F: source signed (74) and size (84..86), destination size (75..77), byte / half select of a narrow source (60..62)
         public static void AI2f(EmitterContext context)
         {
@@ -388,6 +355,42 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand src = AGet(context, AOne(context, x, neg: false, abs: false));
 
             ASet(context, x, x.Bit(74) ? context.IConvertS32ToFP32(src) : context.IConvertU32ToFP32(src));
+        }
+
+        // F2IP.U8.F32.NTZ Rd, a, b, RZ (sm_86's float to integer convert and pack): a and b each rounded to an integer by F2I's mode (78..79: nearest even, floor, ceiling,
+        // truncation) and saturated to 0..255, NaN to 0, b in byte 0 and a in byte 1, the upper half zero; a = RZ leaves b alone in byte 0. The other fields follow F2I's:
+        // unsigned (72 clear), 8 bits (75..77 clear); 74 is set in every one met, the form NVIDIA prints .NTZ. The Legend of Zelda: Ocarina of Time's colour converters
+        // (99951da6e5cd38f5 +0x530 and nine others) quantize a block of BT.709 Y and CbCr values times 255 to the nearest, then join two results into four bytes with
+        // PRMT 0x5410 and store them: the pixels' bytes come out in x order only with b low. Its foliage mesh shaders (740e2b04db624fb1 +0x370 and seven others) convert one
+        // colour channel times 255 at a time with a = RZ and truncation (.TRUNC, 78..79 = 3), then shift the result by 16 or 24 into an RGBA8 word: b is in byte 0 there too.
+        // Any other encoding (a second form, C not RZ, other bits from 72 on) is refused rather than guessed
+        public static void AF2ip(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Form != 1 || x.Bits(40, 64) != 0 || x.Rc != RegisterConsts.RegisterZeroIndex || (x.Field(72, 96) & ~(3ul << 6)) != 1 << 2)
+            {
+                throw AFail(context, "F2IP other than .U8.F32.NTZ of two registers with RZ");
+            }
+
+            int round = x.Bits(78, 80);
+
+            Operand Byte(int reg)
+            {
+                Operand f = AGpr(reg);
+                Operand r = round switch
+                {
+                    0 => context.FPRound(f),
+                    1 => context.FPFloor(f),
+                    2 => context.FPCeiling(f),
+                    _ => context.FPTruncate(f),
+                };
+                Operand v = context.FPMinimum(context.FPMaximum(r, ConstF(0f)), ConstF(255f));
+
+                return context.ConditionalSelect(context.IsNan(f), Const(0), context.FP32ConvertToU32(v));
+            }
+
+            ASet(context, x, x.Ra == RegisterConsts.RegisterZeroIndex ? Byte(x.Rb) : context.BitwiseOr(context.ShiftLeft(Byte(x.Ra), Const(8)), Byte(x.Rb)));
         }
 
         // FRND: a float rounded to an integer value (78..80: nearest even, floor, ceiling, truncation)
@@ -1432,7 +1435,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return res;
         }
 
-        // VOTE / VOTEU Rd, Pd, P: Pd = the vote (72..74: all, any, equal) of P (87..90); Rd (a uniform register for VOTEU) the ballot
+        // VOTE Rd, Pd, P / VOTEU URd, UPd, P: Pd (81..84) = the vote (72..74: all, any, equal) of P (87..90), Rd the ballot; VOTEU writes the uniform register and the
+        // uniform predicate. P and the guard are lane predicates in both.
         public static void AVote(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -1443,7 +1447,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (vote != null)
             {
-                ASetPred(context, x.Bits(81, 84), vote);
+                ASetPred(context, x.Bits(81, 84), vote, toUniform);
             }
 
             int rd = ARd(x, toUniform);

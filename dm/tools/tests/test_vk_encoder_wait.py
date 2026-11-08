@@ -1,6 +1,10 @@
-"""Run the production encoder ring and futex handshake on Linux; mock only driver calls and AArch64 WFE."""
+"""Run the production encoder ring and futex handshake on Linux; mock only driver calls and AArch64 WFE.
+
+By Nociif, from 71f6a73a on branch fix/mkw of inazuma2k8/BananaNative, without its DM_VK_ENC_WAKE part (not in this change).
+"""
 from pathlib import Path
 import shutil
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 class EncoderWait(unittest.TestCase):
     @unittest.skipUnless(shutil.which("cc"), "C compiler required")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs Linux (linux/futex.h, the encoder's futex)")
     def test_ring_sleep_flush_and_wrap(self):
         src = (ROOT / "dm/gfx/vk_android/vka_enc.c").read_text()
         ring = src[src.index("enum { RING ="):src.index("// ---------- The records:")]
@@ -85,13 +90,12 @@ class EncoderWait(unittest.TestCase):
             record(0); assert(atomic_load(&g_head) == 0);
             wait_tail(g_ph); idle();
             assert(atomic_load(&monitor_waits) == before);
-            // Wake a sleeping consumer with a worthwhile batch; flush remains mandatory.
-            g_wake = 32768;
+            // Wake a sleeping consumer with a run of batches; the flush at the wait stays mandatory.
             uint64_t seq = 1;
             for (; seq < 500; seq++) record(seq);
             wait_tail(g_ph); idle();
             // Many transitions between idle, publishing, and producer tail waits.
-            g_batch = 0; g_wake = 0;
+            g_batch = 0;
             for (; seq < 20000; seq++) {
                 if (!(seq % 97)) atomic_store_explicit(&g_spin_ns, seq % 2 ? 200000 : 0, memory_order_relaxed);
                 record(seq);

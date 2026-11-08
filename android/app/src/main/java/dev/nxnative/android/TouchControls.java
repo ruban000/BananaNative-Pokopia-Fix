@@ -13,6 +13,8 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
@@ -25,6 +27,9 @@ import java.util.Arrays;
  * touchscreen. The view reads back what each control holds to draw it and to give a haptic tick on each press.
  * The small button at the top centre shows or hides the controls; holding it opens the settings (opacity, size, vibration). They hide by themselves while a gamepad is
  * connected and come back when the last one goes.
+ * The "On-screen controls" setting (Settings, the in-game panel; for every game): Auto (the default) draws nothing while a gamepad is connected, not even the show /
+ * hide button or the panel's handle (Back or the gamepad's Home button opens the panel), and everything comes back when the last one goes; On keeps them with a gamepad
+ * too; Off never draws them, and every touch is the game's touchscreen.
  */
 final class TouchControls extends View {
     // DM_BTN_* (dm/host/dm_input.h, nn::hid::NpadButton order)
@@ -37,6 +42,7 @@ final class TouchControls extends View {
     private SharedPreferences prefs() { return Prefs.open(getContext(), "touch_controls"); }   // read again when the other process wrote it (Prefs.open)
     private boolean available;     // the host takes a layout (nxhost_touch_controls_set): the controls can be drawn
     private boolean shown = true, gamepad;
+    private int mode = MODE_AUTO;   // the "On-screen controls" setting (setMode)
     private float opacity, scale;
     private boolean haptics;
 
@@ -57,6 +63,16 @@ final class TouchControls extends View {
     private String prof;
     private final float[] gdx = new float[GROUPS], gdy = new float[GROUPS], gsc = new float[GROUPS];
     private float placeX = 0.5f, placeY = 0.5f;
+    private boolean stretch;   // the replay stretches the picture over the whole view (DM_VK_STRETCH)
+    private int pictureSize = PictureFit.SIZE_MAX;   // the picture's share of its fitted or stretched size (DM_VK_PICTURE_SIZE), %
+    /** Stretch to screen and the picture size (GameActivity: from the game's environment at start, and the in-game panel's Picture rows while it runs, which send the
+     *  host the same values): touches map to the rectangle the present draws (PictureFit.rect) */
+    void setPicture(boolean on, int sizePct) {
+        int sz = PictureFit.size(sizePct);
+        if (stretch == on && pictureSize == sz) return;
+        stretch = on; pictureSize = sz;
+        layout(getWidth(), getHeight()); invalidate();
+    }
     private final RectF[] gbox = new RectF[GROUPS];
     // The layout editor (startEditLayout): touches move the groups and the picture instead of going to the host
     private boolean editing;
@@ -88,22 +104,36 @@ final class TouchControls extends View {
         setHapticFeedbackEnabled(true);
     }
 
-    /** The game's picture in the view (normalized), as the replay letterboxes it: 16:9 at its full size, at (px, py) of the free space (0.5: centred) */
-    static float[] picture(int w, int h, float px, float py) {
-        float pw = 1, ph = 1;
-        if (w * 9f > h * 16f) pw = h * 16f / 9f / w; else ph = w * 9f / 16f / h;
-        return new float[] {(1 - pw) * px, (1 - ph) * py, pw, ph};
-    }
 
     /** A gamepad connected (the controls hide) or the last one gone (they come back, unless the user hid them) */
     void setGamepad(boolean connected) {
         if (gamepad == connected) return;
         gamepad = connected;
         Native.note("on-screen controls " + (active() ? "shown" : "hidden") + (connected ? ": a gamepad is connected" : ": no gamepad"));
+        tell();
         apply();
     }
 
-    private boolean active() { return available && shown && !gamepad; }
+    private boolean active() { return visible() && shown && (mode == MODE_ON || !gamepad); }
+
+    static final int MODE_AUTO = 0, MODE_ON = 1, MODE_OFF = 2;
+    static final String[] MODE_NAMES = {"Auto", "On", "Off"};
+    /** The "On-screen controls" setting, kept for every game: Auto (hidden while a gamepad is connected), On or Off */
+    static int mode(Context c) { int m = Prefs.open(c, "touch_controls").getInt("mode", MODE_AUTO); return m >= 0 && m < MODE_NAMES.length ? m : MODE_AUTO; }
+    static void mode(Context c, int m) { Prefs.open(c, "touch_controls").edit().putInt("mode", m).commit(); }
+
+    /** Whether anything is drawn, the show / hide button included; onSwitch gets each change (GameActivity: the panel's handle) */
+    private boolean visible() { return available && (mode == MODE_ON || mode == MODE_AUTO && !gamepad); }
+    java.util.function.Consumer<Boolean> onSwitch;
+    private boolean told = true;
+    private void tell() { boolean v = mode == MODE_ON || mode == MODE_AUTO && !gamepad; if (v != told) { told = v; if (onSwitch != null) onSwitch.accept(v); } }
+
+    void setMode(int m) {
+        mode = m;
+        Native.note("on-screen controls: " + MODE_NAMES[m] + " (" + (active() ? "shown" : "hidden") + ")");
+        tell();
+        apply();
+    }
 
     private void apply() {
         if (input) Native.touchControlsEnable(active() && !editing);   // off: every touch in the picture is the game's touchscreen
@@ -112,8 +142,7 @@ final class TouchControls extends View {
     }
 
     private void toggle() {
-        if (gamepad) { gamepad = false; shown = true; }   // the user wants them back with a gamepad connected
-        else shown = !shown;
+        shown = !shown;
         prefs().edit().putBoolean("shown", shown).commit();
         Native.note("on-screen controls " + (active() ? "shown" : "hidden") + " by the user");
         apply();
@@ -144,7 +173,7 @@ final class TouchControls extends View {
         float dp = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1, getResources().getDisplayMetrics()), u = unit();
         String key = Math.round(w / u / 40) + "x" + Math.round(h / u / 40);
         if (!key.equals(prof)) { prof = key; load(); }   // a new screen shape (a fold, an unfold): its own layout
-        float[] p = picture(w, h, placeX, placeY);
+        float[] p = PictureFit.rect(w, h, placeX, placeY, stretch, pictureSize);
         picX = p[0]; picY = p[1]; picW = p[2]; picH = p[3];
         if (input) { Native.picturePlace(placeX, placeY); Native.touchLayout(w, h, picX, picY, picW, picH); }
         // On a short screen (under 340 units high) everything shrinks with it
@@ -202,7 +231,8 @@ final class TouchControls extends View {
         available = kept == n;
         if (!available && was != available) Native.note("on-screen controls: this host takes no layout (" + kept + "): not drawn");
         if (!editing) Native.note(String.format(java.util.Locale.ROOT, "on-screen controls: %d in a %dx%d view (%.1f dp high, %.2f px a unit, band from y %.0f, screen %s%s), picture x %.3f y %.3f, size %.2f, opacity %.2f, %s",
-                n, w, h, h / dp, u, y0, prof, custom() ? ", the user's layout" : "", picX, picY, scale, opacity, active() ? "shown" : "hidden"));
+                n, w, h, h / dp, u, y0, prof, custom() ? ", the user's layout" : "", picX, picY, scale, opacity, active() ? "shown" : "hidden")
+                + (stretch || pictureSize < PictureFit.SIZE_MAX ? ", picture " + (stretch ? "stretched" : "fitted") + " at " + pictureSize + " %" : ""));
         apply();
     }
 
@@ -296,26 +326,23 @@ final class TouchControls extends View {
         relayout(); saveLayout();
     }
 
-    /** The rows for the layout, for the controls' settings: the picture's position and the editor (which runs onEditStart) */
-    void layoutRows(Context ctx, LinearLayout box) {
+    /** The picture's position on this screen (the in-game panel's Picture rows): Top / Centre / Bottom of the free space */
+    void positionRows(Context ctx, LinearLayout box) {
         TextView t = new TextView(ctx);
-        t.setText("Picture position (this screen)");
+        t.setText("Position (this screen)");
         android.widget.RadioGroup rg = new android.widget.RadioGroup(ctx);
         rg.setOrientation(LinearLayout.HORIZONTAL);
         String[] names = {"Top", "Centre", "Bottom"};
         float[] at = {0, 0.5f, 1};
         for (int i = 0; i < 3; i++) {
             android.widget.RadioButton b = new android.widget.RadioButton(ctx);
-            b.setText(names[i]); b.setId(View.generateViewId());
+            b.setText(names[i]); b.setId(4100 + i);   // fixed: the panel is built again on each open and each look change (generateViewId would climb into the other rows' ids)
             rg.addView(b);
             if (Math.abs(placeY - at[i]) < 0.01f) b.setChecked(true);
             float y = at[i];
             b.setOnCheckedChangeListener((v, on) -> { if (on) setPicturePosition(y); });
         }
-        android.widget.Button ed = new android.widget.Button(ctx);
-        ed.setText("Edit the controls layout…");
-        ed.setOnClickListener(v -> startEditLayout());
-        box.addView(t); box.addView(rg); box.addView(ed);
+        box.addView(t); box.addView(rg);
     }
 
     // ---- The editor's touches ----
@@ -392,7 +419,7 @@ final class TouchControls extends View {
     // ---- Touches: the show / hide button is the launcher's; every other pointer goes to the host ----
     private void send(int action, int id, float x, float y) { if (input) Native.touch(action, id, x / getWidth(), y / getHeight()); }
 
-    private boolean onToggle(float x, float y) { float dx = x - tx, dy = y - ty, g = tr * 1.6f; return available && dx * dx + dy * dy <= g * g; }
+    private boolean onToggle(float x, float y) { float dx = x - tx, dy = y - ty, g = tr * 1.6f; return visible() && dx * dx + dy * dy <= g * g; }
 
     @Override public boolean onTouchEvent(MotionEvent e) {
         if (editing) return editTouch(e);
@@ -456,7 +483,7 @@ final class TouchControls extends View {
     private int alpha(float a) { return Math.max(0, Math.min(255, Math.round(255 * a * opacity))); }
 
     @Override protected void onDraw(Canvas c) {
-        if (!available) return;
+        if (!available || !visible() && !editing) return;
         float dp = getResources().getDisplayMetrics().density;
         line.setStrokeWidth(Math.max(1.5f, 1.6f * dp));
         if (editing) { drawControls(c); drawEditor(c, dp); return; }
@@ -571,13 +598,20 @@ final class TouchControls extends View {
     Runnable openSettings;
     private void settings() { if (openSettings != null) openSettings.run(); }
 
-    /** The on-screen controls' rows of the in-game panel: opacity, size, the haptic tick, the log over the game, and Reset */
+    /** The on-screen controls' rows of the in-game panel: Auto / On / Off, opacity, size, the haptic tick, the log over the game, Reset and the layout editor; each applies at once (kept for every game) */
     void controlRows(Context ctx, LinearLayout box) {
+        RadioGroup mg = new RadioGroup(ctx);
+        mg.setOrientation(RadioGroup.HORIZONTAL);
+        for (int i = 0; i < MODE_NAMES.length; i++) { RadioButton b = new RadioButton(ctx); b.setId(4000 + i); b.setText(MODE_NAMES[i]); mg.addView(b); }
+        mg.check(4000 + mode);
+        mg.setOnCheckedChangeListener((g, id) -> { mode(ctx, id - 4000); setMode(id - 4000); });
+        box.addView(mg);
         TextView ol = new TextView(ctx), sl = new TextView(ctx);
         SeekBar os = new SeekBar(ctx), ss = new SeekBar(ctx);
         CheckBox hb = new CheckBox(ctx), lb = new CheckBox(ctx);
         os.setMax(90); os.setProgress(Math.round(opacity * 100) - 10);   // 10..100 %
         ss.setMax(90); ss.setProgress(Math.round(scale * 100) - 60);     // 60..150 %
+        os.setKeyProgressIncrement(5); ss.setKeyProgressIncrement(5);   // the D-pad's left / right: 5 % a press
         hb.setText("Vibrate on press"); hb.setChecked(haptics);
         lb.setText("Show the log over the game"); lb.setChecked(showLog(ctx));
         Runnable labels = () -> { ol.setText("Opacity " + (os.getProgress() + 10) + " %"); sl.setText("Size " + (ss.getProgress() + 60) + " %"); };
@@ -602,7 +636,10 @@ final class TouchControls extends View {
         reset.setText("Reset the controls");
         reset.setOnClickListener(v -> { os.setProgress(50); ss.setProgress(40); hb.setChecked(true); });   // 60 % opacity, 100 % size, the tick on
         box.addView(ol); box.addView(os); box.addView(sl); box.addView(ss); box.addView(hb); box.addView(lb); box.addView(reset);
-        layoutRows(ctx, box);   // the picture position and the layout editor
+        android.widget.Button ed = new android.widget.Button(ctx);   // the layout editor (runs onEditStart); the picture's position is in the panel's Picture rows (positionRows)
+        ed.setText("Edit the controls layout…");
+        ed.setOnClickListener(v -> startEditLayout());
+        box.addView(ed);
     }
 
     /** Whether GameActivity keeps the newest log lines over the picture once the game draws (off by default; the settings dialog's last box) */

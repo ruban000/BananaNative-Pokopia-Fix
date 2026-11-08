@@ -33,7 +33,7 @@ typedef uintptr_t VkCommandBuffer;
 typedef struct { uint32_t flags,stride; } nvn_texdesc;
 typedef struct { uint32_t bw,bh,bpb,kind; } vka_fmt;
 typedef struct { nvn_texdesc d; const uint8_t *mem; struct {uint64_t size;} L; } tex_t;
-typedef struct { vka_fmt f; uint32_t w,h,depth,levels,layers,aspect;
+typedef struct { vka_fmt f; nvn_texdesc d; uint32_t w,h,depth,levels,layers,aspect; int is_video;
     uintptr_t img; uint64_t stamp,po_off,up_ns; } vka_img;
 typedef struct { uint64_t off; uint8_t *ptr; uintptr_t buf; } vka_span;
 typedef struct { uint64_t bufferOffset; uint32_t bufferRowLength,bufferImageHeight;

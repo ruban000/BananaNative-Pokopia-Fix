@@ -46,8 +46,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             None,
             Header,
             TaskMemoryRead,
-            TaskMemoryWrite,
             TaskMemoryReadBack,
+            TaskMemoryWrite,
             VertexPlanes,
             PrimitiveIndices,
             PrimitiveHeader,
@@ -147,10 +147,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     return;
 
                 case AStageWindow.TaskMemoryReadBack:
-                    // The task memory word as this program stored it (TaskMemoryWrite's addressing)
+                    // Mode 0xb8 on a load (ISBERD in task shaders: Ocarina of Time's 5d3a096025e375a1): reads back a word the task shader wrote to its own payload
                     if (x.Rd != RegisterConsts.RegisterZeroIndex)
                     {
-                        ASet(context, x, context.Load(StorageKind.SharedMemory, mesh.PayloadMemoryId, context.ShiftRightU32(context.BitwiseAnd(address, Const(mesh.PayloadWords * 4 - 1)), Const(2))));
+                        Operand word = context.ShiftRightU32(context.BitwiseAnd(address, Const(mesh.PayloadWords * 4 - 1)), Const(2));
+                        Operand loaded = context.Load(StorageKind.SharedMemory, mesh.PayloadMemoryId, word);
+                        ASet(context, x, loaded);
                     }
 
                     return;

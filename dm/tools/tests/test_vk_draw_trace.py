@@ -13,7 +13,7 @@ class DrawTrace(unittest.TestCase):
     def test_filter_and_bounds(self):
         source = (ROOT / 'dm/gfx/vk_android/vka_draw.c').read_text()
         start = source.index('static int draw_trace_overlap(')
-        end = source.index('void vka_draw(', start)
+        end = source.index("// The pace line's view of the draw path", start)   # (the draw trace code ends where the pace line's view of the draw path begins)
         program = r'''
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>

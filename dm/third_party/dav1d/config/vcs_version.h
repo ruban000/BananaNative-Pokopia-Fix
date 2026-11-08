@@ -1,2 +1,2 @@
-/* what upstream's include/vcs_version.h.in becomes for the release tarball */
+/* auto-generated, do not edit */
 #define DAV1D_VERSION "1.5.4"

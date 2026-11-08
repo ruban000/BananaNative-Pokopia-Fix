@@ -41,7 +41,7 @@ typedef struct vka_img {vka_fmt f; nvn_texdesc d;nvn_texlayout L;uint32_t w,h,de
  VkImage img;uint64_t serial,pgen,stamp,po_off,up_ns,gw_seen,hash,head,up_fence,vgen;
  const uint8_t *mem;const void *span;void *vpool,*rs;uint8_t *snap;
  struct {int z;} m;   /* zero-shared image memory: none here */
- int hash_valid,head_valid,track,vtrack,vbind,gpu_owned,inited,from_mem,mode,cpu_dirty;} vka_img;
+ int hash_valid,head_valid,track,vtrack,vbind,gpu_owned,inited,from_mem,mode,cpu_dirty,is_video;} vka_img;
 static unsigned clocks,copies,protects,allocations;static _Atomic unsigned logs,ends,saves;
 static _Atomic int writer_hold,writer_entered;
 static FILE *trace_fopen(const char *path,const char *mode){atomic_store(&writer_entered,1);while(atomic_load(&writer_hold))sched_yield();return fopen(path,mode);}
@@ -109,6 +109,9 @@ static int is_astc(unsigned format){(void)format;return 0;}
 static void astc_zero_blocks(uint8_t *p,uint64_t n){(void)p;(void)n;}
 static const uint8_t k_astc_zero[16]={0};
 enum {ZHALF=16};static VkBuffer g_zbuf=99;static int zero_src(void){return 1;}
+static int dm_codec_is_video_mem(const void *m,uint64_t n,uint32_t *s){(void)m;(void)n;(void)s;return 0;}
+static uint64_t dm_codec_video_gen(const void *m){(void)m;return 0;}
+static int g_ntreg; static struct { struct { uint64_t serial; nvn_texdesc d; } t; } g_treg[1];   // (no registered texture: the late video detection loops over none)
 static int img_own(vka_img *im,VkCommandBuffer cb){(void)im;(void)cb;return 1;}   // (a zero-shared image's own memory before a CPU write: none in this harness)
 static void upload(vka_img*,const tex_t*,VkCommandBuffer);
 static void upload_(vka_img*,const tex_t*,VkCommandBuffer,uint64_t*);

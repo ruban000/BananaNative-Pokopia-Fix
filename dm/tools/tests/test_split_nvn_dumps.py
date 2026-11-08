@@ -92,7 +92,7 @@ class RuntimeShaders(unittest.TestCase):
 
 
 class BnshExtraSlots(unittest.TestCase):
-    """An NVN2 BNSH program keeps its task and mesh stages in slots 7 (+0x40) and 8 (+0x48), after NVN's six (bnsh_nvn2_extra)"""
+    """An NVN2 BNSH program keeps its task and mesh stages in slots 7 (+0x40) and 8 (+0x48), after NVN's six (bnsh_shaders)"""
     def bnsh(self, slots):
         """A BNSH with one variation whose program has {slot: (control, code)}; each stage a descriptor {+8 control, +0x10 code, +0x18 code length, +0x1c control length}"""
         d = bytearray(0x1000); d[:8] = b'BNSH\0\0\0\0'; d[0x60:0x64] = b'grsc'

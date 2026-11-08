@@ -23,7 +23,7 @@ class PoolBindings(unittest.TestCase):
     def test_command_stream(self):
         src = (ROOT / "dm/gfx/vk_android/vka_draw.c").read_text()
         # Production callers must account for layout changes even without a pool read.
-        binds = function(src, "static int bind_sets(")
+        binds = function(src, "static int sets_push(")   # (bind_sets builds the writes, sets_push binds them: the pool binding is there)
         self.assertLess(binds.index("pool_bind_layout(bp, lay->layout)"), binds.index("if (lay->push)"))
         self.assertIn("if (ps) pool_bind(bp, lay->layout, ps)", binds)
         fixture = r'''
@@ -40,7 +40,8 @@ static int filter = 1, g_cb = 1;
 #define VKA_ENV(name, fallback) filter
 static struct { VkPipelineLayout layout; VkDescriptorSet set; } g_pool_bind[2];
 static uint64_t g_pool_bind_calls, g_pool_bind_emitted;
-static struct { int valid; } DY, VB, IB;
+static struct { int valid; } DY, VB, VBC, IB;
+static void inst_reset(void) {}
 static struct { int n; } g_pd[2];
 static uint64_t oracle_layout[2], oracle_set[2], emitted;
 static void cmd(int cb, int bp, uint64_t layout, unsigned first, unsigned n,

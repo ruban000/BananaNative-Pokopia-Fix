@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- All files access: the host opens the game folder and the pack folder by their /storage paths (POSIX open, not the Storage Access Framework) -->
+    <!-- Vibrate: the game's rumble on the phone's motor when the controller has none (Rumble.java) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!-- Internet: the launcher's driver download (DriverFetch), on the user's tap, and the release app's update check (Updater) -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -9,7 +11,9 @@
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x402000" android:required="false" />
     <!-- allowNativeHeapPointerTagging off: the host hands malloc'd blocks to guest code, which must see untagged pointers (also turned off in nxhost_main) -->
     <!-- hasFragileUserData: the app's storage holds the saves and the packs (AppStorage); uninstalling asks whether to keep it -->
+    <!-- NxApp: every process opens a .nup picked in place (PickedNup) -->
     <application
+        android:name=".NxApp"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"

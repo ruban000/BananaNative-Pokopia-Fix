@@ -1,8 +1,8 @@
 # What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
 # <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
-# A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
+# A status row also marks the game as supported on Android: gradle.properties' nxGames builds every such profile into the APK (dm/tools/tests/test_android_games.py).
 
-# In bring-up on Android: packed, never run (the note)
+# In bring-up on Android: plays on the phone; the picture is over-bright and mesh draws are missing on Turnip (the note, Open)
 status	bring-up
 
 # Memory, not measured: nninitStartup sizes its heap from the 9 GB pool (6.2 GB of heap, 2.74 GB kept beside it; the note, Memory). No phone has run it; Mario Kart World,

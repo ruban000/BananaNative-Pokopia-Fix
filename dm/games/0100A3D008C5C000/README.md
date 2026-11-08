@@ -6,8 +6,8 @@ the native Bink movie, getting up in the bedroom, walking downstairs and
 through the living room and kitchen, camera control, dialogue and save/reload.
 The unsigned 1.0.0 IPA is built (~7.0 GB); iPhone testing is pending.
 Only 1.0.0 is registered, and the profile's shader tables come from v0.
-When the NSP folder also contains updates, build the supported version with
-`scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> -p v0` (add
+When the dump folder also contains updates, build the supported version with
+`scripts/build_ipa_from_nsp.py <dump folder> -p v0` (add
 `--platform mac` for a Mac build). The builder otherwise selects the newest
 supplied version. The supplied 4.0.0 update is damaged and remains unsupported
 (see [Files and builds](#files-and-builds)).
@@ -214,7 +214,7 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   extractor checks. Full shader content cannot be certified from this copy.
   Detailed evidence is in the work folder's `update4/integrity/final-evidence.json`.
 
-  User-authorized `--allow-damaged` extraction writes all five ExeFS and
+  An extraction that kept the damaged files as read writes all five ExeFS and
   30 merged RomFS files (9,465.4 MiB of RomFS) under
   `extract-4.0.0-retry-*/unverified/`, retaining `UNVERIFIED.txt` and extraction
   results. Its code builds, `main` `421c5411…` and `sdk` `bb560bdf…`
@@ -226,6 +226,18 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   this profile. An intact update source is required for its full shader build
   and gameplay validation.
 - The supplied DLC is a licence-only NSP, with no data to extract.
+
+## Threads
+
+- **Current: the picture stops while audio plays** ([issue #1250](https://github.com/seedds/nxnative/issues/1250)):
+  seven reproductions on 4.0.0, frame 3,000 to 51,300, in Trinity's per-frame
+  rendezvous. Addresses in 1.0.0: the submit loop reads the release flag at
+  `main+0x9a41a4`, the park is `main+0x9a4604`, and the completer at
+  `main+0x28f872c` sets the flag (+0x14) and reads the state word (+0x28). The
+  rewriter now puts a barrier between those two
+  ([the mechanism](../../../docs/reference/threads.md#trinitys-rendezvous-loses-its-release-on-apple-cores)).
+  Checked by disassembly and a standalone test, not in the game: no base NSP or
+  4.0.0 files are on the drive. Open until long clean runs of a build that froze.
 
 ## Open
 
@@ -249,4 +261,5 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [A frame capture runs under the standard thread policy](../../../docs/reference/nvn-objects.md#a-frame-capture-runs-under-the-standard-thread-policy).
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
+- [Trinity's rendezvous loses its release on Apple cores](../../../docs/reference/threads.md#trinitys-rendezvous-loses-its-release-on-apple-cores).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).

@@ -748,6 +748,31 @@ static void dynres_apply(module_t *m) {
         e && *e ? "DM_DYNAMIC_RESOLUTION" : "the default", (unsigned long long)rows[r].off, rows[r].orig, rows[r].fixed);
 }
 
+// Switch 2 SDKs (Ounce) compile with APIBKey (pacibsp / autibsp / retab) and APGAKey (pacga), both process-wide on Linux arm64, except in
+// nn::os::detail::FiberImplByHorizon::Initialize (pacia x16, x9; pacia x17, x9) and nn::os::detail::DispatchFiberContext (autiasp), which sign and authenticate
+// a newly initialized fiber's entry with APIAKey. On Android, Bionic's pthread_create resets APIAKey to a fresh random key per thread (PR_PAC_RESET_KEYS), so a
+// fiber initialized on one thread and entered on another faults at autiasp with SIGILL (FPAC, ESR EC 0x1c: The Legend of Zelda: Ocarina of Time's nn.npln.
+// thread, sdk+0x16d40c). Switching those three instructions to APIBKey (pacib / autibsp) keeps the pointer authentication and pacga frame checksum intact across
+// threads
+static void fiber_pac_apply(module_t *m) {
+#if PLAT_ANDROID
+    if (strcmp(m->name, "sdk") || m->nro) return;
+    uint32_t *w = (uint32_t *)m->base; size_t n = m->text_end / 4;
+    for (size_t i = 0; i + 0x90 < n; i++) {
+        if (w[i] != 0xDAC10130u || w[i + 4] != 0xDAC10131u) continue;   // pacia x16, x9; ...; pacia x17, x9
+        for (size_t j = i + 0x40; j < i + 0x100 && j < n; j++) {
+            if (w[j - 3] == 0x9AC233C2u && w[j] == 0xD50323BFu) {        // pacga x2, x30, x2; cmp x2, x1; b.ne; autiasp
+                w[i] = 0xDAC10530u; w[i + 4] = 0xDAC10531u; w[j] = 0xD50323FFu;   // pacib x16, x9; pacib x17, x9; autibsp
+                LOG("sdk: FiberImplByHorizon / DispatchFiberContext switched from APIAKey to APIBKey (sdk+%#zx / +%#zx)", i * 4, j * 4);
+                return;
+            }
+        }
+    }
+#else
+    (void)m;
+#endif
+}
+
 // main's load-time settings, at the place map_image calls them (the key page installed, the text still writable)
 static void window_apply(module_t *m) {
     if (strcmp(m->name, "main") || m->nro) return;
@@ -800,7 +825,7 @@ static void map_image(module_t *m, const char *dir) {
         m->base = a + pre;
         read_image(fd, m->base, fl, 0, path); read_image(fd, a, sz - bl - fl, (off_t)fl, path);
         if (bl) read_image(fd, m->base + m->back_off, bl, (off_t)(sz - bl), path);
-        close(fd); install_key_page(m); window_apply(m);
+        close(fd); install_key_page(m); window_apply(m); fiber_pac_apply(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (m->patch_len && mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
@@ -812,7 +837,7 @@ static void map_image(module_t *m, const char *dir) {
         die("%s: patch area outside the image", path);
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    read_image(fd, m->base, sz, 0, path); close(fd); install_key_page(m); window_apply(m);
+    read_image(fd, m->base, sz, 0, path); close(fd); install_key_page(m); window_apply(m); fiber_pac_apply(m);
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
 }

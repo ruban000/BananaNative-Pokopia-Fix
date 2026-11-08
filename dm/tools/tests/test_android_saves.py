@@ -19,6 +19,7 @@ public final class BuildConfig {
     public static final String NX_PROFILES = "040074A01BF12000\\tDonkey Kong Bananza\\t22852\\tabcdef012345\\t458752 main=aa";
     public static final String NX_DMSH_VK_CHAIN = "0123456789ab";
     public static final String NX_DMSH_VK_ABI = "ba9876543210";
+    public static final String NX_DMSH_VK_ABI_COMPAT = "";
 }
 '''
 HARNESS = '''#ifndef _GNU_SOURCE

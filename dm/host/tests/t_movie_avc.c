@@ -5,7 +5,6 @@
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_movie.c"
-#include "../hle_movie_yuv.c"   // md_nv12 / md_rgba
 #include <VideoToolbox/VideoToolbox.h>
 static OSStatus synthetic_decode(VTDecompressionSessionRef, CMSampleBufferRef, VTDecodeFrameFlags, void *, VTDecodeInfoFlags *);
 #define VTDecompressionSessionDecodeFrame synthetic_decode

@@ -43,6 +43,18 @@ def fixture(exec_source):
 enum {SEGQ=128,RC_PEND=64,J_SUB=1};
 typedef struct { int kind; uint32_t mode,v,type;uint64_t addr;} pop;
 static struct { p_set_rt rt;int has_rt;p_scissor sc;int has_sc;int64_t copy_stride,copy_img_stride;int rc_skip,d;} S;
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-function"   // (the stubs below and the old render-condition lists: the code under test no longer reaches some)
+static int g_rcl;   // the render-condition log: off
+static void rcl_op(uint32_t op, const void *a) { (void)op; (void)a; }
+static void rc_note(uint64_t a, uint64_t type) { (void)a; (void)type; }
+static void vka_rp_note_ts(void) {}
+static void vka_rp_zstats(char *b, size_t n) { if (n) b[0] = 0; }
+static void vka_draw_peek_commit(uint64_t f) { (void)f; }
+static void vka_rw_pre(VkCommandBuffer cb) { (void)cb; }
+static void vka_rw_point(VkCommandBuffer cb, int c, uint64_t a, uint64_t b, uint64_t d) { (void)cb; (void)c; (void)a; (void)b; (void)d; }
+static void vka_rw_commit(uint64_t f) { (void)f; }
+static uint64_t g_frame;
 static VkCommandBuffer g_cb;static VkQueryPool g_sqp;static int g_sq_n,g_sq_base,g_nrc_ts,g_nx,g_npost;
 static uint64_t g_cur_fence,g_stat_draws,g_sub_draws0,g_sub_frame,g_n_ub,g_rc_ts[RC_PEND];
 static pop g_post[64];static _Atomic int g_synclog;static _Atomic uint64_t g_sync_ns;

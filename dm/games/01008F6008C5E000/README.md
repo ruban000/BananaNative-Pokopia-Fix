@@ -12,9 +12,9 @@ Playable on the Mac: language, look and name selection, the academy settings,
 the opening, the Paldea flyover, getting up in the bedroom, walking, camera
 control, the main menu and autosave, and reloading that save. iPhone testing
 is pending; no IPA has been built yet.
-Only 1.0.0 is registered. The NSP folder also holds update 4.0.0
-(`v786432`), so build with `scripts/build_ipa_from_nsp.py <NSP folder> -k
-<prod.keys> -p v0` (add `--platform mac` for a Mac build); without `-p` the
+Only 1.0.0 is registered. The dump folder also holds update 4.0.0
+(`v786432`), so build with `scripts/build_ipa_from_nsp.py <dump folder>
+-p v0` (add `--platform mac` for a Mac build); without `-p` the
 builder takes the newest version and derives a profile without these checks.
 
 ## What it needs
@@ -94,6 +94,9 @@ No `patches.py`.
   4.0.0 copy was damaged ([Scarlet, Files and builds](../0100A3D008C5C000/README.md#files-and-builds));
   whether Violet's is intact has not been checked.
 - Outdoor exploration and battles have not been validated, as on Scarlet.
+- [The freeze in Trinity's rendezvous](../../../docs/reference/threads.md#trinitys-rendezvous-loses-its-release-on-apple-cores)
+  was reported here too, by its return addresses only. No main of this game is
+  on the drive, so whether its completer matches the rewriter's rule is unchecked.
 - [Conservative rasterization](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented)
   is unimplemented, as on Scarlet.
 

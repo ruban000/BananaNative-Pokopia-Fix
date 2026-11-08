@@ -39,9 +39,22 @@ static VkCommandBuffer g_cb;
 static uint64_t g_slot_frame[8]; static uint8_t g_slot_ts[8]; static uint32_t g_slot_parts[8];
 static struct { _Atomic uint64_t frame, ns, t0, t1, span; _Atomic int pending; } g_gpu[GRING];
 static _Atomic uint64_t g_fstart[64], g_fstart_f[64];
-static struct { uint64_t fence, frame, queue, draws, ops, skipped, t_ns; } g_hrec[NHREC];
+static struct { uint64_t fence, frame, queue, draws, ops, skipped, t_ns, sub_ns; } g_hrec[NHREC];
 static uint64_t g_frame, g_job_frame, g_stat_draws, g_stat_ops, g_stat_skipped, g_n_sub, g_rec_ns;
 static int g_job_frame_set, worker_on, g_nrc_ts, g_chunk_draws, g_nx, g_sq_n, g_sq_base, g_seg;
+static _Atomic int g_rec_tid; static uint32_t g_part_seen; static uint64_t g_t_prep, g_t_begin, g_t_commit;   // (the recording thread's id, the part counter and the submission's phase timers)
+static int gettid(void) { return 1; }
+static void replay_nice(void) {}
+static uint64_t sub_commit(uint64_t reserved);
+static int g_rcl;   // the render-condition log: off
+static void rcl_op(uint32_t op, const void *a) { (void)op; (void)a; }
+static void rc_note(uint64_t a, uint64_t type) { (void)a; (void)type; }
+static void vka_rp_note_ts(void) {}
+static void vka_rp_zstats(char *b, size_t n) { if (n) b[0] = 0; }
+static void vka_draw_peek_commit(uint64_t f) { (void)f; }
+static void vka_rw_pre(VkCommandBuffer cb) { (void)cb; }
+static void vka_rw_point(VkCommandBuffer cb, int c, uint64_t a, uint64_t b, uint64_t d) { (void)cb; (void)c; (void)a; (void)b; (void)d; }
+static void vka_rw_commit(uint64_t f) { (void)f; }
 static uint64_t g_chunk_d0, g_cur_fence, g_sub_draws0, g_sub_ops0, g_sub_skip0, g_sub_t0, g_sub_frame;
 static VkQueryPool g_qp=(VkQueryPool)(uintptr_t)1, g_sqp; static double g_ts_ns=1, g_sq_ns;
 static PFN_vkGetQueryPoolResults g_sq_get;
@@ -114,7 +127,7 @@ static struct { PFN_vkCreateQueryPool create; PFN_vkCmdResetQueryPool reset; PFN
     code = pre
     for name in ("void vka_exec_sub_frame(", "uint64_t vka_exec_frame(", "uint64_t vka_frame_start_ns(",
                  "static void gpu_tag_begin(", "static void gpu_slot_done(", "double mtl_gpu_ms(",
-                 "void vka_rp_sub_begin(", "uint64_t vka_rp_sub_commit("):
+                 "void vka_rp_sub_begin(", "static uint64_t sub_commit(uint64_t reserved) {", "uint64_t vka_rp_sub_commit("):
         code += function(source, name) + "\n"
     return code + r'''
 static void record(uint64_t origin,uint64_t live,uint64_t advanced,uint64_t commit_live,uint64_t fence,int queued) {

@@ -23,14 +23,14 @@
 #define ENC_FNS(X) \
     X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdUpdateBuffer) X(vkCmdFillBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) \
-    X(vkCmdBeginRendering) X(vkCmdEndRendering) \
+    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) \
     X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
     X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
-    X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT)
+    X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) X(vkCmdDrawMeshTasksIndirectEXT)
 #define ENC_ID(f) E_##f,
 enum { E_WRAP = 0, E_CALL, ENC_FNS(ENC_ID) E_N };
 #define ENC_REAL(f) PFN_##f f;
@@ -62,16 +62,20 @@ static inline uint64_t wait_change(_Atomic uint64_t *a, uint64_t old) {
     return v;
 }
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+// How long either thread waits with WFE before the futex (DM_VK_ENC_SPIN). The clock is read at every wake, not every so many wakes: with nothing stored to the line, WFE
+// returns only at the kernel's event stream tick (10 kHz), so a count of wakes is a count of 100 us ticks. A thread on WFE still runs: it counts as CPU time, keeps its core
+// out of idle and looks busy to the frequency governor
+static _Atomic uint64_t g_spin_ns = 200000;
+static inline int spin_over(uint64_t t0) { return mono_ns() - t0 >= atomic_load_explicit(&g_spin_ns, memory_order_relaxed); }   // checked before each wait: 0 goes straight to the futex
 
 // The producer waits until the consumer's tail reaches at least `want` (spinning a little, then on the futex)
 static inline void flush_pub(void);
 static void wait_tail(uint64_t want) {
     flush_pub();   // what it waits for must be handed over
-    uint64_t t0_ = mono_ns();
-    for (;;) {   // the encoder is usually close behind: wait on its tail for up to ~0.2 ms (the clock is read at every wake: a WFE with no write to the line lasts until the event stream, 10-100 µs)
+    for (uint64_t t0_ = mono_ns();;) {   // the encoder is usually close behind: wait on its tail for a short while
         uint64_t t = atomic_load_explicit(&g_tail, memory_order_acquire); if (t >= want) return;
+        if (spin_over(t0_)) break;
         wait_change(&g_tail, t);
-        if (mono_ns() - t0_ > 200000) break;
     }
     g_n_waits++; uint64_t t0 = mono_ns();
     // An event count: the sequence is read before the flag is set, so an encoder that sees the flag (and a tail at or past want) bumps it after that read and the futex
@@ -114,9 +118,9 @@ static void *rec_alloc(uint32_t id, size_t n) {
 static uint64_t g_pub;        // the head published last
 static uint32_t g_batch = 4096;
 static uint32_t g_wake = 0;           // DM_VK_ENC_WAKE: bytes held back while the encoder sleeps (0 = none): it is woken once per that many bytes, not once per batch
-static _Atomic uint64_t g_spin_ns = 200000;   // DM_VK_ENC_SPIN_US: the replay updates it while the encoder may be idle
+static uint64_t g_n_total;   // every call recorded, never reset (vka_enc_total: the instanced runs' "nothing recorded in between")
 static inline void rec_done(size_t n) {
-    g_ph += n; g_n_calls++;
+    g_ph += n; g_n_calls++; g_n_total++;
     if (g_ph - g_pub >= g_batch) {
         if (g_wake && g_ph - g_pub < g_wake && atomic_load_explicit(&g_csleep, memory_order_relaxed)) return;   // asleep: wake it for a worthwhile run of calls (every wait, sync, part switch and stop flushes)
         g_pub = g_ph; publish();
@@ -135,6 +139,7 @@ typedef struct { CB_FIELD VkImage s, d; VkImageLayout sl, dl; uint32_t n; const 
 typedef struct { CB_FIELD VkImage im; VkImageLayout l; VkClearValue v; uint32_t n; const VkImageSubresourceRange *r; } r_clr;
 typedef struct { CB_FIELD uint32_t na, nr; const VkClearAttachment *a; const VkClearRect *r; } r_clra;
 typedef struct { CB_FIELD VkRenderingInfo ri; } r_rend;
+typedef struct { CB_FIELD VkRenderPassBeginInfo rb; VkRenderPassAttachmentBeginInfo ab; VkSubpassContents sc; } r_rpb;
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipeline p; } r_pipe;
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t first, n, nd; const VkDescriptorSet *s; const uint32_t *d; } r_sets;
 typedef struct { CB_FIELD uint32_t first, n; const VkBuffer *b; const VkDeviceSize *o, *sz, *st; } r_vb;
@@ -154,7 +159,7 @@ static inline uint8_t *cpy(uint8_t **at, const void *src, size_t n) { uint8_t *d
 #define BEGIN(T, id, extra) T *r = rec_alloc(id, A8(sizeof(T)) + (extra)); uint8_t *at = (uint8_t *)r + A8(sizeof(T)); (void)at; r->cb = cb;
 #define END() rec_done(r->h.size)
 #define DIRECT(f, ...) do { if (!mine(cb)) { R.f(__VA_ARGS__); return; } } while (0)
-#define FALLBACK(f, ...) do { g_n_direct++; vka_enc_sync(); R.f(__VA_ARGS__); return; } while (0)
+#define FALLBACK(f, ...) do { g_n_direct++; g_n_total++; vka_enc_sync(); R.f(__VA_ARGS__); return; } while (0)
 
 static void VKAPI_CALL e_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipelineStageFlags d, VkDependencyFlags f, uint32_t nm, const VkMemoryBarrier *m, uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *i) {
     DIRECT(vkCmdPipelineBarrier, cb, s, d, f, nm, m, nb, b, ni, i);
@@ -226,6 +231,19 @@ static void VKAPI_CALL e_vkCmdBeginRendering(VkCommandBuffer cb, const VkRenderi
     r->ri.pStencilAttachment = ri->pStencilAttachment ? (void *)cpy(&at, ri->pStencilAttachment, one) : NULL;
     END();
 }
+static void VKAPI_CALL e_vkCmdBeginRenderPass(VkCommandBuffer cb, const VkRenderPassBeginInfo *rb, VkSubpassContents sc) {   // (with or without one VkRenderPassAttachmentBeginInfo)
+    DIRECT(vkCmdBeginRenderPass, cb, rb, sc);
+    const VkRenderPassAttachmentBeginInfo *ab = rb->pNext;
+    if (ab && (ab->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO || ab->pNext)) FALLBACK(vkCmdBeginRenderPass, cb, rb, sc);
+    size_t nv = ab ? ab->attachmentCount * sizeof(VkImageView) : 0, nc = rb->clearValueCount * sizeof(VkClearValue);
+    BEGIN(r_rpb, E_vkCmdBeginRenderPass, A8(nv) + A8(nc));
+    r->rb = *rb; r->sc = sc;
+    r->rb.pClearValues = nc ? (void *)cpy(&at, rb->pClearValues, nc) : NULL;
+    if (ab) { r->ab = *ab; r->ab.pAttachments = (void *)cpy(&at, ab->pAttachments, nv); r->rb.pNext = NULL; }   // (pNext set at the replay: the record moves)
+    else r->ab.sType = 0;
+    END();
+}
+static void VKAPI_CALL e_vkCmdEndRenderPass(VkCommandBuffer cb) { DIRECT(vkCmdEndRenderPass, cb); BEGIN(r_val, E_vkCmdEndRenderPass, 0); END(); }
 static void VKAPI_CALL e_vkCmdEndRendering(VkCommandBuffer cb) { DIRECT(vkCmdEndRendering, cb); BEGIN(r_val, E_vkCmdEndRendering, 0); END(); }
 static void VKAPI_CALL e_vkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
     DIRECT(vkCmdBindPipeline, cb, bp, p); BEGIN(r_pipe, E_vkCmdBindPipeline, 0); r->bp = bp; r->p = p; END();
@@ -264,6 +282,9 @@ static void VKAPI_CALL e_vkCmdDrawIndexedIndirectCount(VkCommandBuffer cb, VkBuf
 }
 static void VKAPI_CALL e_vkCmdDrawMeshTasksEXT(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     DIRECT(vkCmdDrawMeshTasksEXT, cb, x, y, z); BEGIN(r_draw, E_vkCmdDrawMeshTasksEXT, 0); r->a = x; r->b = y; r->c = z; END();
+}
+static void VKAPI_CALL e_vkCmdDrawMeshTasksIndirectEXT(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawMeshTasksIndirectEXT, cb, b, o, n, st); BEGIN(r_ind, E_vkCmdDrawMeshTasksIndirectEXT, 0); r->b = b; r->o = o; r->n = n; r->st = st; END();
 }
 static void VKAPI_CALL e_vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     DIRECT(vkCmdDispatch, cb, x, y, z); BEGIN(r_draw, E_vkCmdDispatch, 0); r->a = x; r->b = y; r->c = z; END();
@@ -353,6 +374,8 @@ static void run(const hdr *h) {
     case E_vkCmdClearAttachments: { C(r_clra); R.vkCmdClearAttachments(r->cb, r->na, r->a, r->nr, r->r); break; }
     case E_vkCmdBeginRendering: { C(r_rend); R.vkCmdBeginRendering(r->cb, &r->ri); break; }
     case E_vkCmdEndRendering: { C(r_val); R.vkCmdEndRendering(r->cb); break; }
+    case E_vkCmdBeginRenderPass: { C(r_rpb); VkRenderPassBeginInfo rb = r->rb; if (r->ab.sType) rb.pNext = &r->ab; R.vkCmdBeginRenderPass(r->cb, &rb, r->sc); break; }
+    case E_vkCmdEndRenderPass: { C(r_val); R.vkCmdEndRenderPass(r->cb); break; }
     case E_vkCmdBindPipeline: { C(r_pipe); R.vkCmdBindPipeline(r->cb, r->bp, r->p); break; }
     case E_vkCmdBindDescriptorSets: { C(r_sets); R.vkCmdBindDescriptorSets(r->cb, r->bp, r->l, r->first, r->n, r->s, r->nd, r->d); break; }
     case E_vkCmdBindVertexBuffers2: { C(r_vb); R.vkCmdBindVertexBuffers2(r->cb, r->first, r->n, r->b, r->o, r->sz, r->st); break; }
@@ -365,6 +388,7 @@ static void run(const hdr *h) {
     case E_vkCmdDrawIndexedIndirectCount: { C(r_indc); R.vkCmdDrawIndexedIndirectCount(r->cb, r->b, r->o, r->cbuf, r->co, r->n, r->st); break; }
     case E_vkCmdDispatch: { C(r_draw); R.vkCmdDispatch(r->cb, r->a, r->b, r->c); break; }
     case E_vkCmdDrawMeshTasksEXT: { C(r_draw); R.vkCmdDrawMeshTasksEXT(r->cb, r->a, r->b, r->c); break; }
+    case E_vkCmdDrawMeshTasksIndirectEXT: { C(r_ind); R.vkCmdDrawMeshTasksIndirectEXT(r->cb, r->b, r->o, r->n, r->st); break; }
     case E_vkCmdDispatchBase: { C(r_draw); R.vkCmdDispatchBase(r->cb, r->a, r->b, r->c, r->d, r->f, (uint32_t)r->e); break; }
     case E_vkCmdDispatchIndirect: { C(r_ind); R.vkCmdDispatchIndirect(r->cb, r->b, r->o); break; }
     case E_vkCmdSetViewport: { C(r_vps); R.vkCmdSetViewport(r->cb, r->first, r->n, r->p); break; }
@@ -396,18 +420,29 @@ static void run(const hdr *h) {
     #undef C
 }
 void vka_perf_thread(int nice);
+// The encoder's tail, stored every DM_VK_ENC_TAIL bytes of calls made (live from the next submission; default 16384; 0 = after every call, as before), and always when it has
+// caught up with the head it read (so vka_enc_sync, which waits for the whole ring, is never held back by it) or while the replay thread sleeps on it. A tail store is a
+// store-release, a full fence and a load: after each of the ~60,000 calls of a heavy frame the fence waited for the driver's stores of that call to drain. The replay thread
+// needs the tail only for room in the 8 MB ring and at its syncs
+static _Atomic uint32_t g_tail_every = 16384;
+// Where the encoder's time goes (the pace line, vka_enc_pace): one call in 16 timed by its kind (the virtual counter), and every call counted. Written by the encoder thread only
+static uint64_t g_kn[E_N], g_kt[E_N], g_ktn[E_N];
+static _Atomic int g_enc_tid;
+int vka_enc_tid(void) { return atomic_load_explicit(&g_enc_tid, memory_order_relaxed); }
+static inline uint64_t enc_cnt(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
+#define KADD(a, i, v) __atomic_store_n(&(a)[i], (a)[i] + (v), __ATOMIC_RELAXED)
 static void *enc_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-enc");
     vka_perf_thread(-8);   // the ADPF session and the replay thread's priority
-    uint64_t t = 0;
+    atomic_store(&g_enc_tid, gettid());
+    uint64_t t = 0, tpub = 0; unsigned samp = 0;
     for (;;) {
         uint64_t h = atomic_load_explicit(&g_head, memory_order_acquire);
         if (t == h) {
             // Empty: spin while the replay thread is recording (its next call comes within microseconds), then sleep until a call comes
-            uint64_t t0 = mono_ns(), lim = atomic_load_explicit(&g_spin_ns, memory_order_relaxed);
-            for (;;) {
+            for (uint64_t t0 = mono_ns();;) {
                 h = atomic_load_explicit(&g_head, memory_order_acquire); if (h != t) break;
-                if (mono_ns() - t0 >= lim) break;   // zero goes straight to the futex; otherwise account for the time in every WFE
+                if (spin_over(t0)) break;
                 wait_change(&g_head, t);
             }
             if (h == t) {
@@ -420,15 +455,23 @@ static void *enc_main(void *arg) {
                 continue;
             }
         }
-        uint64_t b0 = mono_ns();
+        uint64_t b0 = mono_ns(); uint32_t every = atomic_load_explicit(&g_tail_every, memory_order_relaxed);
         while (t != h) {
             const hdr *r = (const hdr *)(g_ring + t % RING);
-            if (r->id != E_WRAP) { atomic_store_explicit(&g_running, (int)r->id, memory_order_relaxed); run(r); atomic_store_explicit(&g_running, -1, memory_order_relaxed); }
+            if (r->id != E_WRAP) {
+                uint32_t id = r->id < E_N ? r->id : 0; KADD(g_kn, id, 1);
+                atomic_store_explicit(&g_running, (int)r->id, memory_order_relaxed);
+                if (++samp >= 16) { samp = 0; uint64_t c0 = enc_cnt(); run(r); KADD(g_kt, id, enc_cnt() - c0); KADD(g_ktn, id, 1); } else run(r);
+                atomic_store_explicit(&g_running, -1, memory_order_relaxed);
+            }
             t += r->size;
-            atomic_store(&g_tail, t);
-            atomic_thread_fence(memory_order_seq_cst);   // the tail before the replay thread's wait flag is read
-            if (atomic_load(&g_pwait) && t >= atomic_load(&g_pwant)) { atomic_fetch_add(&g_pseq, 1); fwake(&g_pseq); }
-            if (t == h) h = atomic_load_explicit(&g_head, memory_order_acquire);   // more came meanwhile
+            if (t == h || t - tpub >= every || atomic_load_explicit(&g_pwait, memory_order_relaxed)) {
+                tpub = t;
+                atomic_store(&g_tail, t);
+                atomic_thread_fence(memory_order_seq_cst);   // the tail before the replay thread's wait flag is read
+                if (atomic_load(&g_pwait) && t >= atomic_load(&g_pwant)) { atomic_fetch_add(&g_pseq, 1); fwake(&g_pseq); }
+                if (t == h) h = atomic_load_explicit(&g_head, memory_order_acquire);   // more came meanwhile
+            }
         }
         atomic_fetch_add_explicit(&g_busy_ns, mono_ns() - b0, memory_order_relaxed);
     }
@@ -460,7 +503,9 @@ void vka_enc_start(VkCommandBuffer cb) {
     extern int vka_gp_active;
     if (!VKA_ENV("DM_VK_ENC", 1) || vka_gp_active || vka_nan_on() || !up()) { atomic_store(&g_ecb, VK_NULL_HANDLE); return; }
     { int bt = VKA_ENV("DM_VK_ENC_BATCH", 4096); g_batch = bt < 0 ? 0 : bt > (1 << 20) ? (1 << 20) : (uint32_t)bt; }   // live: from this submission
-    { int w = VKA_ENV("DM_VK_ENC_WAKE", 0), sp = VKA_ENV("DM_VK_ENC_SPIN_US", 200); g_wake = w < 0 ? 0 : w > (1 << 20) ? (1 << 20) : (uint32_t)w; atomic_store_explicit(&g_spin_ns, (uint64_t)(sp < 0 ? 0 : sp > 100000 ? 100000 : sp) * 1000, memory_order_relaxed); }
+    { int w = VKA_ENV("DM_VK_ENC_WAKE", 0); g_wake = w < 0 ? 0 : w > (1 << 20) ? (1 << 20) : (uint32_t)w; }
+    { int us = VKA_ENV("DM_VK_ENC_SPIN", VKA_ENV("DM_VK_ENC_SPIN_US", 200)); atomic_store_explicit(&g_spin_ns, (uint64_t)(us < 0 ? 0 : us > 100000 ? 100000 : us) * 1000, memory_order_relaxed); }   // live: from this submission (DM_VK_ENC_SPIN_US: its earlier name)
+    { int tb = VKA_ENV("DM_VK_ENC_TAIL", 16384); atomic_store_explicit(&g_tail_every, tb <= 0 ? 0 : tb > (1 << 20) ? (1u << 20) : (uint32_t)tb, memory_order_relaxed); }   // live: from this submission
     atomic_store(&g_ecb, cb);
 }
 // Before vkEndCommandBuffer, a submit, or any other use of the command buffer or its pool: every call made
@@ -469,6 +514,7 @@ void vka_enc_stop(void) {
     vka_enc_sync();
     atomic_store(&g_ecb, VK_NULL_HANDLE);
 }
+uint64_t vka_enc_total(void) { return g_n_total; }
 int vka_enc_on(void) { return atomic_load_explicit(&g_ecb, memory_order_relaxed) != VK_NULL_HANDLE; }
 // fn(arg copy) on the encoder thread, in order with the deferred calls (1); 0 = the encoder is off: the caller makes the call itself
 int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n) {
@@ -478,6 +524,29 @@ int vka_enc_call(void (*fn)(const void *), const void *arg, size_t n) {
 }
 // The replay thread goes on in another command buffer (a part of the submission, vka_exec.c chunk) whose reset and begin it queued with vka_enc_call
 void vka_enc_switch(VkCommandBuffer cb) { atomic_store(&g_ecb, cb); flush_pub(); }   // (the part's submit handed over at once)
+// The pace line's view of the encoder: per frame, the time of each kind of call (from the timed sample) and their counts, since the last reading
+void vka_enc_pace(char *b, size_t n, double frames) {
+    static uint64_t ln[E_N], lt[E_N], ltn[E_N];
+    enum { G_PUSH, G_DRAW, G_PIPE, G_VTX, G_SETS, G_STATE, G_PASS, G_BAR, G_COPY, G_DISP, G_OWN, G_N };
+    static const char *gn[G_N] = {"push descriptors", "draws", "pipelines", "vertex/index buffers", "sets+constants", "dynamic state", "passes", "barriers", "copies/clears", "dispatches", "part submits"};
+    double ms[G_N] = {0}, cnt[G_N] = {0};
+    uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    for (int i = 0; i < E_N; i++) {
+        uint64_t kn = __atomic_load_n(&g_kn[i], __ATOMIC_RELAXED), kt = __atomic_load_n(&g_kt[i], __ATOMIC_RELAXED), ktn = __atomic_load_n(&g_ktn[i], __ATOMIC_RELAXED);
+        uint64_t dn = kn - ln[i], dt = kt - lt[i], dtn = ktn - ltn[i]; ln[i] = kn; lt[i] = kt; ltn[i] = ktn;
+        int g = i == E_vkCmdPushDescriptorSetKHR ? G_PUSH : i == E_vkCmdDraw || i == E_vkCmdDrawIndexed || i == E_vkCmdDrawIndirect || i == E_vkCmdDrawIndexedIndirect || i == E_vkCmdDrawMeshTasksEXT ? G_DRAW
+              : i == E_vkCmdBindPipeline ? G_PIPE : i == E_vkCmdBindVertexBuffers2 || i == E_vkCmdBindIndexBuffer || i == E_vkCmdSetVertexInputEXT ? G_VTX
+              : i == E_vkCmdBindDescriptorSets || i == E_vkCmdPushConstants ? G_SETS
+              : i == E_vkCmdBeginRendering || i == E_vkCmdEndRendering || i == E_vkCmdBeginRenderPass || i == E_vkCmdEndRenderPass || i == E_vkCmdClearAttachments ? G_PASS
+              : i == E_vkCmdPipelineBarrier ? G_BAR : i == E_vkCmdDispatch || i == E_vkCmdDispatchBase || i == E_vkCmdDispatchIndirect ? G_DISP : i == E_CALL ? G_OWN
+              : i >= E_vkCmdCopyBuffer && i <= E_vkCmdClearDepthStencilImage ? G_COPY : G_STATE;
+        cnt[g] += (double)dn;
+        if (dtn) ms[g] += (double)dt / (double)dtn * (double)dn / (double)f * 1e3;   // the timed calls' mean, times every call of the kind
+    }
+    size_t o = 0; if (n) b[0] = 0;
+    if (frames <= 0) return;
+    for (int g = 0; g < G_N && o < n; g++) if (cnt[g]) o += (size_t)snprintf(b + o, n - o, "%s%s %.2f (%.0f)", o ? ", " : "", gn[g], ms[g] / frames, cnt[g] / frames);
+}
 void vka_enc_stats(char *b, size_t n, double frames) {   // per frame
     if (!g_n_calls || frames <= 0) { if (n) b[0] = 0; return; }
     snprintf(b, n, "command encoder per frame: %.0f calls (%.0f made directly to keep order), busy %.2f ms; the replay thread waited %.2f ms (%.1f times)", g_n_calls / frames, g_n_direct / frames,

@@ -53,6 +53,7 @@ typedef struct { unsigned bw,bh,kind; } vka_fmt;
 typedef struct { int gpu_owned,dead; } vka_img;
 static struct { uint64_t lo; vka_img *im; } g_bymem[1];
 static int g_nbymem;
+static int dm_codec_is_video_mem(const void *m, uint64_t n, uint32_t *s) { (void)m; (void)n; (void)s; return 0; }   // (no codec pool under test)
 static int bymem_first(uint64_t p){(void)p;return 0;}
 static int img_pool_dead(vka_img *im){return im->dead;}
 static int first_on=1,nvn2=1,track_on=1,span=1,live=1,sparse,flushed,cpuw,lazy_on=1,zerolog;

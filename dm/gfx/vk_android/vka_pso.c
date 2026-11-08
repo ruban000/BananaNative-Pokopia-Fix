@@ -139,6 +139,19 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
 // ---------- The pipeline cache ----------
 // DM_VK_PCACHE (restart): unset = $DM_TEMP/vk_pipelines[-<driver>].bin; a path = that file; 0 = no file (the run starts empty and keeps nothing: a cold run). Before 2026-11-03 "0"
 // was taken as a file named 0 in the working folder, so a second "cold" run read the first one's pipelines back (stutter-agent cold2gpl: 10 MB read, warm)
+// The file is kept for one shader library at a time: its stamp <file>.lib (vka_pckeep.h; written with each save) names the library it was saved with (vka_shader_lib_id) and
+// lists the shaders whose pipelines it holds with their entry hashes. A file of another library is read when its shaders are mostly byte for byte the same in this one
+// (a restamped library, a delta update): the stale shaders it holds (changed or dropped since) may be at most DM_VK_PCACHE_KEEP percent (restart; default 50; 0 = a file of
+// another library is never read) of the live ones, counted over every update the file was carried across; otherwise, or with no stamp, the run starts empty and its first
+// save replaces the file. Before 2026-11-08 the file kept the shaders of every library ever played, and a driver that deserializes and uploads every shader of a cache when
+// it is opened (Mesa's vk_pipeline_cache_load; Turnip gives each its code and private memory) paid for all of them: Ocarina of Time's 72 MB Turnip cache held 1,791 shaders,
+// two of them from libraries before the HMMA spill fix with 80 and 54 KB of private memory a fiber, and opening it committed 5.2 GB of GPU memory, after which the game
+// was killed by lmkd at its first 3D frames (docs/reference/memory.md "Pipeline cache of earlier shader libraries"). From then until the stamp listed its shaders, every
+// library update started empty, and the first start after one waited minutes for its pipelines (docs/reference/memory.md "A shader library update that threw the
+// pipeline cache away")
+static uint64_t g_pc_lib;   // the library this run's cache file is stamped with (0: none known; no stamp written)
+static vka_pck_stamp g_pck;   // the shaders the file was read with that this library has the same, and the stale estimate (the stamp's; written again with this run's)
+static uint64_t pck_hash_of(void *ctx, uint64_t key) { (void)ctx; return vka_shader_content(key); }
 static VkPipelineCache g_pc; static char g_pc_path[1024], g_pw_path[1100]; static uint64_t g_made, g_saved_at, g_save_ns; static double g_create_ms;
 static uint64_t g_ngfx, g_ncs, g_nfail, g_ncs_over, g_create_ns, g_frame_made;   // all pipelines made (frame path, background and prewarm); g_frame_made / g_create_ns: on the frame path only
 static uint64_t g_probe_hit, g_probe_miss, g_probe_miss_ns;          // GPL: the cache-only try before a link (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
@@ -171,11 +184,44 @@ static void pc_open_once(void) {
         if (n) { memcpy(&hl, data, 4); memcpy(&ver, (uint8_t *)data + 4, 4); memcpy(&vendor, (uint8_t *)data + 8, 4); memcpy(&devid, (uint8_t *)data + 12, 4); memcpy(uuid, (uint8_t *)data + 16, VK_UUID_SIZE);
                  if (hl < 32 || ver != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || vendor != V.props.vendorID || devid != V.props.deviceID || memcmp(uuid, V.props.pipelineCacheUUID, VK_UUID_SIZE)) { VLOG("pipeline cache %s is another driver's: started empty", g_pc_path); n = 0; } }
     }
+    g_pc_lib = g_pc_path[0] ? vka_shader_lib_id() : 0;
+    memset(&g_pck, 0, sizeof g_pck);
+    if (n && g_pc_lib) {   // the stamp: the library the file was saved with and the shaders it holds
+        char sp[1100]; snprintf(sp, sizeof sp, "%s.lib", g_pc_path);
+        char *sb = NULL; long sl = 0; FILE *sf = fopen(sp, "rb");
+        if (sf) { fseek(sf, 0, SEEK_END); sl = ftell(sf); fseek(sf, 0, SEEK_SET); if (sl > 0 && sl < (64l << 20) && (sb = malloc((size_t)sl)) && fread(sb, 1, (size_t)sl, sf) != (size_t)sl) sl = 0; fclose(sf); }
+        vka_pck_stamp old; vka_pck_parse(sb ? sb : "", sb ? (size_t)sl : 0, &old); free(sb);
+        int keep = VKA_ENV("DM_VK_PCACHE_KEEP", 50); size_t live, changed; uint64_t dead; uint64_t t0 = now_ns();
+        int d = vka_pck_decide(&old, g_pc_lib, keep, pck_hash_of, NULL, &g_pck, &live, &changed, &dead);
+        double ms = (now_ns() - t0) / 1e6;
+        switch (d) {
+        case VKA_PCK_CARRIED:
+            VLOG("pipeline cache %s (%zu bytes) is of another shader library: kept, %zu of the %zu shaders it lists are byte for byte the same in this one (%zu changed or dropped: "
+                 "their pipelines are made again), %llu stale shaders in the file in all, at most %d%% of the kept ones allowed (DM_VK_PCACHE_KEEP; %.0f ms)", g_pc_path, n, live, old.n, changed,
+                 (unsigned long long)dead, keep, ms); break;
+        case VKA_PCK_UNVERIFIED:
+            VLOG("pipeline cache %s (%zu bytes) is of another shader library: kept, its stamp (an older host's) names one library but lists no shaders; they are counted from this "
+                 "run on", g_pc_path, n); break;
+        case VKA_PCK_STALE:
+            VLOG("pipeline cache %s (%zu bytes) is of another shader library: started empty, %zu of the %zu shaders it lists are the same in this one, %llu stale (changed or "
+                 "dropped by this and earlier updates), over DM_VK_PCACHE_KEEP=%d%% of them; the next save replaces it (%.0f ms)", g_pc_path, n, live, old.n,
+                 (unsigned long long)(old.dead + changed), keep, ms); n = 0; break;
+        case VKA_PCK_OFF:
+            VLOG("pipeline cache %s (%zu bytes) is of another shader library: started empty (DM_VK_PCACHE_KEEP=0; the next save replaces it)", g_pc_path, n); n = 0; break;
+        case VKA_PCK_NO_STAMP:
+            VLOG("pipeline cache %s (%zu bytes) is not stamped with its shader library: started empty (it may hold every library's shaders, which would all be loaded; the next "
+                 "save replaces it)", g_pc_path, n); n = 0; break;
+        default: break;
+        }
+        if (!vka_pck_reads(d)) vka_pck_free(&g_pck);
+        vka_pck_free(&old);
+    }
     VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = n, .pInitialData = n ? data : NULL};
     VkResult r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc);
-    if (r && n) { ci.initialDataSize = 0; ci.pInitialData = NULL; r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc); }
+    if (r && n) { ci.initialDataSize = 0; ci.pInitialData = NULL; r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc); vka_pck_free(&g_pck); n = 0; }   // (started empty after all)
     if (r) { g_pc = VK_NULL_HANDLE; VRED("vkCreatePipelineCache %d: pipelines are built without a cache", r); }
-    else VLOG("pipeline cache %s: %zu bytes read", g_pc_path[0] ? g_pc_path : e && !strcmp(e, "0") ? "(none: DM_VK_PCACHE=0)" : "(not kept: no DM_TEMP or HOME)", n);
+    else VLOG("pipeline cache %s: %zu bytes read (its stamp lists %zu shaders, %llu stale)", g_pc_path[0] ? g_pc_path : e && !strcmp(e, "0") ? "(none: DM_VK_PCACHE=0)" : "(not kept: no DM_TEMP or HOME)", n,
+              g_pck.n, (unsigned long long)g_pck.dead);
     free(data);
     pw_load();
     pthread_t th;
@@ -202,7 +248,17 @@ static void save_now(void) {
         if (d) {
             char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", g_pc_path);
             FILE *f = fopen(tmp, "wb");
-            if (f && fwrite(d, 1, n, f) == n && !fclose(f) && !rename(tmp, g_pc_path)) g_saved_at = made;
+            if (f && fwrite(d, 1, n, f) == n && !fclose(f) && !rename(tmp, g_pc_path)) {
+                g_saved_at = made;
+                // Its stamp after it: the shaders it was read with that this library keeps, and those this run made. Written whole or not at all (a stamp that
+                // cannot be written is removed, and the next run starts empty)
+                char sp[1100], st[1200]; snprintf(sp, sizeof sp, "%s.lib", g_pc_path); snprintf(st, sizeof st, "%s.lib.tmp", g_pc_path);
+                size_t nr = 0, tl = 0; vka_pck_ent *run = g_pc_lib ? vka_shader_made(&nr) : NULL;
+                char *txt = g_pc_lib ? vka_pck_format(g_pc_lib, g_pck.dead, g_pck.ent, g_pck.n, run, nr, &tl) : NULL; free(run);
+                FILE *sf = txt ? fopen(st, "wb") : NULL;
+                if (!(sf && fwrite(txt, 1, tl, sf) == tl && !fclose(sf) && !rename(st, sp))) { if (sf) fclose(sf); unlink(st); unlink(sp); }
+                free(txt);
+            }
             else { if (f) fclose(f); unlink(tmp); static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("pipeline cache not written to %s", g_pc_path); d = NULL; n = 0; }
         }
     }
@@ -220,8 +276,9 @@ static void *saver_main(void *a) {
     }
     return NULL;
 }
-// From the replay thread at each submission: a save is due DM_VK_PCACHE_SAVE_S seconds (default 20) after the last one when pipelines were made since; it runs on the saver
-// thread. force (the end of the run, the shader library check): now, on the caller's thread
+// From the replay thread at each submission, and after a pipeline that took over 1 s on the frame path (a cold first 3D frame is one submission of a minute or more of
+// pipelines, and a run stopped in it saved none of them, so every run started cold again: Ocarina of Time, 2026-11-08): a save is due DM_VK_PCACHE_SAVE_S seconds (default
+// 20) after the last one when pipelines were made since; it runs on the saver thread. force (the end of the run, the shader library check): now, on the caller's thread
 void vka_pso_save(int force) {
     if (!g_pc) return;
     uint64_t t = now_ns();
@@ -310,10 +367,26 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
                            : fs && k->fs_variant == VKA_FS_RETYPE ? (fu | fsm ? vka_shader_fout_module(s, fu, fsm) : vka_shader_module(s, DMSH_VK_MOD_BASE))
                            : vka_shader_module(s, fs ? k->fs_variant : DMSH_VK_MOD_BASE);
         if (!mod && order[i] == 2 && k->gs_fx) mod = vka_shader_module(s, DMSH_VK_MOD_BASE);   // no module with the claim (logged): the shader as it is
+        if (mod && order[i] == 2 && sh[1]) {   // the pixel shader's inputs the geometry shader does not write, added (vka_shader_gs_link_module); none: the module above
+            VkShaderModule lm = vka_shader_gs_link_module(s, sh[0], sh[1], k->gs_fx && mod == vka_shader_gs_module(s));
+            if (lm) mod = lm;
+        }
         if (!mod) return 0;
+        // A task or mesh module that reads its subgroup lanes, with its specialization constants folded in instead of VkSpecializationInfo (vka_shader_spec_module)
+        VkShaderModule frz = order[i] >= 6 ? vka_shader_spec_module(s, gl) : VK_NULL_HANDLE;
+        if (frz) mod = frz;
+        // Float textures and images bound to integer texture views (vka_draw.c tex_masks): the module above with them retyped (vka_shader_tex_module); not with the geometry claim
+        int rg = vka_shader_tex_range(s);
+        if (rg >= 0 && rg < 5 && (k->tex_u[rg] | k->tex_s[rg])) {
+            vka_texmod_key tk = {fs ? (k->fs_variant == VKA_FS_RETYPE ? DMSH_VK_MOD_BASE : k->fs_variant) : DMSH_VK_MOD_BASE, order[i] == 0 ? k->vin_u : 0, order[i] == 0 ? k->vin_s : 0,
+                                 fu, fsm, frz ? gl : -1, k->tex_u[rg], k->tex_s[rg]};
+            VkShaderModule t = order[i] == 2 && k->gs_fx ? VK_NULL_HANDLE : vka_shader_tex_module(s, &tk);
+            if (t) mod = t;
+            else VRED_ONCE("%016llx: a stage module with its textures retyped was not made: its integer texture views are read as floats", (unsigned long long)s->key);
+        }
         uint32_t n = P->ns++;
         P->ss[n] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = (VkShaderStageFlagBits)stage_bit(s->e->stage), .module = mod, .pName = "main",
-                                                    .pSpecializationInfo = gl ? &P->spec : fs && P->afunc && (s->e->flags & DMSH_VK_F_ALPHA_TEST) ? &P->aspec : NULL};
+                                                    .pSpecializationInfo = frz ? NULL : gl ? &P->spec : fs && P->afunc && (s->e->flags & DMSH_VK_F_ALPHA_TEST) ? &P->aspec : NULL};
         uint32_t pin = (s->e->flags & DMSH_VK_F_SUBGROUP) ? vka_shader_sg_pin(s->e->stage) : 0;   // subgroup shaders of a stage whose size the device varies: pinned to the library's (vka_shader_sg_pin)
         if (pin) { P->rsg[n] = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin};
                    P->ss[n].pNext = &P->rsg[n]; }
@@ -354,10 +427,11 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
     P->ri = (VkPipelineRenderingCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor, .pColorAttachmentFormats = P->cf,
                                             .depthAttachmentFormat = (VkFormat)k->dfmt, .stencilAttachmentFormat = (VkFormat)k->sfmt};
     P->tess = !mesh && (sh[3] || sh[4]); P->mesh = mesh;
-    P->ci = (VkGraphicsPipelineCreateInfo){VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &P->ri, .stageCount = P->ns, .pStages = P->ss, .pVertexInputState = mesh ? NULL : &P->vi,
+    P->ci = (VkGraphicsPipelineCreateInfo){VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = vka_classic_rp() ? P->ri.pNext : &P->ri, .stageCount = P->ns, .pStages = P->ss, .pVertexInputState = mesh ? NULL : &P->vi,
         .pInputAssemblyState = mesh ? NULL : &P->ia,
         .pTessellationState = P->tess ? &P->ts : NULL, .pViewportState = &P->vp, .pRasterizationState = &P->rs, .pMultisampleState = &P->ms, .pDepthStencilState = &P->ds, .pColorBlendState = &P->bs,
         .pDynamicState = &P->dy, .layout = lay->layout};
+    if (vka_classic_rp()) { P->ci.renderPass = vka_rp_compat(P->cf, k->ncolor, (VkFormat)k->dfmt, (VkFormat)k->sfmt, k->samples); P->ci.subpass = 0; }   // DM_VK_CLASSIC_RP
     P->set0 = lay->set0;
     return 1;
 }
@@ -402,9 +476,19 @@ static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], con
     if (r) { p = VK_NULL_HANDLE; g_nfail++; } else { g_ngfx++; g_made++; if (!how) g_frame_made++; }
     g_create_ms += ms_; if (!how) g_create_ns += dns;   // made in the background or by prewarm: not the frame's time
     pthread_mutex_unlock(&g_mu);
+    if (!how && !r && ms_ > 1000) vka_pso_save(0);   // a slow one on the frame path: the save that is due now, not at the next submission (see vka_pso_save)
     const vka_shader *pre = P->mesh ? sh[7] : sh[0];   // the vertex shader, or a mesh pipeline's mesh shader
-    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("graphics pipeline (%s %016llx fragment %016llx, %u colour targets, topology %u): %d; its draws are skipped", P->mesh ? "mesh" : "vertex",
-                                                                         pre ? (unsigned long long)pre->key : 0ull, sh[1] ? (unsigned long long)sh[1]->key : 0ull, P->ri.colorAttachmentCount, P->mesh ? 0u : P->ia.topology, r); }
+    if (r) {   // every stage named: a geometry or tessellation shader in the pipeline is as likely to be the one the driver's compiler refused (DKB's terrain pipeline, 2026-11-07)
+        static _Atomic int n;
+        if (atomic_fetch_add(&n, 1) < 16) {
+            char mid[96]; size_t o = 0; mid[0] = 0;
+            if (!P->mesh && sh[3]) o += (size_t)snprintf(mid + o, sizeof mid - o, " tess control %016llx", (unsigned long long)sh[3]->key);
+            if (!P->mesh && sh[4] && o < sizeof mid) o += (size_t)snprintf(mid + o, sizeof mid - o, " tess evaluation %016llx", (unsigned long long)sh[4]->key);
+            if (!P->mesh && sh[2] && o < sizeof mid) o += (size_t)snprintf(mid + o, sizeof mid - o, " geometry %016llx", (unsigned long long)sh[2]->key);
+            VRED("graphics pipeline (%s %016llx%s fragment %016llx, %u colour targets, topology %u): %d; its draws are skipped", P->mesh ? "mesh" : "vertex",
+                 pre ? (unsigned long long)pre->key : 0ull, mid, sh[1] ? (unsigned long long)sh[1]->key : 0ull, P->ri.colorAttachmentCount, P->mesh ? 0u : P->ia.topology, r);
+        }
+    }
     else if (P->mesh) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 32) VLOG("mesh pipeline: task %016llx mesh %016llx fragment %016llx, %.1f ms%s", sh[6] ? (unsigned long long)sh[6]->key : 0ull,
                                                                                       (unsigned long long)sh[7]->key, sh[1] ? (unsigned long long)sh[1]->key : 0ull, ms_, how ? how : ""); }
     else if (ms_ > 50) {
@@ -444,7 +528,7 @@ static uint64_t g_nlib[NLIB], g_nlinked, g_nopt; static double g_lib_ms, g_link_
 static const char *const g_lib_name[NLIB] = {"vertex input", "pre-rasterization", "fragment shader", "fragment output", "pre-rasterization + fragment shader"};
 enum { A_NOCACHE = 1, A_RETAIN = 2, A_NORI = 4, A_COMBINED = 8 };
 static unsigned g_pre_adapt; static int g_pre_probed, g_pre_refused; static _Atomic int g_gpl_off;
-static int gpl_on(void) { return V.gpl && !atomic_load(&g_gpl_off); }
+static int gpl_on(void) { return V.gpl && !atomic_load(&g_gpl_off) && !vka_classic_rp(); }   // (classic render passes: full pipelines only)
 // A library's map value: the library, LIB_REFUSED (the driver refused it: the whole pipeline is made instead) or LIB_BUSY (a thread is making it). Several threads link
 // (the replay thread, the DM_VK_PSO_ASYNC threads) and often miss the same part at once (one fragment shader under many vertex shaders): the first claims the key with
 // LIB_BUSY and makes it, the others wait for it on g_lib_cv instead of compiling it again (each copy a slow compile, a second map entry and a leaked library). A thread
@@ -669,14 +753,17 @@ void vka_gpl_line(char *out, size_t n) {
 // frame path. A key names shaders by their library key and the state bytes (vka_gkey), not driver code, so one list serves every driver and survives a shader library
 // change (a shader that is no longer in the library drops its records). Records whose shaders are missing are dropped at the next save; the list keeps at most
 // DM_VK_PREWARM_KEEP records (default 16384), and a run makes at most DM_VK_PREWARM_MAX of them (default 8192): about 1 KB of host memory each, plus the driver's pipeline
-typedef struct { uint8_t kind, bad, pad[2]; uint32_t klen; uint64_t key[5]; } pwrec;   // then klen bytes of vka_gkey, padded to 8; kind 0 graphics, 1 compute (key[0])
+// inst[0] / inst[1]: an instanced run's pipeline (vka_draw.c): its vertex / pixel shader is the variant of key[0] / key[1] for the uniform block in slot inst - 1 of the shader's
+// own binding range (binding stage * DMSH_VK_STAGE_BINDINGS + slot; 0: the shader itself).
+// Older lists have zeros there; an older build reading a newer list makes the plain pipeline of such a record, which is harmless
+typedef struct { uint8_t kind, bad, inst[2]; uint32_t klen; uint64_t key[5]; } pwrec;   // then klen bytes of vka_gkey, padded to 8; kind 0 graphics, 1 compute (key[0])
 typedef struct { char magic[8]; uint32_t gkey_size, n; } pwhdr;      // NXVKPW1 (read only)
 typedef struct { char magic[8]; uint32_t gkey_size, n, layout, pad; } pwhdr2;   // NXVKPW2: layout = gkey_layout(), the key's field offsets (a size that stays the same hides a reordering)
 static const char PW_MAGIC[8] = "NXVKPW1", PW_MAGIC2[8] = "NXVKPW2";
 static uint32_t gkey_layout(void) {
     static const uint32_t o[] = {offsetof(vka_gkey, dfmt), offsetof(vka_gkey, ncolor), offsetof(vka_gkey, samples), offsetof(vka_gkey, topo), offsetof(vka_gkey, poly_mode),
-        offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att), offsetof(vka_gkey, vin_static),
-        offsetof(vka_gkey, va), offsetof(vka_gkey, vb), sizeof(vka_gkey), 2 /* the format's own version */};
+        offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u), offsetof(vka_gkey, tex_u), offsetof(vka_gkey, att), offsetof(vka_gkey, vin_static),
+        offsetof(vka_gkey, va), offsetof(vka_gkey, vb), sizeof(vka_gkey), 3 /* the format's own version */};
     return (uint32_t)fnv(o, sizeof o, 1469598103934665603ull);
 }
 // A record of the file before it is used: a file from another build, a truncated or damaged one must not reach pstate_fill (an ncolor of 200 indexes past cf[8]).
@@ -724,7 +811,12 @@ static void pw_note(int kind, vka_shader *const sh[5], const void *kb, uint32_t 
     if (!g_pw_path[0]) return;
     for (int i = 0; i < 5; i++) if (sh[i] && sh[i]->xform) return;   // a mesh draw's twins: made from a rewrite the list's keys cannot name
     pwrec r; memset(&r, 0, sizeof r); r.kind = (uint8_t)kind; r.klen = klen;
-    for (int i = 0; i < 5; i++) r.key[i] = sh[i] ? sh[i]->key : 0;
+    for (int i = 0; i < 5; i++) {   // an instanced variant: its base key and its binding, so the next run makes it ahead too (its pipeline was a frame-path hitch every run)
+        if (!vka_shader_is_variant(sh[i])) { r.key[i] = sh[i] ? sh[i]->key : 0; continue; }
+        uint32_t lo = sh[i]->e->stage * DMSH_VK_STAGE_BINDINGS, b = sh[i]->inst_bind - 1;
+        if (i > 1 || !sh[i]->inst_bind || b < lo || b - lo >= DMSH_VK_STAGE_BINDINGS) return;
+        r.key[i] = sh[i]->e->key; r.inst[i] = (uint8_t)(b - lo + 1);
+    }
     uint64_t h = fnv(kb, klen, fnv(&r, sizeof r, 1469598103934665603ull));
     pthread_mutex_lock(&g_pw_mu);
     if (pw_set_add(h)) { pw_append(&r, kb); g_pw_dirty = 1; }
@@ -800,7 +892,7 @@ static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen
         {"alpha to coverage", offsetof(vka_gkey, a2c), offsetof(vka_gkey, logic_en)}, {"logic op", offsetof(vka_gkey, logic_en), offsetof(vka_gkey, gl_depth)},
         {"GL depth", offsetof(vka_gkey, gl_depth), offsetof(vka_gkey, fs_variant)}, {"fragment variant", offsetof(vka_gkey, fs_variant), offsetof(vka_gkey, alpha_func)},
         {"alpha func", offsetof(vka_gkey, alpha_func), offsetof(vka_gkey, gs_fx)}, {"geometry claim", offsetof(vka_gkey, gs_fx), offsetof(vka_gkey, vin_u)},
-        {"vertex input retype", offsetof(vka_gkey, vin_u), offsetof(vka_gkey, att)}, {"blend", offsetof(vka_gkey, att), offsetof(vka_gkey, vin_static)},
+        {"vertex input retype", offsetof(vka_gkey, vin_u), offsetof(vka_gkey, tex_u)}, {"texture retype", offsetof(vka_gkey, tex_u), offsetof(vka_gkey, att)}, {"blend", offsetof(vka_gkey, att), offsetof(vka_gkey, vin_static)},
         {"static vertex input", offsetof(vka_gkey, vin_static), sizeof(vka_gkey)}};
     enum { NF = sizeof F / sizeof F[0] };
     uint64_t want[5]; for (int i = 0; i < 5; i++) want[i] = sh[i] ? sh[i]->key : 0;
@@ -822,7 +914,7 @@ static void pw_explain(vka_shader *const sh[5], const vka_gkey *k, uint32_t klen
               ms, linked ? ", linked" : "", same_sh, d[0] ? d : "nothing: the same key (the prewarm threads had not reached it yet)");
 }
 static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k, int prewarm, int *made);
-static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, int *made);
+static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, int *made, uint64_t umask, uint64_t smask);
 static void *pw_main(void *a) {
     (void)a; pthread_setname_np(pthread_self(), "vk-prewarm");
     setpriority(PRIO_PROCESS, 0, 10);   // this thread (Linux: per-thread nice), under the game's threads
@@ -839,12 +931,18 @@ static void *pw_main(void *a) {
         vka_shader *sh[VKA_NSTAGE]; memset(sh, 0, sizeof sh); int bad = !pw_rec_ok(&r, kb);
         if (bad) {}
         else if (r.kind == 1) { if (!(sh[5] = vka_shader_by_key(r.key[0]))) bad = 1; }
-        else for (int s = 0; s < 5; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
+        else {
+            for (int s = 0; s < 5; s++) if (r.key[s] && vka_shader_variant_key(r.key[s])) bad = 2;   // an older list's instanced variant: dropped quietly
+            for (int s = 0; s < 5 && !bad; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
+        }
         vka_layout lay;
         if (!bad && !vka_layout_of(sh, r.kind == 1, &lay)) bad = 1;
+        int skip = 0;   // an instanced run's pipeline with instancing off: not made, kept in the list
+        for (int s = 0; s < 2 && !bad && !skip && r.kind == 0; s++) if (r.inst[s] && !(sh[s] = vka_inst_variant(sh[s], sh[s]->e->stage * DMSH_VK_STAGE_BINDINGS + r.inst[s] - 1u))) skip = 1;
+        if (skip) continue;
         int made = 0;
         if (bad) { atomic_fetch_add(&g_pw_bad, 1); pw_mark_bad(offs[i]); }
-        else if (r.kind == 1) { cs_obtain(sh[5], &lay, 1, &made); }
+        else if (r.kind == 1) { cs_obtain(sh[5], &lay, 1, &made, 0, 0); }
         else {
             vka_gkey k; memset(&k, 0, sizeof k); memcpy(&k, kb, r.klen < sizeof k ? r.klen : sizeof k);
             if (k.vin_static != (uint32_t)!V.vin_dyn) { atomic_fetch_add(&g_pw_bad, 1); }   // a list from a device with the other vertex input (not this one's keys)
@@ -1044,11 +1142,14 @@ VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *
 }
 
 // ---------- Compute pipelines ----------
-typedef struct { vka_shader *cs; VkPipelineLayout layout; } ckey;
+typedef struct { vka_shader *cs; VkPipelineLayout layout; uint64_t umask, smask; } ckey;   // masks: storage images retyped for integer textures (vka_shader_img_module)
 static kmap g_cs = {.klen = sizeof(ckey)};
-static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, int *made) {
+static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, int *made, uint64_t umask, uint64_t smask) {
     *made = 0;
-    ckey k; memset(&k, 0, sizeof k); k.cs = cs; k.layout = lay->layout;
+    if (VKA_ENV("DM_VK_SKIP_NDVE", 1) && vka_is_ndve_key(cs->key)) return VK_NULL_HANDLE;
+    VkShaderModule csm = umask | smask ? vka_shader_img_module(cs, umask, smask) : vka_shader_cs_module(cs);
+    if (!csm) return VK_NULL_HANDLE;   // (a retyped module that cannot be made: the caller takes the base pipeline)
+    ckey k; memset(&k, 0, sizeof k); k.cs = cs; k.layout = lay->layout; k.umask = umask; k.smask = smask;
     uint64_t h = fnv(&k, sizeof k, 1469598103934665603ull);
     pthread_mutex_lock(&g_mu);
     gval *g = km_get(&g_cs, &k, h);
@@ -1069,7 +1170,7 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     VkBool32 gl_true = VK_TRUE; VkSpecializationMapEntry me = {DMSH_VK_SPEC_GL_DEPTH, 0, sizeof(VkBool32)}; VkSpecializationInfo spec = {1, &me, sizeof gl_true, &gl_true};
     int gl = cs->xform == VKA_XF_MESH && (cs->e->flags & DMSH_VK_F_GL_DEPTH) && !vka_depth_zero();
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = spill ? VK_PIPELINE_CREATE_DISPATCH_BASE_BIT : 0, .layout = lay->layout,
-        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = vka_shader_cs_module(cs), .pName = "main",
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rsg : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = csm, .pName = "main",
                   .pSpecializationInfo = gl ? &spec : NULL}};
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
@@ -1101,10 +1202,12 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     g->p = p; g->busy = 0; pthread_cond_broadcast(&g_busy_cv);
     pthread_mutex_unlock(&g_mu);
     if (r && !over) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute pipeline %016llx: %d; its dispatches are skipped", (unsigned long long)cs->key, r); }
-    { double ms_ = (now_ns() - t0) / 1e6; static _Atomic int n; if (!r && ms_ > 50 && atomic_fetch_add(&n, 1) < 200) VLOG("compute pipeline %016llx took %.0f ms%s", (unsigned long long)cs->key, ms_, prewarm ? " (prewarm)" : ""); }
-    if (!prewarm && !over) { vka_shader *s5[5] = {cs, NULL, NULL, NULL, NULL}; pw_note(1, s5, "", 0); }   // (one not made stays out of the prewarm list)
+    { double ms_ = (now_ns() - t0) / 1e6; static _Atomic int n; if (!r && ms_ > 50 && atomic_fetch_add(&n, 1) < 200) VLOG("compute pipeline %016llx took %.0f ms%s", (unsigned long long)cs->key, ms_, prewarm ? " (prewarm)" : "");
+      if (!prewarm && !r && ms_ > 1000) vka_pso_save(0); }
+    if (!prewarm && !over && !(umask | smask)) { vka_shader *s5[5] = {cs, NULL, NULL, NULL, NULL}; pw_note(1, s5, "", 0); }   // (one not made stays out of the prewarm list)
     *made = 1;
     return p;
 }
-VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; return cs_obtain(cs, lay, 0, &made); }
+VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; return cs_obtain(cs, lay, 0, &made, 0, 0); }
+VkPipeline vka_cs_pipeline_img(vka_shader *cs, const vka_layout *lay, uint64_t umask, uint64_t smask) { int made; return cs_obtain(cs, lay, 0, &made, umask, smask); }
 #endif
