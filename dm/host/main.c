@@ -109,6 +109,19 @@ static void host_preload(int argc, char **argv) {
         for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
+    if (!n) {   // an Android pack names the modules it was made with (pack.tsv "modules"): a game whose registered builds have different module sets (Mario Kart World: 1.8.0 has a subsdk1 that 1.0.0 lacks)
+        char path[1024], line[512]; snprintf(path, sizeof path, "%s/pack.tsv", argv[1]);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            while (fgets(line, sizeof line, f)) if (!strncmp(line, "modules\t", 8)) {
+                line[strcspn(line, "\r\n")] = 0;
+                char *s = strdup(line + 8);
+                for (char *t = strtok(s, " "); t && n < DM_GAME_NMOD; t = strtok(NULL, " ")) names[n++] = t;
+                break;
+            }
+            fclose(f);
+        }
+    }
     if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
     load_modules(argv[1], names, n);
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
