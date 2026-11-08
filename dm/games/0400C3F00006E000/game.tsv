@@ -1,7 +1,8 @@
-# Mario Kart World (Switch 2), the build of the dump the user supplies (SDK 19.3.3, no control data, so no display version): one Application content (version 0), no separate update. In bring-up
-# Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2), SDK 19.3.3 built for the Switch 2 (spec Ounce), NVN2; modules main + subsdk0 (nn::ecli, Nintendo's embedded Mono runtime; main
-# imports its allocator) + sdk. This build has no movie module: the 1.8.0 build (SDK 21.4.0: main d00e4f39..., subsdk0 = NintendoSDK movie 746302f4..., subsdk1 = ecli 8dec9c0b..., sdk 7a68b13d...) is
-# not registered any more (README, Builds): its dump is not on this machine and a profile has one build row a version and one module list.
+# Mario Kart World (Switch 2): two builds of the same game, both registered and treated alike: 1.0.0 (the dump supplied on the Android development machine: SDK 19.3.3, main 9e244438..., no
+# separate update, no control data) and 1.8.0 (SDK 21.4.0: main d00e4f39..., subsdk0 = NintendoSDK movie 746302f4..., subsdk1 = nn::ecli 8dec9c0b..., sdk 7a68b13d...). Nothing in this
+# profile or in the host is keyed to one of them: the shader tables are the union of both (shader_optional.tsv: the keys only one build has), and a dump takes the modules of the build
+# row it matches (pack_android.py). In bring-up on Android: Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2), built for the Switch 2 (spec Ounce), NVN2; modules main + subsdk0
+# + sdk, and for 1.8.0 subsdk1 too (1.0.0 has one module less: its subsdk0 is the ecli, whose allocator main imports).
 # Packed from a dump folder (base/). Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code), as Donkey Kong Bananza.
 
 # ---- Identity ----
@@ -15,13 +16,16 @@ app_category	public.app-category.racing-games
 pad_layout	full
 
 # ---- Versions ----
-# The dump is version 0 as the 1.8.0 one was, so this build takes the v0 row. Its display version is not known (no control.nacp in the dump): the row says "unknown"
-build	v0	unknown	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
+# One row a version number: the 1.0.0 dump is version 0 (the base game); 1.8.0 is update 524288 (a dump that keeps its code under another number, in base/ as the first 1.8.0 dump did,
+# is that build all the same: the launcher and the packer compare build IDs, not version numbers). Display versions as the game's releases are named
+build	v0	1.0.0	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
+build	v524288	1.8.0	main=d00e4f399e411d0613aa8d26b1c02fef	subsdk0=746302f49f095cfca3d2188423c2bd77	subsdk1=8dec9c0b1bed821364e77b10a07b9a28	sdk=7a68b13d88183767fb9c7babffe89f3d
 package	v0
-shader_versions	v0
+shader_versions	v0 v524288
 
 # ---- Files ----
-modules	main subsdk0 sdk
+# every module of either build, in load order: a dump takes those of its own build (a module the other build has and this one lacks is left out)
+modules	main subsdk0 subsdk1 sdk
 romfs_marker	System/Resource/ResourceSizeTable.Product.100.Nin_Ounce_NVN2.rsizetable.zs
 zip_store	.zs:.bwav:.webm:.metallib
 

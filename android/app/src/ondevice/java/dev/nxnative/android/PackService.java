@@ -499,6 +499,19 @@ public final class PackService extends Service {
         try {
             File want = new File(PackNative.repo(), "dm/games/" + j.titleId() + "/shader_map.tsv");
             if (java.util.Arrays.equals(Files.readAllBytes(want.toPath()), Files.readAllBytes(have.toPath()))) return null;
+            // A game with several registered builds (shader_optional.tsv: the keys only some of them have): the map is the union of theirs, and a dump of one build lacks the others' keys
+            File optional = new File(want.getParentFile(), "shader_optional.tsv");
+            if (optional.isFile()) {
+                java.util.Set<String> wk = mapKeys(want), hk = mapKeys(have), ok = mapKeys(optional);
+                java.util.TreeSet<String> missing = new java.util.TreeSet<>(wk);
+                missing.removeAll(hk);
+                if (wk.containsAll(hk) && ok.containsAll(missing)) {   // nothing the profile does not know, and nothing missing but the other builds' shaders
+                    File absent = new File(new File(split, "pkg"), "_absent.tsv");   // vk_android_build.py leaves these keys out
+                    if (missing.isEmpty()) absent.delete();
+                    else Files.write(absent.toPath(), (String.join("\n", missing) + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    return null;
+                }
+            }
         } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
             return "cannot compare the dump's shaders with the app's list: " + e.getMessage();
         }
@@ -511,6 +524,18 @@ public final class PackService extends Service {
         j.stepState("split", "pending");
         return "the dump's shaders are not the ones this app knows for " + j.name() + " (" + Profile.versionName(j.version()) + ", " + have.getName()
                 + " differs). The dump may be incomplete or modified: dump the game again, then Retry";
+    }
+
+    /** The shader keys of a shader_map.tsv (column 4 of its rows) or of shader_optional.tsv (column 1) */
+    private static java.util.Set<String> mapKeys(File f) throws IOException {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (String l : Files.readAllLines(f.toPath(), java.nio.charset.StandardCharsets.UTF_8)) {
+            if (l.isEmpty() || l.startsWith("#") || l.startsWith("package\t")) continue;
+            String[] c = l.split("\t", 6);
+            if (f.getName().equals("shader_map.tsv")) { if (c.length > 4 && c[0].endsWith(".bin")) out.add(c[3]); }
+            else out.add(c[0]);
+        }
+        return out;
     }
 
     /** Reads the step's log as it grows: progress lines into the job, the last [RED] line for a failure's message */

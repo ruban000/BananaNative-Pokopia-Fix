@@ -360,6 +360,12 @@ MAP = str(GAME.table('shader_map.tsv')); pc_of, loc = {}, {}
 for ln in open(MAP):
     c = ln.rstrip('\n').split('\t')
     if len(c) > 4 and c[0].endswith('.bin'): pc_of.setdefault(c[3], c[4]); loc.setdefault(c[3], (c[0], int(c[1])))
+# A game with several registered builds has the union of their shaders in its map (shader_optional.tsv); the keys this dump lacks, which only another build has, are in the package's
+# _absent.tsv (pack_android.py split_shaders, the launcher's PackService): left out of this library
+_absent = os.path.join(dm_dir, '_absent.tsv')
+if os.path.isfile(_absent):
+    _gone = [k for k in (l.strip() for l in open(_absent)) if k and loc.pop(k, None) is not None]
+    print(f'{len(_gone)} shaders of the profile\'s map are in another registered build only ({_absent}): not built', flush=True)
 PAIRS = NS['load_pairs'](GAME, dm_dir)
 _dw = GAME.table('dual_want.tsv')   # pixel shaders a pipeline blends with output 1 as the second source (dmsh_build.py DUAL_WANT, from the Mac host's DM_NVN_DUAL_WANT)
 DUAL_WANT = {l.split()[0] for l in open(_dw) if l.strip() and not l.lstrip().startswith('#')} if _dw.exists() else set()

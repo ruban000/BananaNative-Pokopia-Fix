@@ -15,12 +15,16 @@ A Switch 2 game. **The registered build is the dump the user supplies** (2026-11
 
 ## Builds
 
+Two builds of one game, both registered and treated alike (current, 2026-11-08): nothing in the profile or the host is keyed to one of them, and a dump of either packs and plays.
+
 | Version | Display | Modules (build IDs) | Status |
 |---|---|---|---|
-| `v0` | not known (no control data) | main `9e244438c3d8ef1c703a6a85ef99c4f0`, subsdk0 `d39a7a3d44530bb61b35690e5b0383d5` (ecli), sdk `90ebba182862b9ecdc21fcb87b999012`, SDK 19.3.3 | **registered** (`build v0 unknown`, `modules main subsdk0 sdk`): the dump the user supplies on the Android development machine (2026-11-04), so this is the build the work is based on. No build-keyed cuts, gates or host fixes |
-| `v0` (1.8.0) | 1.8.0 | main `d00e4f39…`, subsdk0 `746302f4…` (movie), subsdk1 `8dec9c0b…` (ecli), sdk `7a68b13d…` | **no longer registered** (2026-11-04): a profile has one row a version and one module list, and its dump is not on the machine that works on this profile now. Packing it gives the "not the profile's build" red lines and stops at the missing `subsdk1`. Most of the "Boot (Android; 1.8.0)" findings below were made on it; the code paths they fixed are the host's, not the build's |
+| `v0` | 1.0.0 | main `9e244438c3d8ef1c703a6a85ef99c4f0`, subsdk0 `d39a7a3d44530bb61b35690e5b0383d5` (ecli), sdk `90ebba182862b9ecdc21fcb87b999012`, SDK 19.3.3 | **registered**: the dump supplied on the Android development machine (2026-11-04), no control data (the display version is the user's: the SDK is that of the launch build); no separate update. Run on the AYN Thor. |
+| `v524288` | 1.8.0 | main `d00e4f399e411d0613aa8d26b1c02fef`, subsdk0 `746302f49f095cfca3d2188423c2bd77` (movie), subsdk1 `8dec9c0b1bed821364e77b10a07b9a28` (ecli), sdk `7a68b13d88183767fb9c7babffe89f3d`, SDK 21.4.0 | **registered** again (2026-11-08), as it was first (then as `v0`: the first 1.8.0 dump kept its code in `base/`; the launcher and the packer compare build IDs, so that dump is this build). Not run since the union of the tables; its dump is not on the Android development machine. |
 
-The rewriter (`patch_nso.py --target android`) needs no cut on any 1.8.0 module ([Rewrite of 1.8.0](#rewrite-of-180)), and the profile has no `patches.py`: nothing was carried over with `nso_fnmap.py`. The addresses in this note from before 1.8.0 (`main+0x68524c`, `main+0xc10170`) are the earlier build's.
+The tables (`shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv`) are the union of the two builds' (11,714 shaders: 11,451 in both, 110 only in 1.0.0, 153 only in 1.8.0), and `shader_optional.tsv` names the 263 that only one has; a dump lacks the other build's. [A game with several registered builds](../../../docs/reference/packing.md#a-game-with-several-registered-builds-android). Facts that differ for a key take 1.0.0's (six keys: five texture formats the newer translator found, one mesh program's pair of shaders, which is a dump's own: open for 1.8.0).
+
+The rewriter (`patch_nso.py --target android`) needs no cut on any module of either build ([Rewrite of 1.8.0](#rewrite-of-180)), and the profile has no `patches.py`: nothing was carried over with `nso_fnmap.py`. The addresses in this note from before 1.8.0 (`main+0x68524c`, `main+0xc10170`) are the earlier build's.
 
 ## Files
 

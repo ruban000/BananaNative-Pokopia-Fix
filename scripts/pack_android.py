@@ -138,6 +138,23 @@ def unregistered(g, ids):
     return {m: sorted(known[m]) for m, i in ids.items() if known.get(m) and i not in known[m]}
 
 
+def dump_modules(g, exe):
+    """The profile's modules that a dump loads. All of them, unless the profile registers builds with different module sets (Mario Kart World: 1.8.0 has a subsdk1 that 1.0.0 lacks):
+    then the modules of the build row the dump matches (the modules that row names are all there, with its build IDs, and the others are not)"""
+    mods = g.words('modules'); have = [m for m in mods if (exe / m).is_file()]
+    if len(have) == len(mods): return mods
+    for row in g.builds().values():
+        want = [m for m in mods if m in row]
+        if want and want == have and all(nso_build_id(exe / m) == row[m] for m in want): return have
+    return mods   # no row has this set of modules: the caller names what is missing
+
+
+def optional_keys(g):
+    """The keys of the profile's shader_map.tsv that only some of its registered builds have (shader_optional.tsv): a dump may lack them"""
+    f = g.dir / 'shader_optional.tsv'
+    return {l.split('\t')[0] for l in f.read_text().splitlines() if l and not l.startswith('#')} if f.is_file() else set()
+
+
 def run_in_process(script, args, env, log):
     """script run as `python3 script args` would run it, in this process: its sys.argv, env added to os.environ, stdout and stderr to the file log;
     everything put back after it (the modules it imported from outside the standard library are dropped, so the next run starts afresh). → its exit code"""
@@ -297,13 +314,18 @@ def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs,
     if r.returncode: raise Error(f'shader_split.py exit code {r.returncode}')
     if (g.dir / 'shader_map.tsv').is_file():
         want, have = map_keys(g.dir / 'shader_map.tsv'), map_keys(tmp / 'shader_map.tsv')
-        if missing := sorted(want - have):
-            raise Error(f'the dump\'s shaders lack {len(missing)} of the {len(want)} in the profile\'s shader_map.tsv (e.g. {", ".join(missing[:3])}): the dump is of another version '
+        missing = sorted(want - have)
+        if hard := [k for k in missing if k not in optional_keys(g)]:
+            raise Error(f'the dump\'s shaders lack {len(hard)} of the {len(want)} in the profile\'s shader_map.tsv (e.g. {", ".join(hard[:3])}): the dump is of another version '
                         f'or incomplete, and the profile\'s shader library cannot be built from it (the split is in {tmp})')
         for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv'):
             if (g.dir / f).is_file() and (g.dir / f).read_bytes() != (tmp / f).read_bytes():
                 print(f'shaders: the dump\'s {f} differs from the profile\'s ({len(have - want)} shaders more); the library is the profile\'s, its shaders found in the package by key')
     shutil.rmtree(pkg, ignore_errors=True); (tmp / 'pkg').rename(pkg)
+    absent = sorted(want - have) if (g.dir / 'shader_map.tsv').is_file() else []   # the keys only another registered build has (shader_optional.tsv): vk_android_build.py leaves them out
+    if absent:
+        (pkg / '_absent.tsv').write_text(''.join(k + '\n' for k in absent))
+        print(f'shaders: {len(absent)} of the profile\'s {len(want)} shaders are not in this dump (they belong to another registered build of the game, shader_optional.tsv): the library leaves them out')
     for f in tmp.iterdir(): f.replace(pkg.with_name(f.name))
     tmp.rmdir()
 
@@ -374,7 +396,7 @@ def main():
         exe, romfs = pack_dump.version_part(folder, vers, ver, 'exefs'), pack_dump.version_part(folder, vers, ver, 'romfs')   # its own, else the base's
         if not (exe / 'main.npdm').is_file() or not romfs.is_dir(): raise Error(f'{vdir}: no exefs/main.npdm and romfs (neither its own nor the base\'s)')
         if (pid := pack_dump.program_id(exe / 'main.npdm')) != app: raise Error(f'{vdir}: program ID {pid:016X}, the base is {app:016X}')
-        mods = g.words('modules')
+        mods = dump_modules(g, exe)
         srcs = {m: exe / m for m in mods}
         if missing := [m for m in mods if not srcs[m].is_file()]: raise Error(f'{exe}: no {", ".join(missing)} (the profile\'s modules are {" ".join(mods)})')
         out = (a.out or folder.parent / f'{app:016X}-work' / 'android-pack').resolve()
