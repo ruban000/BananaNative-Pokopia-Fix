@@ -1730,7 +1730,38 @@ for g in spin_regions: spin_emit(g)
 if os.environ.get('DM_SPIN_LIST'):
     for T, bes, n in spin_sites: print(f'{NAME} spin wait {T:#x} ({n} instructions), back-edges ' + ' '.join(f'{b:#x}' for b in bes))
 
+# ---- Pointer authentication (android) ----
+# Switch 2 builds are compiled with return address signing (-mbranch-protection=pac-ret: pacibsp in a function's prologue, autibsp or retab at its end; 22,631 retab in Pokopia's
+# sdk, 79,219 in its main). The hint forms (paciasp / pacibsp / autiasp / autibsp / paciaz / ... / pacia1716 ...) run as no-ops on a CPU without Armv8.3 PAuth, but retab (and
+# retaa) is not a hint: the Snapdragon 865's Cortex-A77 raises SIGILL on it (Pokopia on a Retroid Pocket 5: CRASH sig=4 at sdk+0x1520bc, `add sp, sp, #0x40; retab`, 0.18 s into the
+# run). Apple silicon and the newer Snapdragons have PAuth. So the android output signs and authenticates nothing: every PAuth hint becomes a nop and retaa / retab becomes ret.
+# All of them go together, in the text and in the patch area (a function's first instruction, relocated by an observation gate, is a copy there): one left of a pair would run on a
+# CPU with PAuth, where `ret` to a signed address or `autibsp` on an unsigned one faults. Done last, so everything above sees the file's words. apple keeps its output.
+# The register forms (pacia / pacib / pacda / pacdb, their z forms, autia ... autdb, xpaci / xpacd: 5 in Pokopia's sdk, `xpaci x30` after a pacibsp and a pacia that signs a function pointer to
+# compare it) leave the register as it was once nothing is signed, so they become nops as well. The branch forms (braa / brab / blraa / blrab and their z forms, eretaa / eretab) are
+# not rewritten, and none is in the games on hand: they are counted and reported, since on a CPU without PAuth they fault and with it they would authenticate pointers nothing signs
+RET_X30 = 0xD65F03C0
+PAC_HINTS = tuple(NOP | h << 5 for h in (8, 10, 12, 14, 24, 25, 26, 27, 28, 29, 30, 31))   # pacia1716, pacib1716, autia1716, autib1716, paciaz, paciasp, pacibz, pacibsp, autiaz, autiasp, autibz, autibsp
+PAC_RETS = (0xD65F0BFF, 0xD65F0FFF)   # retaa, retab
+PAC_ALL = {struct.pack('<I', w): (NOP if w in PAC_HINTS else RET_X30) for w in PAC_HINTS + PAC_RETS}
+PAC_RE = re.compile(b'(?=(' + b'|'.join(re.escape(k) for k in PAC_ALL) + b'|.[\\x00-\\x47]\\xc1\\xda))', re.S)   # a lookahead, so a match at an odd offset hides no word at a multiple of 4. The last form is the data-processing (1 source) group with opcode2 00001, all of it PAuth: pac* / aut* with a register (opcode 0-7, the z forms 8-15), xpaci / xpacd (16, 17)
+PAC_BRANCH_RE = re.compile(b'(?=(.[\\x08-\\x0f][\\x1f\\x3f\\x5f\\x9f][\\xd6\\xd7]))', re.S)   # br / blr / ret / eret with bits 15:10 = 00001x (the a / b forms), after retaa / retab became ret
+def pac_strip(buf, ranges):
+    """Rewrite the PAuth words in buf over ranges ([start, end) at multiples of 4): hints and register forms → nop, retaa / retab → ret. (the number of words, the offsets of the branch forms left)"""
+    hits = [m.start() for s, e in ranges for m in PAC_RE.finditer(buf, s, e) if m.start() % 4 == 0]
+    for o in hits: buf[o:o + 4] = struct.pack('<I', PAC_ALL.get(bytes(buf[o:o + 4]), NOP))
+    other = [m.start() for s, e in ranges for m in PAC_BRANCH_RE.finditer(buf, s, e) if m.start() % 4 == 0]
+    return len(hits), other
+
 progress('write')
+if TARGET == 'android':
+    n_pac, pac_other = pac_strip(IMG, CODE_RANGES)
+    for area in (patch_front, patch_back):
+        n, other = pac_strip(area, [(0, len(area) & ~3)]); n_pac += n; pac_other += [-1] * len(other)   # (a branch form relocated into the patch area counts too; it has no text offset)
+    if n_pac:
+        stats['pac'] = n_pac
+        orig_text = bytearray(ORIG_TEXT); pac_strip(orig_text, CODE_RANGES); ORIG_TEXT = bytes(orig_text)   # changed.tsv names what else changed: this pass is on every function and no cheat needs to avoid it
+    if pac_other: print(f'[RED] {NAME}: {len(pac_other)} pointer authentication instructions that are not rewritten (they fault on a CPU without PAuth), first at ' + ' '.join(f'{o:#x}' for o in pac_other[:8]), flush=True)
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 patch = patch_front

@@ -346,6 +346,14 @@ To enroll a cut for any game's own module:
 - **Fix:** the zero check runs on Apple only (`loader.c`); on both platforms the loader now checks that no two slots share an entry.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), the first game booted on Android (arm64 emulator).
 
+### Pointer authentication on a CPU without Armv8.3 PAuth (Android)
+
+- **Symptom:** `CRASH sig=4 addr=sdk+0x1520bc pc=sdk+0x1520bc` (SIGILL) 0.18 s into the run, at `nnosInitialize`, in a function ending `add sp, sp, #0x40; retab`. Only on phones without PAuth: a Retroid Pocket 5 (Snapdragon 865, Cortex-A77, Armv8.2) with Turnip, Android 13. The readiness check passes.
+- **Cause:** the Switch 2 builds are compiled with return address signing (`-mbranch-protection=pac-ret`): `pacibsp` in a function's prologue, `autibsp` or `retab` at its end (Pokopia v655360: 79,219 `retab` in `main`, 22,631 in `sdk`, 1,337 in `subsdk0`). The hint forms (`pacia*` / `pacib*` / `autia*` / `autib*` with `sp`, `z` or `1716`) run as no-ops on an older CPU, but `retaa` / `retab` are not hints and fault. The register forms (`pacia x1, x9`, `xpaci x30`: 5 in Pokopia's `sdk`) fault as well. Apple silicon and the newer Snapdragons have PAuth, so nothing showed it before.
+- **Fix:** with `--target android` the rewriter signs and authenticates nothing (`pac_strip`, `patch_nso.py`, the last step before the image is written): every PAuth hint and register form becomes a `nop`, `retaa` / `retab` become `ret`. Same-size words, so no address moves. All of them go together, in the text and in the patch area (a function's first instruction relocated by an observation gate is a copy there): one left of a pair would fault on a CPU that has PAuth. `xpaclri` stays (a hint, an identity on an unsigned `lr`). The branch forms (`braa` / `blraa` / `eretaa` and their relatives) are not rewritten; none is in the games on hand, and the rewrite prints a `[RED]` line if one is found. `--target apple` is byte-identical (`sdk` of Pokopia compared; changed.tsv is the same on both, the cheat engine sees nothing new). Existing Android packs are rewritten again: the key hashes this file.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) on a Snapdragon 865 ([issue 16](https://git.eden-emu.dev/moceure/BananaNative/issues/16)). Every Switch 2 module has the same pattern.
+- **Open:** the rewrite has not run on a phone without PAuth yet. Memory is the next limit there: the game asks for 8.92 GB on a phone with 7.5 GiB.
+
 ## Relocations and module layout
 
 ### Packed relative relocations (DT_RELR)
