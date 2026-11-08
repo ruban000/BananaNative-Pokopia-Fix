@@ -1763,6 +1763,7 @@ vka_img *vka_tex_get(const tex_t *t, VkCommandBuffer cb) {
                 }
             }
             pthread_mutex_unlock(&g_tmu);
+            nvn_pool_use(0);
             return im;
         }
         if (g_first_sampled) { g_lazy_hit = 1; pthread_mutex_unlock(&g_tmu); nvn_pool_use(0); return NULL; }   // still nothing but zeros
