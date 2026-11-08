@@ -137,7 +137,7 @@ android {
         buildConfigField 'String', 'NX_REWRITER', "\"$nxRewriter\""
         externalNativeBuild {
             cmake {
-                arguments "-DNX_GAMES=${nxGames.join(',')}", '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', "-DNX_LSFG=${nxLsfg ? 'ON' : 'OFF'}""
+                arguments "-DNX_GAMES=${nxGames.join(',')}", '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', "-DNX_LSFG=${nxLsfg ? 'ON' : 'OFF'}"
                 // a host and its shim per game, then the custom GPU drivers' loader and hooks (DM_VK_DRIVER)
                 targets(*(nxGames.collectMany { ["nxhost_$it".toString(), "nxlaunch_$it".toString()] } + ['nxadreno', 'hook_impl', 'main_hook']))
             }

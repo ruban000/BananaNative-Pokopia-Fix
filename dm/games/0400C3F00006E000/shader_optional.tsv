@@ -1,4 +1,4 @@
-# kind: evidence  shader keys of shader_map.tsv that only one of the registered builds has (Mario Kart World 1.0.0 / 1.8.0: the same game, another RomFS): a dump may lack them, and the shader library of that dump leaves them out (pack_android.py, vk_android_build.py, the launcher's packer). Generated from the two builds' maps: key <TAB> the build that has it
+# kind: evidence  shader keys of shader_map.tsv that only one of the registered builds has (Mario Kart World 1.0.0 / 1.8.0: the same game, another RomFS): a dump may lack them, and the shader library of that dump leaves them out (pack_android.py, vk_android_build.py, the launcher's packer). Generated from the two builds' maps: key <TAB> the build that has it; also a key the splitter no longer reads (marked `split`): a BAHS entry that lies inside a control section is a false entry, which shader_split.py skips since upstream's v0.2.1 (a compute shader of agl_common.sharcb@0x5c778 that the game never loads)
 01767247abe26987	1.0.0
 01f5103e6641dde3	1.0.0
 03923de3c507135e	1.0.0
@@ -262,3 +262,4 @@ fd413f04f59c161e	1.8.0
 fd4a4b6ab2f4346e	1.8.0
 fe4df4d9ea28f672	1.8.0
 ff86499c4242fe2e	1.8.0
+797e77c2ec4341c5	split
