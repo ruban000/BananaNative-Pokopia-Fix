@@ -801,9 +801,11 @@ static void read_image(int fd, void *dst, size_t size, off_t off, const char *pa
 // RETAB/RETAA become RET, which is exactly what the failed (NOP) signing leaves
 // valid. The cold PAC instructions stay in crash.c's SIGILL path -- the register
 // forms as NOPs, PACGA computed, since it produces a value and has no
-// single-instruction stand-in.
-int dm_host_has_pac(void);   // crash.c
+// single-instruction stand-in. Android only: the Apple hosts always have PAuth (crash.c's dm_host_has_pac returns 1 there), and the
+// host unit tests (dm/host/tests, t_nro) compile loader.c without crash.c
 static void pac_patch_text(module_t *m) {
+#if PLAT_ANDROID
+    int dm_host_has_pac(void);   // crash.c
     if (dm_host_has_pac()) return;   // the CPU signs return addresses for real: RETAB must stay RETAB
     uint32_t *w = (uint32_t *)m->base;
     const size_t n = (size_t)(m->text_end / 4);
@@ -813,6 +815,9 @@ static void pac_patch_text(module_t *m) {
         if (v == 0xD65F0FFFu || v == 0xD65F0BFFu) { w[i] = 0xD65F03C0u; cnt++; }   // RETAB / RETAA -> RET
     }
     if (cnt) LOG("%s: %zu RETAB/RETAA returns rewritten to RET (host CPU has no PAC)", m->name, cnt);
+#else
+    (void)m;
+#endif
 }
 
 // Seal the code area immediately after reading into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;

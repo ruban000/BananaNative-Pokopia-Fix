@@ -72,6 +72,9 @@ static void vka_rp_sub_begin(void){}
 static uint64_t vka_rp_sub_commit(uint64_t reserved){g_cur_fence=0;return reserved?reserved:vka_fence_next();}
 static void post(pop p){g_post[g_npost++]=p;}
 static void seg_write(const void*p){(void)p;}
+static const uint8_t *g_xret[17];static int g_nxret;   // (exec's look-ahead return points and the indirect mesh draw hooks of upstream's vka_exec.c: not under test here)
+static void mdx_write(void){}
+static void mdx_before_draw(const uint8_t*p,const p_draw*d){(void)p;(void)d;}
 static int rc_known(uint64_t a,uint64_t*v){(void)a;*v=0;return 0;}
 static void chunk_check(void){}
 static void vka_rp_end(void){}
