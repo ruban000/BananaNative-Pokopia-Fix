@@ -22,6 +22,7 @@ static _Noreturn void heap_abort(void);
 #undef mprotect
 #undef mmap
 
+__thread _Atomic int dm_host_work;   // scheduler accounting normally defined by hle_nvn.c
 module_t *g_mod;
 int g_nmod;
 struct dm_flags g_flag;

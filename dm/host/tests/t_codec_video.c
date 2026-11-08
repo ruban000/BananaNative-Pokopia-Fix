@@ -4,20 +4,26 @@
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_movie.c"
+#include "../hle_movie_yuv.c"   // md_nv12 / md_rgba
 #include "../hle_codec_video.c"
 #include "../hle_movie_avc.c"
 #include <assert.h>
 
 uint64_t now_ns(void) { return 1; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
-static struct { void *ev; int bound, set; } g_ev[16];
+static struct { void *ev; int bound, set, autoclear; } g_ev[16];
 static int ev_slot(void *e) { for (int i = 0; i < 16; i++) if (g_ev[i].ev == e) return i; for (int i = 0; i < 16; i++) if (!g_ev[i].ev) { g_ev[i].ev = e; return i; } abort(); }
-void hle_bind_system_event(void *e, int autoclear) { (void)autoclear; g_ev[ev_slot(e)].bound = 1; }
+void hle_bind_system_event(void *e, int autoclear) { g_ev[ev_slot(e)].bound = 1; g_ev[ev_slot(e)].autoclear = autoclear; }
 void hle_signal_system_event(void *e) { g_ev[ev_slot(e)].set = 1; }
 void hle_clear_system_event(void *e) { g_ev[ev_slot(e)].set = 0; }
 static int ev_set(void *e) { return g_ev[ev_slot(e)].set; }
 static void destroy_ev(void *e) { g_ev[ev_slot(e)].bound = g_ev[ev_slot(e)].set = 0; }   // nn::os::DestroySystemEvent: closing the handle unbinds the event
-void *guest_sym(const char *n) { return !strcmp(n, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE") ? (void *)destroy_ev : NULL; }
+static bool poll_ev(void *e) { int i = ev_slot(e); assert(g_ev[i].bound); bool set = g_ev[i].set; if (g_ev[i].autoclear) g_ev[i].set = 0; return set; }
+void *guest_sym(const char *n) {
+    if (!strcmp(n, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE")) return destroy_ev;
+    if (!strcmp(n, "_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE")) return poll_ev;
+    return NULL;
+}
 
 static const uint8_t vp8[] = {
     0xf0,0x02,0x00,0x9d,0x01,0x2a,0x10,0x00,0x10,0x00,0x00,0x47,0x08,0x85,0x85,0x88,
@@ -63,6 +69,11 @@ int main(void) {
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000, false) && id == 1);
     assert(h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 1000 && !eos);
+    {   // SDK 19.3's overload with a colour space: the same answer, the colour space written (0); an unfilled buffer leaves every output alone
+        uint16_t w2 = 0, h2 = 0, cw2 = 0, ch2 = 0; uint32_t cs = 7; int64_t ts2 = 0; bool eos2 = true;
+        assert(!h_cv_vp9props_cs(&w2, &h2, &cw2, &ch2, &cs, &ts2, &eos2, dec, 0) && w2 == 16 && h2 == 16 && cw2 == 16 && ch2 == 16 && cs == 0 && ts2 == 1000 && !eos2);
+        cs = 7; assert(h_cv_vp9props_cs(&w2, &h2, &cw2, &ch2, &cs, &ts2, &eos2, dec, 1) == CV_NONE && cs == 7);
+    }
     uint8_t nv12[16 * 16 * 3 / 2], rgba[16 * 16 * 4];
     assert(!h_cv_nv12(pool[0], 0, 0, 0, 16, 16, nv12, 16, 256, nv12 + 256, 16, 128));
     for (int i = 0; i < 256; i++) assert(abs(nv12[i] - 81) <= 3);
@@ -82,15 +93,19 @@ int main(void) {
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000);
 
     // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer is signalled at once
-    assert(!h_spt_create(spt) && g_ev[ev_slot(spt)].bound);
+    assert(!h_spt_create(spt) && g_ev[ev_slot(spt)].bound && !h_spt_trywait(spt));
     h_cv_vp9rel(dec, 0, sync);   // buffer 0 takes the next waiting picture at once
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0);
     assert(!h_spt_request(spt, &sync) && ev_set(spt) && !SPT(spt)->armed);
+    assert(h_spt_trywait(spt) && h_spt_trywait(spt)); // manual-clear persists across polls
     assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2);
     for (int i = 0; i < 2; i++) { h_cv_vp9rel(dec, (uint32_t)i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec)); }   // the last two waiting pictures go out
     h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && !h_gs_trywait(&sync));
-    assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed);
+    assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed && !h_spt_trywait(spt));
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false) && ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
+    assert(h_spt_trywait(spt) && h_spt_trywait(spt));
+    h_spt_cancel(spt); assert(!h_spt_trywait(spt));
+    h_spt_destroy(spt);
 
     // End of stream with no data: the next released buffer carries it, with no picture
     assert(!h_cv_vp9submit(&id, dec, NULL, 0, 0, true) && d->eos_pending);
@@ -140,7 +155,7 @@ int main(void) {
         assert(!h_cv_vp9fin(d9) && !cv_of(d9));
         memset(d9, 0, sizeof d9); assert(!h_cv_vp9init21r(d9, 0x10000, 16, 16, 1, 1, 3, 0) && cv_of(d9) && h_cv_vp9event21(d9) == d9 + CV_EVENT_OFF);
         assert(!h_cv_vp9fin(d9) && !cv_of(d9) && h_cv_vp9event21(d9) == NULL);
-        memset(d9, 0, sizeof d9); assert(h_cv_av1init21(d9) == CV_R(2004) && h_cv_av1init21r(d9) == CV_R(2004));
+        memset(d9, 0, sizeof d9); assert(h_cv_av1init21(d9, NULL, 0, 0x10000, 16, 16, 1, 1, 3, 1) == CV_R(2004) && h_cv_av1init21r(d9, 0x10000, 16, 16, 1, 1, 3, 1) == CV_R(2004));   // no dav1d in the Mac host
         _Alignas(16) uint8_t pa[0x40]; memset(pa, 0x55, sizeof pa); assert(h_cv_aliaspool(pa) == CV_R(2004) && !pool_of(pa));
         h_cv_poolfin(p9);
     }
@@ -157,8 +172,8 @@ int main(void) {
         for (int i = 4096; i < 6144; i += 2) { assert(abs(yuv[i] - 90) <= 6); assert(abs(yuv[i + 1] - 240) <= 6); }
         assert(!h_cv_h264fin(dh) && !cv_of(dh)); h_cv_poolfin(ph);
     }
-    {   uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1: no decoder on the host, Initialize fails and leaves no host decoder
-        assert(h_cv_av1init(da) != 0 && !cv_of(da) && !h_cv_av1fin(da)); }
+    {   uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1 without NX_DAV1D (the Mac host): Initialize fails and leaves no host decoder (the dav1d path: dm/tools/tests/test_codec_av1.py)
+        assert(h_cv_av1init(da, NULL, 0, 0x10000, 16, 16, 1, 1, 3) != 0 && !cv_of(da) && !h_cv_av1fin(da)); }
     printf("t_codec_video: all passed\n");
     return 0;
 }

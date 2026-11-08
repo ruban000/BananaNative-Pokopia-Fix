@@ -417,7 +417,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     Array.Resize(ref dests, outputIndex);
                 }
 
-                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle);
+                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle, cbufSlot);
 
                 SetBindingPair setAndBinding = isBindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.ImageLoad,
@@ -692,7 +692,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (!isBindless)
                 {
-                    format = ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm);
+                    format = ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm, cbufSlot);
                 }
             }
             else

@@ -9,8 +9,8 @@ import java.util.Map;
 
 /**
  * The launcher's pure-Java helpers on the JVM (no Android): SaveStore (save backup, restore, the roll-forward journal, the lock), SaveMigrate (the one-time copy of
- * the old default save into app storage) and Profile (the APK's game table).
- * Run by dm/tools/tests/test_android_saves.py, which compiles this with SaveStore.java, SaveMigrate.java, Profile.java and a stub BuildConfig.
+ * the old default save into app storage), Profile (the APK's game table) and Pack (a pack's RomFS and NPDM in a dump folder or a one-version folder).
+ * Run by dm/tools/tests/test_android_saves.py, which compiles this with SaveStore.java, SaveMigrate.java, Profile.java, Pack.java and a stub BuildConfig.
  * <ul>
  * <li>{@code <scratch folder>}: every case; prints "ok <n>" and exits 0, or the first failure and exits 1</li>
  * <li>{@code recover <save>}: SaveStore.recover on that save, printing "recovered", "nothing" or "refused: …" (the journal cross-check against plat_swap_recover)</li>
@@ -58,6 +58,7 @@ public final class LauncherJvmTest {
         if (args[0].equals("locked")) { locked(new File(args[1])); return; }
         File t = new File(args[0]);
         profiles();
+        layouts(new File(t, "layouts"));
         backup(new File(t, "backup"));
         restore(new File(t, "restore"));
         device(new File(t, "device"));
@@ -101,6 +102,32 @@ public final class LauncherJvmTest {
         check(Profile.versionName(0).equals("the base game") && Profile.versionName(458752).equals("update 458752"), "versionName");
         check(Profile.of("040074A01BF12000") != null && Profile.of("0100000000010000") == null, "Profile.of over BuildConfig.NX_PROFILES");
         check(Profile.missing("0100000000010000", "Mario").contains("has no game profile") && Profile.missing("040074A01BF12000", null) == null, "Profile.missing");
+    }
+
+    /**
+     * A pack made from a dump (base/, updates/131072/: pack.tsv's romfs row is updates/131072/romfs) used with the dump and with a one-version folder (exefs/ and romfs/
+     * directly, the folder the phone's copy of one update makes): the RomFS and the NPDM are found in both, and pack.tsv's own folder wins when it is there
+     */
+    static void layouts(File t) throws Exception {
+        File pack = new File(t, "pack");
+        write(new File(pack, "pack.tsv"), "format\t1\ntitle_id\t0400486024DEC000\nname\tZelda\nversion\t131072\ntarget\tandroid\nmodules\tmain\n"
+                + "build\tmain=e0f3ccfaf50065ae4ea01eb5aeb13b1a\nromfs\tupdates/131072/romfs\npacker\tx\n");
+        write(new File(pack, "main.patched.bin"), "code");
+        Pack p = Pack.read(pack);
+        File dump = new File(t, "dump");
+        write(new File(dump, "base/exefs/main.npdm"), "META");
+        write(new File(dump, "base/romfs/a"), "base");
+        write(new File(dump, "updates/131072/romfs/a"), "update");
+        check(p.romfs(dump).equals(new File(dump, "updates/131072/romfs")), "a dump: the RomFS pack.tsv names");
+        check(Pack.npdmOf(dump).equals(new File(dump, "base/exefs/main.npdm")), "a dump: base/exefs/main.npdm");
+        File flat = new File(t, "update-131072");
+        write(new File(flat, "exefs/main.npdm"), "META");
+        write(new File(flat, "romfs/a"), "update");
+        check(p.romfs(flat).equals(new File(flat, "romfs")), "a one-version folder: its own romfs/ when pack.tsv's folder is not there");
+        check(Pack.npdmOf(flat).equals(new File(flat, "exefs/main.npdm")), "a one-version folder: exefs/main.npdm");
+        File none = new File(t, "empty");
+        none.mkdirs();
+        check(p.romfs(none) == null && Pack.npdmOf(none) == null, "a folder with neither layout: no RomFS, no NPDM");
     }
 
     static void backup(File t) throws Exception {

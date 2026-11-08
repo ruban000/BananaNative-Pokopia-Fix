@@ -48,11 +48,15 @@ extern void nvn_big_entry(void);
 void *nvn_big_real[NVN_NFUNC];            // the real implementation of functions that run on the big host stack (nvn_entry.S nvn_big_entry)
 void *nvn_real[NVN_NFUNC];               // DM_NVN_PROF: the real implementation called by the timing wrapper
 _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // DM_NVN_PROF: cumulative time of each function (cntvct counts)
-static uint8_t g_unimpl_seen[NVN_NFUNC];
+static _Atomic uint8_t g_unimpl_seen[NVN_NFUNC];
 
-uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
+static void nvn_shading_rate_note(const char *name, uint64_t cmd, uint64_t x1, uint64_t x2, uint64_t x3);
+uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     unsigned i = (unsigned)(slot - nvn_slot);
-    if (!g_unimpl_seen[i]++) LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
+    nvn_shading_rate_note(nvn_names[i], x0, x1, x2, x3);
+    // Once per function, including concurrent callers; an already-seen call only reads the flag.
+    if (!atomic_load_explicit(&g_unimpl_seen[i], memory_order_relaxed) &&
+        !atomic_exchange_explicit(&g_unimpl_seen[i], 1, memory_order_relaxed)) LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
     return 0;
 }
 
@@ -108,6 +112,60 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+
+// Diagnostic only: these commands remain unimplemented. SDK 19's palette takes
+// 16 uint32 entries at most; a null pointer disables that palette. Preserve x3
+// at the common entry and read through the kernel, never through guest pointers.
+static pthread_once_t g_sr_trace_once = PTHREAD_ONCE_INIT;
+static int g_sr_trace;
+static void sr_trace_init(void) { const char *e = getenv("DM_NVN_SHADING_RATE_TRACE"); g_sr_trace = e && atoi(e); }
+static int sr_trace_read(uint64_t addr, void *dst, size_t size) {
+    if (!size) return 1;
+    if (!addr || addr > UINT64_MAX - size) return 0;
+    dm_guest_mapping_use(1);
+    int ok = !dm_guest_unmapped(addr, size) && !plat_mem_read(addr, dst, size);
+    dm_guest_mapping_use(0);
+    return ok;
+}
+static void nvn_shading_rate_note(const char *name, uint64_t cmd, uint64_t x1, uint64_t x2, uint64_t x3) {
+    pthread_once(&g_sr_trace_once, sr_trace_init);
+    if (!g_sr_trace) return;
+    int kind = !strcmp(name, "nvnCommandBufferShadingRateImagePalette") ? 1 : !strcmp(name, "nvnCommandBufferBindShadingRateImage") ? 2 : !strcmp(name, "nvnCommandBufferSetShadingRatePaletteMode") ? 3 : 0;
+    if (!kind) return;
+    struct sr_note { uint64_t cmd, arg1, arg2, arg3; uint32_t kind, status, entries[16]; tex_t tex; view_t view; } note = {0};
+    note.cmd = cmd; note.arg1 = x1; note.arg2 = x2; note.arg3 = kind == 1 ? x3 : 0; note.kind = (uint32_t)kind;
+    if (kind == 1 && x3) {
+        int32_t count = (int32_t)x2;
+        if (count < 0 || count > 16) note.status = 1;
+        else if (!sr_trace_read(x3, note.entries, (size_t)count * 4)) note.status = 2;
+    } else if (kind == 2 && x1) {
+        if (!sr_trace_read(x1, &note.tex, sizeof note.tex)) note.status |= 2;
+        if (x2 && !sr_trace_read(x2, &note.view, sizeof note.view)) note.status |= 4;
+    }
+    // Last observation per command buffer + palette slot / binding / mode. A full
+    // diagnostic table replaces an entry, causing extra logs rather than omissions.
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct sr_note seen[128];
+    pthread_mutex_lock(&mu);
+    unsigned at = 0;
+    for (; at < 128; at++) if (!seen[at].kind || (seen[at].cmd == cmd && seen[at].kind == note.kind && (kind != 1 || seen[at].arg1 == x1))) break;
+    if (at == 128) at = (unsigned)((cmd >> 4) ^ note.kind ^ (kind == 1 ? x1 : 0)) % 128;
+    if (!memcmp(&seen[at], &note, sizeof note)) { pthread_mutex_unlock(&mu); return; }
+    seen[at] = note;
+    if (kind == 1) {
+        char values[192] = {0}; size_t used = 0;
+        if (x3 && !note.status) for (int32_t i = 0; i < (int32_t)x2; i++) used += (size_t)snprintf(values + used, sizeof values - used, "%s%u", i ? "," : "", note.entries[i]);
+        LOG("[nvn] shading-rate diagnostic palette cmd=%#llx index=%u count=%d entries=%#llx status=%s values=[%s]", (unsigned long long)cmd, (uint32_t)x1, (int32_t)x2, (unsigned long long)x3,
+            !x3 ? "disabled" : note.status == 1 ? "invalid-count" : note.status ? "unreadable" : "read", values);
+    } else if (kind == 2) {
+        LOG("[nvn] shading-rate diagnostic bind cmd=%#llx texture=%#llx view=%#llx status=%u serial=%llu format=%#x target=%d size=%ux%ux%u levels=%u flags=%#x memory=%p pool=%p view-levels=%u:%u+%u view-layers=%u:%u+%u view-format=%u:%#x view-target=%u:%u",
+            (unsigned long long)cmd, (unsigned long long)x1, (unsigned long long)x2, note.status, (unsigned long long)note.tex.serial, note.tex.d.format, note.tex.d.target,
+            note.tex.d.width, note.tex.d.height, note.tex.d.depth, note.tex.d.levels, note.tex.d.flags, note.tex.mem, (void *)note.tex.pool,
+            note.view.set_levels, note.view.base_level, note.view.nlevels, note.view.set_layers, note.view.min_layer, note.view.nlayers, note.view.set_format, note.view.format, note.view.set_target, note.view.target);
+    } else LOG("[nvn] shading-rate diagnostic mode cmd=%#llx mode=%u", (unsigned long long)cmd, (uint32_t)x1);
+    pthread_mutex_unlock(&mu);
+}
+
 #include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
 
 // ---------- Device ----------
@@ -327,6 +385,8 @@ static void pc_log(uint64_t present) {
     pthread_mutex_unlock(&g_pc_mu);
 }
 
+void nvn_pool_census_log(void) { pc_log(0); }   // the ctl census (vka_ctl.c): the pool census now (DM_NVN_POOLS set at start), present 0
+
 // ---------- Memory pools ----------
 NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 0, sizeof(pool_builder_t)); }
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
@@ -344,7 +404,14 @@ typedef struct { const pool_t *p; uint64_t gen; } plive;
 static plive *g_pl; static uint32_t g_npl, g_cpl; static uint64_t g_plgen;   // open addressing, g_cpl a power of two; p == (void *)1: a deleted slot; g_npl: used slots, deleted ones included
 static pthread_mutex_t g_pl_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t g_pl_use = PTHREAD_RWLOCK_INITIALIZER;
-void nvn_pool_use(int on) { if (on) pthread_rwlock_rdlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); }   // (never taken twice by one thread: a waiting writer would block the second)
+static _Thread_local unsigned g_pl_reads;
+void nvn_pool_use(int on) {
+    // Pool liveness alone cannot pin its storage: SVC UnmapPhysicalMemory and
+    // SetHeapSize can release it without finalizing the pool. Mapping lifetime
+    // precedes pool and texture locks; nested texture lookups share the lease.
+    if (on) { if (!g_pl_reads++) { dm_guest_mapping_use(1); dm_host_rwlock_rdlock(&g_pl_use); } }
+    else { if (!g_pl_reads) die("unbalanced NVN pool read transaction"); if (!--g_pl_reads) { pthread_rwlock_unlock(&g_pl_use); dm_guest_mapping_use(0); } }
+}
 static uint32_t pl_hash(const pool_t *p) { uint64_t h = (uint64_t)(uintptr_t)p * 0x9E3779B97F4A7C15ull; return (uint32_t)(h >> 32); }
 static _Atomic uint64_t g_plfin;   // pools finalized (or initialized again at a live pool's address) so far: nvn_pool_fin
 uint64_t nvn_pool_fin(void) { return atomic_load_explicit(&g_plfin, memory_order_acquire); }
@@ -379,9 +446,11 @@ uint64_t nvn_pool_live(const void *pool, unsigned *flags, int *sparse) {
 }
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
+    dm_host_rwlock_wrlock(&g_pl_use);   // reinitialization must exclude existing storage readers too
     pthread_mutex_lock(&g_pl_mu);   // (a pool initialized again without a Finalize: readers see its new fields only with its new serial)
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     pl_put(o, ++g_plgen); pthread_mutex_unlock(&g_pl_mu);
+    pthread_rwlock_unlock(&g_pl_use);   // placement may wait for a fence whose replay needs this lease
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); pc_add(o); }
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
@@ -390,7 +459,7 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     return 1;
 }
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
-NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { pthread_rwlock_wrlock(&g_pl_use); pl_del((const pool_t *)p); pthread_rwlock_unlock(&g_pl_use); pc_del((const pool_t *)p); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
+NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { dm_host_rwlock_wrlock(&g_pl_use); pl_del((const pool_t *)p); pthread_rwlock_unlock(&g_pl_use); pc_del((const pool_t *)p); if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); } mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0; }
 static void ft_flush(const uint8_t *a, uint64_t n);
@@ -1179,8 +1248,8 @@ NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, u
     p_clear_ds *r = REC(c, OP_CLEAR_DS, p_clear_ds); *r = (p_clear_ds){depth, (int)B(dmask), stencil, smask};
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
-    if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
-    p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
+    if (first < 0 || first > 16 || n < 0 || n > 16 - first) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
+    p_viewports *r = RECN(c, OP_VIEWPORTS, p_viewports, v, n); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
@@ -2342,6 +2411,8 @@ struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int n
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_gen;   // bumped per mapping request
+static void sparse_trace_map(struct vpool *v, uint64_t off, uint64_t size, const uint8_t *phys, const void *physical_pool, uint64_t physical_offset);
+static void sparse_trace_drop(struct vpool *v);
 static struct vpool *vpool_of(const pool_t *o) { return o->vp; }
 static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     if (!(o->flags & 0x200)) return NULL;
@@ -2367,6 +2438,7 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 }
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
+    sparse_trace_drop(v);
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
@@ -2407,6 +2479,7 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     if (((uint64_t)r->voff | r->size | (uint64_t)r->poff) & 0xFFF) { LOG("[RED] virtual pool %p: request %#llx+%#llx (physical offset %#llx) is not 4 KB aligned", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)r->poff); return 0; }
     const pool_t *ph = (const pool_t *)r->phys;
     if (ph && (!ph->mem || r->poff < 0 || (uint64_t)r->poff + r->size > ph->size)) { LOG("[RED] virtual pool %p: physical pool %p (%#llx bytes, storage %p) cannot supply %#llx+%#llx", (const void *)v->pool, (const void *)ph, (unsigned long long)ph->size, (void *)ph->mem, (unsigned long long)r->poff, (unsigned long long)r->size); return 0; }
+    sparse_trace_map(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL, ph, (uint64_t)r->poff);
     vpt_set(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL);
     uintptr_t to = (uintptr_t)(v->base + r->voff);
     // Not aliased (see above): only textures read through the page table see it; the GPU cannot address it directly
@@ -2764,14 +2837,15 @@ NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimi
 // Indirect-count multi-draws (Monster Hunter Rise's GPU-driven scene: compute culling writes the draw records and a u32 count, then up to max draws are made from them; 1–49 per call,
 // stride 20, the records and counts in its sparse virtual pool). Metal has no draw count read by the GPU, so each multi-draw becomes max ordinary indirect draws that carry the count's address
 // and their index; the replay masks their records on the GPU, zeros past the count (nvn_mtl.m mdx_run). Both used to be empty, and the whole scene stayed undrawn
+// Each draw also carries the multi-draw's maximum and stride (NVN_MDI_NS): the Vulkan replay makes the whole multi-draw at its first draw with a GPU-read count (vka_draw.c mdi_plan)
 enum { MDI_MAX = 1024 };
 NVN(nvnCommandBufferMultiDrawElementsIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) {
     if (max > MDI_MAX) { ONCE_LOG("[RED] indirect-count multi-draw of up to %d draws: only the first %d are made", max, MDI_MAX); max = MDI_MAX; }
-    for (int i = 0; i < max; i++) rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind + (uint64_t)i * (uint64_t)stride, cnt, i});
+    for (int i = 0; i < max; i++) rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind + (uint64_t)i * (uint64_t)stride, cnt, i, NVN_MDI_NS(max, stride)});
 }
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) {
     if (max > MDI_MAX) { ONCE_LOG("[RED] indirect-count multi-draw of up to %d draws: only the first %d are made", max, MDI_MAX); max = MDI_MAX; }
-    for (int i = 0; i < max; i++) rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind + (uint64_t)i * (uint64_t)stride, cnt, i});
+    for (int i = 0; i < max; i++) rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind + (uint64_t)i * (uint64_t)stride, cnt, i, NVN_MDI_NS(max, stride)});
 }
 // Whether the host can read n bytes at a guest address: outside a sparse virtual pool always; inside one only where pages are mapped (nvn_mtl.m reads multi-draw counts there)
 int nvn_host_readable(uint64_t a, uint64_t n) {
@@ -2808,6 +2882,133 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds 
     for (int k = 0; k < g_nvp; k++) { v = g_vp[k]; if ((const void *)v->pool == pool && a >= (uint64_t)(uintptr_t)v->base && a < (uint64_t)(uintptr_t)v->base + v->size) return v; }
     return hit;   // (a stale pool pointer: the live pool reserved at a, if any)
 }
+// Opt-in identity trace; never reads guest bytes or changes residency. Serial filters are
+// inclusive decimal ranges, e.g. DM_NVN_SPARSE_TRACE=31373,31375-31376. RANGE=offset:size
+// (base 0 integers) narrows each selected texture; MAX bounds log lines, FROM skips early
+// frames while still registering watches. ALIASES=1 additionally checks physical overlap.
+// Locks: all watch/page-table state under g_vp_mu; no replay or pool-lifetime lock acquired here.
+#define SPTRACE_WATCHES 16
+static pthread_once_t g_sptrace_once = PTHREAD_ONCE_INIT;
+static struct { uint64_t lo, hi; } g_sptrace_sel[SPTRACE_WATCHES];
+static unsigned g_sptrace_nsel, g_sptrace_limit = 4000, g_sptrace_lines;
+static uint64_t g_sptrace_off, g_sptrace_size = UINT64_MAX, g_sptrace_from, g_sptrace_frame;
+static int g_sptrace_aliases;
+static struct { uint64_t serial, lo, hi, digest, mapped, generation; struct vpool *v;
+                uintptr_t *pages; size_t npages; int dirty; } g_sptrace_watch[SPTRACE_WATCHES];
+static void sparse_trace_init(void) {
+    const char *s = getenv("DM_NVN_SPARSE_TRACE");
+    while (s && *s && g_sptrace_nsel < SPTRACE_WATCHES) {
+        char *end; uint64_t lo = strtoull(s, &end, 10), hi = lo;
+        if (end == s || !lo) break;
+        if (*end == '-') { s = end + 1; hi = strtoull(s, &end, 10); if (end == s || hi < lo) break; }
+        g_sptrace_sel[g_sptrace_nsel++] = (typeof(g_sptrace_sel[0])){lo, hi};
+        if (*end != ',') break; s = end + 1;
+    }
+    if ((s = getenv("DM_NVN_SPARSE_TRACE_RANGE"))) { char *end; g_sptrace_off = strtoull(s, &end, 0); if (*end == ':') g_sptrace_size = strtoull(end + 1, NULL, 0); }
+    if ((s = getenv("DM_NVN_SPARSE_TRACE_MAX"))) { unsigned long n = strtoul(s, NULL, 10); if (n && n <= 100000) g_sptrace_limit = (unsigned)n; }
+    if ((s = getenv("DM_NVN_SPARSE_TRACE_FROM"))) g_sptrace_from = strtoull(s, NULL, 10);
+    if ((s = getenv("DM_NVN_SPARSE_TRACE_ALIASES"))) g_sptrace_aliases = atoi(s) != 0;
+}
+int nvn_sparse_trace_on(void) { pthread_once(&g_sptrace_once, sparse_trace_init); return g_sptrace_nsel != 0; }
+int nvn_sparse_trace_wants(uint64_t serial) {
+    if (!nvn_sparse_trace_on()) return 0;
+    if (g_sptrace_aliases) return 1;
+    for (unsigned i = 0; i < g_sptrace_nsel; i++) if (serial >= g_sptrace_sel[i].lo && serial <= g_sptrace_sel[i].hi) return 1;
+    return 0;
+}
+static int sparse_trace_line(void) { // caller holds g_vp_mu
+    if (g_sptrace_frame < g_sptrace_from || g_sptrace_lines >= g_sptrace_limit) return 0;
+    if (++g_sptrace_lines == g_sptrace_limit) LOG("[nvn] sptrace limit %u reached; no later events are logged", g_sptrace_limit);
+    return 1;
+}
+static int sparse_trace_cmp(const void *a, const void *b) { uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b; return x < y ? -1 : x > y; }
+static void sparse_trace_refresh(unsigned i) {
+    typeof(g_sptrace_watch[0]) *w = &g_sptrace_watch[i]; if (!w->v || !w->dirty) return;
+    uint64_t hash = 0xcbf29ce484222325ull, mapped = 0, gen = 0; size_t count = (size_t)((w->hi - w->lo + 0xfff) >> 12);
+    // Bound diagnostic allocation even for a mistakenly selected multi-gigabyte image.
+    if (g_sptrace_aliases && count <= 65536 && !w->pages) w->pages = malloc(count * sizeof *w->pages);
+    w->npages = 0;
+    for (uint64_t o = w->lo; o < w->hi; o += 0x1000) {
+        const vpte *e = vpt_get(w->v, o); uintptr_t p = e ? (uintptr_t)e->phys : 0;
+        hash = (hash ^ p) * 0x100000001b3ull; mapped += p != 0;
+        if (e && e->gen > gen) gen = e->gen;
+        if (p && w->pages) w->pages[w->npages++] = p;
+    }
+    if (w->npages) qsort(w->pages, w->npages, sizeof *w->pages, sparse_trace_cmp);
+    w->digest = hash; w->mapped = mapped; w->generation = gen; w->dirty = 0;
+}
+static int sparse_trace_has(unsigned i, uintptr_t p) {
+    if (!p) return 0;
+    sparse_trace_refresh(i); typeof(g_sptrace_watch[0]) *w = &g_sptrace_watch[i];
+    return w->npages && bsearch(&p, w->pages, w->npages, sizeof p, sparse_trace_cmp) != NULL;
+}
+static void sparse_trace_drop(struct vpool *v) {
+    if (!nvn_sparse_trace_on()) return;
+    for (unsigned i = 0; i < SPTRACE_WATCHES; i++) if (g_sptrace_watch[i].v == v) {
+        if (sparse_trace_line()) LOG("[nvn] sptrace retire serial=%llu pool=%p base=%p", (unsigned long long)g_sptrace_watch[i].serial, (const void *)v->pool, v->base);
+        free(g_sptrace_watch[i].pages); memset(&g_sptrace_watch[i], 0, sizeof g_sptrace_watch[i]);
+    }
+}
+static void sparse_trace_map(struct vpool *v, uint64_t off, uint64_t size, const uint8_t *phys, const void *physical_pool, uint64_t physical_offset) {
+    if (!nvn_sparse_trace_on()) return;
+    for (unsigned i = 0; i < SPTRACE_WATCHES; i++) {
+        typeof(g_sptrace_watch[0]) *w = &g_sptrace_watch[i]; if (w->v != v || off >= w->hi || off + size <= w->lo) continue;
+        uint64_t lo = off > w->lo ? off : w->lo, hi = off + size < w->hi ? off + size : w->hi;
+        uint64_t changed = 0, maps = 0, unmaps = 0, replaces = 0, first = 0; const uint8_t *old0 = NULL, *new0 = NULL;
+        for (uint64_t o = lo; o < hi; o += 0x1000) {
+            const vpte *e = vpt_get(v, o); const uint8_t *old = e ? e->phys : NULL, *next = phys ? phys + o - off : NULL;
+            if (old == next) continue;
+            if (!changed++) { first = o; old0 = old; new0 = next; }
+            if (!old) maps++; else if (!next) unmaps++; else replaces++;
+        }
+        w->dirty = 1;
+        if (sparse_trace_line()) LOG("[nvn] sptrace map obs-frame=%llu serial=%llu gen=%llu pool=%p virtual=%p+%#llx pages=%llu changed=%llu map=%llu unmap=%llu replace=%llu first=%p old=%p new=%p physical-pool=%p physical-offset=%#llx",
+            (unsigned long long)g_sptrace_frame, (unsigned long long)w->serial, (unsigned long long)(atomic_load(&g_vp_gen) + 1), (const void *)v->pool,
+            v->base + lo, (unsigned long long)(hi - lo), (unsigned long long)((hi - lo) >> 12), (unsigned long long)changed,
+            (unsigned long long)maps, (unsigned long long)unmaps, (unsigned long long)replaces, v->base + first, old0, new0, physical_pool, (unsigned long long)physical_offset);
+    }
+}
+void nvn_sparse_trace_tex(uint64_t serial, const void *pool, const void *mem, uint64_t size, uint64_t frame, const char *detail) {
+    if (!nvn_sparse_trace_on() || !mem || !size) return;
+    int selected = 0; for (unsigned i = 0; i < g_sptrace_nsel; i++) selected |= serial >= g_sptrace_sel[i].lo && serial <= g_sptrace_sel[i].hi;
+    if (!selected && !g_sptrace_aliases) return;
+    pthread_mutex_lock(&g_vp_mu); g_sptrace_frame = frame;
+    if (g_sptrace_lines >= g_sptrace_limit) { pthread_mutex_unlock(&g_vp_mu); return; }
+    uint64_t addr = (uint64_t)(uintptr_t)mem; struct vpool *v = vpool_at(pool, addr);
+    int watch = -1;
+    if (selected && v && g_sptrace_off < size && g_sptrace_off < v->size - (addr - (uintptr_t)v->base)) {
+        for (unsigned i = 0; i < SPTRACE_WATCHES; i++) if (g_sptrace_watch[i].serial == serial) { watch = (int)i; break; }
+        if (watch < 0) for (unsigned i = 0; i < SPTRACE_WATCHES; i++) if (!g_sptrace_watch[i].serial) {
+            watch = (int)i; typeof(g_sptrace_watch[0]) *w = &g_sptrace_watch[i];
+            uint64_t len = size - g_sptrace_off; if (len > g_sptrace_size) len = g_sptrace_size;
+            w->serial = serial; w->v = v; w->lo = (addr - (uintptr_t)v->base + g_sptrace_off) & ~0xfffull;
+            uint64_t hi = addr - (uintptr_t)v->base + g_sptrace_off + len;
+            w->hi = hi < v->size ? hi : v->size; w->dirty = 1;
+            if (sparse_trace_line()) LOG("[nvn] sptrace watch frame=%llu serial=%llu pool=%p virtual=%p+%#llx aliases=%d", (unsigned long long)frame,
+                (unsigned long long)serial, pool, v->base + w->lo, (unsigned long long)(w->hi - w->lo), g_sptrace_aliases);
+            break;
+        }
+    }
+    // Aliases are identified by page identity, including a physical-pool texture at another VA.
+    if (watch < 0 && g_sptrace_aliases && frame >= g_sptrace_from && g_sptrace_lines < g_sptrace_limit) {
+        for (unsigned i = 0; i < SPTRACE_WATCHES && watch < 0; i++) if (g_sptrace_watch[i].v) {
+            uint64_t end = size > (256ull << 20) ? (256ull << 20) : size; // diagnostic bound, reported below
+            for (uint64_t o = 0; o < end; o += 0x1000) {
+                uintptr_t p = (addr + o) & ~(uintptr_t)0xfff;
+                if (v) { uint64_t vo = p - (uintptr_t)v->base; const vpte *e = vo < v->size ? vpt_get(v, vo) : NULL; p = e ? (uintptr_t)e->phys : 0; }
+                if (sparse_trace_has(i, p)) { watch = (int)i; break; }
+            }
+        }
+    }
+    if (watch >= 0 && sparse_trace_line()) {
+        sparse_trace_refresh((unsigned)watch); typeof(g_sptrace_watch[0]) *w = &g_sptrace_watch[watch];
+        LOG("[nvn] sptrace use frame=%llu serial=%llu watch=%llu pool=%p virtual=%p+%#llx digest=%016llx mapped=%llu/%llu mapgen=%llu%s %s",
+            (unsigned long long)frame, (unsigned long long)serial, (unsigned long long)w->serial, pool, mem, (unsigned long long)size,
+            (unsigned long long)w->digest, (unsigned long long)w->mapped, (unsigned long long)((w->hi - w->lo + 0xfff) >> 12), (unsigned long long)w->generation,
+            size > (256ull << 20) ? " alias-scan-first-256MiB" : "", detail);
+    }
+    pthread_mutex_unlock(&g_vp_mu);
+}
 int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
@@ -2838,9 +3039,12 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
     if (!r && rs) r = fn(rs, (uint64_t)(re - rs), arg);
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
-static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) { return nvn_dirty_since(p, n, stamp); }
+// (the runs of one texture are mostly pages of one physical pool: its range is kept from run to run instead of searched for each, which was up to 40 % of the Vulkan replay
+// thread in Mario Kart World, whose sparse arrays are looked at whenever the dirty clock moves)
+typedef struct { uint64_t stamp; const void *span; } run_w;
+static int run_written(const uint8_t *p, uint64_t n, uint64_t arg) { run_w *w = (run_w *)(uintptr_t)arg; return nvn_dirty_since_kept(&w->span, p, n, w->stamp); }
 static int run_protect(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect(p, n); return 0; }
-int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { return vpt_walk(pool, a, n, gen, run_written, stamp); }
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { run_w w = {stamp, NULL}; return vpt_walk(pool, a, n, gen, run_written, (uint64_t)(uintptr_t)&w); }
 int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every page of [a, a+n) has memory behind it
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int ok = v != NULL;
     for (uint64_t o = v ? (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull : 0, end = v ? a - (uint64_t)(uintptr_t)v->base + n : 0; ok && o < end; o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; ok = e && e->phys; }
@@ -2891,8 +3095,8 @@ NVN(nvnCommandBufferSetDepthClamp, void, NVNcommandBuffer *c, uint32_t en) { REC
 // Absolum (FNA3D's NVN driver) keeps the lower-left window origin and sets viewport 0's swizzle every frame (NEGATIVE_Y: clip y negated, how a GL-heritage renderer flips its picture).
 // Ignored, its whole picture came out upside down. The replay applies it to the viewport (draw in nvn_mtl.m)
 NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, int n, const NVNviewportSwizzle *s) {
-    if (n < 0 || first < 0 || first + n > 16) { LOG("[RED] SetViewportSwizzles first=%d n=%d", first, n); return; }
-    p_vp_swizzle *r = REC(c, OP_VP_SWIZZLE, p_vp_swizzle); r->first = first; r->n = n;
+    if (first < 0 || first > 16 || n < 0 || n > 16 - first) { LOG("[RED] SetViewportSwizzles first=%d n=%d", first, n); return; }
+    p_vp_swizzle *r = RECN(c, OP_VP_SWIZZLE, p_vp_swizzle, sw, n); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
 NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }

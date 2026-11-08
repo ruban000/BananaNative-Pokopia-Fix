@@ -151,14 +151,15 @@ def header(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
-    wfn = []   # window size getters, one row per main build: <main build ID> <width fn> <height fn> <the game's own WxH> (loader.c window_apply; DM_WINDOW_SIZE=WxH sets the size, unset = the game's own)
+    wfn = []   # window size instructions, one row per main build: <main build ID> <width fn or -> <height fn or bound> <the game's own WxH> (loader.c window_apply; DM_WINDOW_SIZE=WxH sets the size, unset = the game's own; - = the game derives the width from the height;
+    # pair = the third column is a u32 width, height pair in main's data, the entry of the game's size table its window takes: Ocarina of Time's main+0x3f58568; written as ~0 in the header)
     if g.get('window_fn', ''):
         for r in g.values('window_fn'):
-            if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[1:3]) or not re.fullmatch(r'\d{1,5}x\d{1,5}', r[3]):
-                sys.exit(f"{g.id}: window_fn takes <main build ID (32 hex)> <width function offset> <height function offset> <the game's own WxH>: {r}")
+            if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+|-|pair', r[1]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[2]) or not re.fullmatch(r'\d{1,5}x\d{1,5}', r[3]):
+                sys.exit(f"{g.id}: window_fn takes <main build ID (32 hex)> <width function offset, - or pair> <height function, bound or size pair offset> <the game's own WxH>: {r}")
             w, h = map(int, r[3].split('x'))
             if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
-            wfn.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {w}, {h}' + '}')
+            wfn.append('{' + q(r[0]) + f', {"0" if r[1] == "-" else "~0ull" if r[1] == "pair" else r[1]}, {r[2]}, {w}, {h}' + '}')
     # Game resolution by the Switch 2 graphics scale (the Android launcher, build.gradle resolutionOf; the host reads DM_GRAPHICS_SCALE and DM_OPMODE, nothing is generated):
     # <the launcher's choice: WxH or original> <scale 0|1|2> <console|handheld>, for a game that sizes its scenes by the scale rather than its window
     if g.get('graphics_scale', ''):
@@ -183,6 +184,13 @@ def header(g):
             ls += [('0', 0)] * (12 - len(ls))
             rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
         if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
+    drf = []   # the dynamic-resolution controller's own "disabled" branch, one row per main build: <main build ID> <offset> <the instruction there> <the instruction that takes the branch>
+    # (loader.c dynres_apply: DM_DYNAMIC_RESOLUTION unset or 0 writes it at load, after checking the original; 1 = the game's controller)
+    if g.get('dynres_fn', ''):
+        for r in g.values('dynres_fn'):
+            if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[1]) or not all(re.fullmatch(r'[0-9a-fA-F]{8}', x) for x in r[2:]) or int(r[1], 16) % 4:
+                sys.exit(f"{g.id}: dynres_fn takes <main build ID (32 hex)> <instruction offset (4-aligned)> <its instruction (8 hex)> <the instruction taking the fixed-resolution branch (8 hex)>: {r}")
+            drf.append('{' + q(r[0]) + f', {r[1]}, 0x{r[2].lower()}u, 0x{r[3].lower()}u' + '}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -229,6 +237,7 @@ def header(g):
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
+         f'#define DM_GAME_DYNRES_FN {{{", ".join(drf) or "{\"\", 0, 0, 0}"}}}', f'#define DM_GAME_NDYNRES_FN {len(drf)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)

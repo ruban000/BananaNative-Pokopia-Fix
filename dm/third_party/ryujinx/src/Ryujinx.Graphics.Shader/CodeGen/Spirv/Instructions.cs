@@ -1523,7 +1523,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             bool colorIsVector = isGather || !isShadow;
 
-            SpvInstruction resultType = colorIsVector ? context.TypeVector(context.TypeFP32(), 4) : context.TypeFP32();
+            // The descriptor determines integer versus floating-point texels, not
+            // whether coordinates are integers (TLD) or floating point (TEX).
+            // OperationResult carries this type so register consumers bitcast the
+            // raw bits as usual, rather than numerically converting integers.
+            AggregateType componentType = context.Properties.Textures[texOp.GetTextureSetAndBinding()].Format.GetComponentType();
+            SpvInstruction scalarType = context.GetType(componentType);
+            SpvInstruction resultType = colorIsVector ? context.TypeVector(scalarType, 4) : scalarType;
 
             if (intCoords)
             {
@@ -1552,7 +1558,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         ? context.ImageDrefGather(resultType, image, pCoords, dRef, gatherMask, gatherOperands)
                         : context.ImageGather(resultType, image, pCoords, compIdx, gatherMask, gatherOperands);
 
-                    texels[index] = context.CompositeExtract(context.TypeFP32(), texel4, 3);
+                    texels[index] = context.CompositeExtract(scalarType, texel4, 3);
                 }
 
                 result = context.CompositeConstruct(resultType, texels);
@@ -1588,7 +1594,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 result = context.ImageSampleImplicitLod(resultType, image, pCoords, operandsMask, operands);
             }
 
-            AggregateType swizzledResultType = AggregateType.FP32;
+            AggregateType swizzledResultType = componentType;
 
             if (colorIsVector)
             {
@@ -1641,6 +1647,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 if (type.HasFlag(SamplerType.Array))
                 {
                     dimensions++;
+                }
+
+                // A component past the image's dimensions (a size query of a shape the shader's other instructions gave the binding, InstEmitAmpereMem.cs ATxq): the header's extent of a
+                // dimension the image does not have, 1. Extracting it from the query's smaller vector was invalid SPIR-V ("Vector access is out of bounds")
+                if (texOp.Index >= dimensions)
+                {
+                    return new OperationResult(AggregateType.S32, context.Constant(context.TypeS32(), 1));
                 }
 
                 SpvInstruction resultType = dimensions == 1 ? context.TypeS32() : context.TypeVector(context.TypeS32(), dimensions);

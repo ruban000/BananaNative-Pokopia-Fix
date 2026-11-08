@@ -25,7 +25,7 @@
     X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) \
     X(vkCmdBeginRendering) X(vkCmdEndRendering) \
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) \
-    X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
+    X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
     X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
@@ -67,11 +67,11 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 static inline void flush_pub(void);
 static void wait_tail(uint64_t want) {
     flush_pub();   // what it waits for must be handed over
-    uint64_t t0_ = 0;
-    for (int i = 0;; i++) {   // the encoder is usually close behind: wait on its tail for up to ~0.2 ms
+    uint64_t t0_ = mono_ns();
+    for (;;) {   // the encoder is usually close behind: wait on its tail for up to ~0.2 ms (the clock is read at every wake: a WFE with no write to the line lasts until the event stream, 10-100 µs)
         uint64_t t = atomic_load_explicit(&g_tail, memory_order_acquire); if (t >= want) return;
         wait_change(&g_tail, t);
-        if (i % 64 == 63) { uint64_t n = mono_ns(); if (!t0_) t0_ = n; else if (n - t0_ > 200000) break; }
+        if (mono_ns() - t0_ > 200000) break;
     }
     g_n_waits++; uint64_t t0 = mono_ns();
     // An event count: the sequence is read before the flag is set, so an encoder that sees the flag (and a tail at or past want) bumps it after that read and the futex
@@ -113,7 +113,15 @@ static void *rec_alloc(uint32_t id, size_t n) {
 // cycles in its own loop: power and heat). Nothing reaches the GPU before a part's submit, which flushes, so the batch only delays when the encoder starts on a call
 static uint64_t g_pub;        // the head published last
 static uint32_t g_batch = 4096;
-static inline void rec_done(size_t n) { g_ph += n; g_n_calls++; if (g_ph - g_pub >= g_batch) { g_pub = g_ph; publish(); } }
+static uint32_t g_wake = 0;           // DM_VK_ENC_WAKE: bytes held back while the encoder sleeps (0 = none): it is woken once per that many bytes, not once per batch
+static _Atomic uint64_t g_spin_ns = 200000;   // DM_VK_ENC_SPIN_US: the replay updates it while the encoder may be idle
+static inline void rec_done(size_t n) {
+    g_ph += n; g_n_calls++;
+    if (g_ph - g_pub >= g_batch) {
+        if (g_wake && g_ph - g_pub < g_wake && atomic_load_explicit(&g_csleep, memory_order_relaxed)) return;   // asleep: wake it for a worthwhile run of calls (every wait, sync, part switch and stop flushes)
+        g_pub = g_ph; publish();
+    }
+}
 static inline void flush_pub(void) { if (g_pub != g_ph) { g_pub = g_ph; publish(); } }
 
 // ---------- The records: each holds the call's arguments, pointers aimed at copies inside the record ----------
@@ -133,6 +141,7 @@ typedef struct { CB_FIELD uint32_t first, n; const VkBuffer *b; const VkDeviceSi
 typedef struct { CB_FIELD VkBuffer b; VkDeviceSize o; VkIndexType t; } r_ib;
 typedef struct { CB_FIELD uint32_t a, b, c, d; int32_t e; uint32_t f; } r_draw;   // draw (a count, b instances, c first, d first instance), indexed (e vertex offset, f first instance), dispatch (vkCmdDispatchBase: base a b c, groups d f e)
 typedef struct { CB_FIELD VkBuffer b; VkDeviceSize o; uint32_t n, st; } r_ind;
+typedef struct { CB_FIELD VkBuffer b, cbuf; VkDeviceSize o, co; uint32_t n, st; } r_indc;
 typedef struct { CB_FIELD uint32_t first, n; const void *p; } r_vps;   // viewports or scissors
 typedef struct { CB_FIELD uint32_t v[5]; float f[4]; } r_val;               // the one-value states
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t set, n; const VkWriteDescriptorSet *w; } r_push;
@@ -247,6 +256,12 @@ static void VKAPI_CALL e_vkCmdDrawIndirect(VkCommandBuffer cb, VkBuffer b, VkDev
 static void VKAPI_CALL e_vkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t st) {
     DIRECT(vkCmdDrawIndexedIndirect, cb, b, o, n, st); BEGIN(r_ind, E_vkCmdDrawIndexedIndirect, 0); r->b = b; r->o = o; r->n = n; r->st = st; END();
 }
+static void VKAPI_CALL e_vkCmdDrawIndirectCount(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer c, VkDeviceSize co, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawIndirectCount, cb, b, o, c, co, n, st); BEGIN(r_indc, E_vkCmdDrawIndirectCount, 0); r->b = b; r->o = o; r->cbuf = c; r->co = co; r->n = n; r->st = st; END();
+}
+static void VKAPI_CALL e_vkCmdDrawIndexedIndirectCount(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer c, VkDeviceSize co, uint32_t n, uint32_t st) {
+    DIRECT(vkCmdDrawIndexedIndirectCount, cb, b, o, c, co, n, st); BEGIN(r_indc, E_vkCmdDrawIndexedIndirectCount, 0); r->b = b; r->o = o; r->cbuf = c; r->co = co; r->n = n; r->st = st; END();
+}
 static void VKAPI_CALL e_vkCmdDrawMeshTasksEXT(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     DIRECT(vkCmdDrawMeshTasksEXT, cb, x, y, z); BEGIN(r_draw, E_vkCmdDrawMeshTasksEXT, 0); r->a = x; r->b = y; r->c = z; END();
 }
@@ -346,6 +361,8 @@ static void run(const hdr *h) {
     case E_vkCmdDrawIndexed: { C(r_draw); R.vkCmdDrawIndexed(r->cb, r->a, r->b, r->c, r->e, r->f); break; }
     case E_vkCmdDrawIndirect: { C(r_ind); R.vkCmdDrawIndirect(r->cb, r->b, r->o, r->n, r->st); break; }
     case E_vkCmdDrawIndexedIndirect: { C(r_ind); R.vkCmdDrawIndexedIndirect(r->cb, r->b, r->o, r->n, r->st); break; }
+    case E_vkCmdDrawIndirectCount: { C(r_indc); R.vkCmdDrawIndirectCount(r->cb, r->b, r->o, r->cbuf, r->co, r->n, r->st); break; }
+    case E_vkCmdDrawIndexedIndirectCount: { C(r_indc); R.vkCmdDrawIndexedIndirectCount(r->cb, r->b, r->o, r->cbuf, r->co, r->n, r->st); break; }
     case E_vkCmdDispatch: { C(r_draw); R.vkCmdDispatch(r->cb, r->a, r->b, r->c); break; }
     case E_vkCmdDrawMeshTasksEXT: { C(r_draw); R.vkCmdDrawMeshTasksEXT(r->cb, r->a, r->b, r->c); break; }
     case E_vkCmdDispatchBase: { C(r_draw); R.vkCmdDispatchBase(r->cb, r->a, r->b, r->c, r->d, r->f, (uint32_t)r->e); break; }
@@ -387,11 +404,11 @@ static void *enc_main(void *arg) {
         uint64_t h = atomic_load_explicit(&g_head, memory_order_acquire);
         if (t == h) {
             // Empty: spin while the replay thread is recording (its next call comes within microseconds), then sleep until a call comes
-            uint64_t t0 = 0; int i = 0;
+            uint64_t t0 = mono_ns(), lim = atomic_load_explicit(&g_spin_ns, memory_order_relaxed);
             for (;;) {
                 h = atomic_load_explicit(&g_head, memory_order_acquire); if (h != t) break;
+                if (mono_ns() - t0 >= lim) break;   // zero goes straight to the futex; otherwise account for the time in every WFE
                 wait_change(&g_head, t);
-                if (++i % 64 == 0) { uint64_t n = mono_ns(); if (!t0) t0 = n; else if (n - t0 > 200000) break; }
             }
             if (h == t) {
                 uint32_t s = atomic_load(&g_cseq);   // (an event count, as wait_tail's)
@@ -443,6 +460,7 @@ void vka_enc_start(VkCommandBuffer cb) {
     extern int vka_gp_active;
     if (!VKA_ENV("DM_VK_ENC", 1) || vka_gp_active || vka_nan_on() || !up()) { atomic_store(&g_ecb, VK_NULL_HANDLE); return; }
     { int bt = VKA_ENV("DM_VK_ENC_BATCH", 4096); g_batch = bt < 0 ? 0 : bt > (1 << 20) ? (1 << 20) : (uint32_t)bt; }   // live: from this submission
+    { int w = VKA_ENV("DM_VK_ENC_WAKE", 0), sp = VKA_ENV("DM_VK_ENC_SPIN_US", 200); g_wake = w < 0 ? 0 : w > (1 << 20) ? (1 << 20) : (uint32_t)w; atomic_store_explicit(&g_spin_ns, (uint64_t)(sp < 0 ? 0 : sp > 100000 ? 100000 : sp) * 1000, memory_order_relaxed); }
     atomic_store(&g_ecb, cb);
 }
 // Before vkEndCommandBuffer, a submit, or any other use of the command buffer or its pool: every call made

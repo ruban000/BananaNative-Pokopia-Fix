@@ -128,6 +128,16 @@ def nso_build_id(path):   # the module's build ID (NSO header +0x40), as the pro
     return b[0x40:0x50].hex()
 
 
+def unregistered(g, ids):
+    """{module: the profile's builds of it} for each module of ids (module → NSO build ID) whose build no build row names; a module no row names is not listed.
+    Every row counts (one row a version: an update's and the base's), not only the last"""
+    known = {}
+    for v in g.builds().values():
+        for m, i in v.items():
+            if m != 'display': known.setdefault(m, set()).add(i)
+    return {m: sorted(known[m]) for m, i in ids.items() if known.get(m) and i not in known[m]}
+
+
 def run_in_process(script, args, env, log):
     """script run as `python3 script args` would run it, in this process: its sys.argv, env added to os.environ, stdout and stderr to the file log;
     everything put back after it (the modules it imported from outside the standard library are dropped, so the next run starts afresh). → its exit code"""
@@ -372,10 +382,8 @@ def main():
         except ValueError: pass
         out.mkdir(parents=True, exist_ok=True)
         ids = {m: nso_build_id(srcs[m]) for m in mods}
-        known = {m: i for v in g.builds().values() for m, i in v.items() if m != 'display'}
         print(f'{app:016X} {g.get("name", "?")} version {ver}: {vdir}', flush=True)
-        for m in mods:
-            if known.get(m) and known[m] != ids[m]: print(f'[RED] {m} build {ids[m]} is not the profile\'s build {known[m]}: build-gated cuts do not apply')
+        for m, known in unregistered(g, ids).items(): print(f'[RED] {m} build {ids[m]} is none of the profile\'s builds ({", ".join(known)}): build-gated cuts do not apply')
         if a.keep_code:
             if missing := [m for m in mods if not (out / f'{m}.patched.bin').is_file() or not (out / f'{m}.android.key').is_file()]:
                 raise Error(f'--keep-code: {out} has no complete {", ".join(missing)} (patched.bin and its key): rewrite first')

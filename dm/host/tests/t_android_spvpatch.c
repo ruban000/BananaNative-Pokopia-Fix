@@ -89,6 +89,39 @@ int main(void) {
             printf("t_android_spvpatch: %s: %d memory writes claimed\n", gs, found);
             free(w); }
     }
+    // DM_VK_MESH_SPV=<folder of library modules named <stage>_<key>_<variant>.spv>: each task (ts_) and mesh (ms_) module as a compute shader (vka_spv_mesh_compute), each mesh
+    // module's drawing vertex shader (vka_spv_mesh_vs) and each pixel module (ps_) without per-primitive inputs (vka_spv_unprim), all validated
+    const char *md = getenv("DM_VK_MESH_SPV");
+    if (md) {
+        DIR *d = opendir(md); struct dirent *e; int nm = 0, nt = 0, np = 0;
+        CHECK(d, "%s not a folder", md);
+        while (d && (e = readdir(d))) {
+            size_t l = strlen(e->d_name); if (l < 8 || strcmp(e->d_name + l - 4, ".spv")) continue;
+            int ms = !strncmp(e->d_name, "ms_", 3), ts = !strncmp(e->d_name, "ts_", 3), ps = !strncmp(e->d_name, "ps_", 3); if (!ms && !ts && !ps) continue;
+            char p[1024]; snprintf(p, sizeof p, "%s/%s", md, e->d_name);
+            FILE *f = fopen(p, "rb"); if (!f) continue; fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
+            uint32_t *w = malloc((size_t)sz); size_t nw = fread(w, 1, (size_t)sz, f) / 4; fclose(f);
+            vka_mesh_info mi; uint32_t *x = ps ? vka_spv_unprim(w, nw, &on, err, sizeof err) : vka_spv_mesh_compute(w, nw, 61, 62, &mi, &on, err, sizeof err);
+            CHECK(x, "%s: not rewritten: %s", e->d_name, err);
+            if (x) {
+                if (val) CHECK(validate(x, on, e->d_name), "%s valid", e->d_name);
+                CHECK(count_op(x, on, 5294) == 0 && count_op(x, on, 5295) == 0, "%s: no mesh instruction left", e->d_name);
+                free(x);
+                if (ms) {
+                    CHECK(mi.role == 1 && mi.rec_bytes && mi.pos_off && mi.idx_off && mi.max_p, "%s: a mesh layout", e->d_name);
+                    size_t vn = 0; uint32_t *vs = vka_spv_mesh_vs(&mi, 0, &vn);
+                    CHECK(vs, "%s: no vertex shader", e->d_name);
+                    if (vs && val) CHECK(validate(vs, vn, e->d_name), "%s vertex shader valid", e->d_name);
+                    free(vs);
+                }
+                if (ts) CHECK(mi.role == 2 && mi.pay_rec_bytes, "%s: a task layout", e->d_name);
+                nm += ms; nt += ts; np += ps;
+            }
+            free(w);
+        }
+        if (d) closedir(d);
+        printf("t_android_spvpatch: %d mesh, %d task, %d pixel modules rewritten for compute mesh draws in %s\n", nm, nt, np, md);
+    }
     printf("t_android_spvpatch: %s%s\n", g_fail ? "FAILED" : "ok", val ? "" : " (no spirv-val: structure only)");
     return g_fail != 0;
 }

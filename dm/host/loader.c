@@ -624,10 +624,6 @@ static void map_image(module_t *m, const char *dir) {
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
-// The game's window size (profile key window_fn): two leaf functions of main return the width and the height (movz w0,#imm; ret: Donkey Kong Bananza's main+0x5bf770 / +0x5bf780).
-// DM_WINDOW_SIZE=<w>x<h> writes that size into them (the Android launcher's Game resolution); unset, empty or "original" writes the game's own size from the profile, so a pack
-// rewritten with the older cut of the constants gives the game's size too. Only for the main build the row names, while the text is still writable (map_image, before the
-// seal), and after checking each function's shape: fixed addresses never run on another build. Not on iOS: the text is embedded there as signed code (map_image above)
 // A game with dynamic resolution and no window getter (Pokemon Pokopia) takes the size as a cap on its render size instead (profile key res_levels): the game keeps a table of
 // sizes (u32 widths, then u32 heights, <levels> each) and picks its level from short byte lists of levels, one list per operation mode and graphics scale, stepping down the
 // list when the GPU runs late. Each list whose first level is larger than the cap is rewritten to start at the largest level that fits and step down from there. The table and
@@ -664,8 +660,18 @@ static int levels_apply(module_t *m, unsigned cw, unsigned ch) {
     return 1;
 }
 
-static void window_apply(module_t *m) {
-    if (strcmp(m->name, "main") || m->nro) return;
+// The game's window size (profile key window_fn): main's instructions that give the width and the height, each a movz w<n>,#imm. Either two leaf getters
+// (movz w0,#imm; ret: Donkey Kong Bananza's main+0x5bf770 / +0x5bf780), or no width ("-", 0 here) and the height's upper bound when the game derives the width from the height
+// (Mario Kart World's main+0xc10190: the movz w21,#1440 that caps the heights its GamePerformanceGraphicsConfig gives, each width then being height / 9 * 16).
+// DM_WINDOW_SIZE=<w>x<h> writes that size into them (the Android launcher's Game resolution); unset, empty or "original" writes the game's own size from the profile, so a pack
+// rewritten with the older cut of the constants gives the game's size too. Only for the main build the row names, while the text is still writable (map_image, before the
+// seal), and after checking each instruction's shape (a leaf getter, or a movz holding the game's own value): fixed addresses never run on another build. Not on iOS: the text
+// is embedded there as signed code (map_image above).
+// A third form, "pair" (wfn = ~0 here): the size is an entry of a table of u32 width, height pairs in main's data, which the game indexes by operation mode and graphics scale
+// (Ocarina of Time's main+0x3f58540, 640x480 to 3840x2160, read only by main+0x112c5e0; docked at the host's graphics scale 1 it takes entry 5, main+0x3f58568, 2560x1440): the
+// host checks that the pair holds the game's own size and writes the asked size into it. The game then takes the smaller of the pair and its settings' size per axis and
+// crops its 2560x1440 nvnWindow textures to it (nvnWindowSetCrop: 2048x1152 at the game's own size, 1920x1080 at DM_WINDOW_SIZE=1920x1080, 2026-11-06)
+static void window_size(module_t *m) {
     const char *e = getenv("DM_WINDOW_SIZE");
     static const struct { const char *build; uint64_t wfn, hfn; unsigned w, h; } rows[] = DM_GAME_WINDOW_FN;
     int r = -1, own = !e || !*e || !strcmp(e, "original");
@@ -683,60 +689,131 @@ static void window_apply(module_t *m) {
         if (sscanf(e, "%ux%u%c", &a, &b, &x) != 2 || !a || !b || a > 0xFFFF || b > 0xFFFF) LOG("[RED] DM_WINDOW_SIZE=%s: must be <width>x<height> or original; the window stays %ux%u", e, w, h);
         else w = a, h = b;
     }
-    uint64_t fn[2] = {rows[r].wfn, rows[r].hfn}; unsigned v[2] = {w, h}, was[2];
+    if (rows[r].wfn == ~0ull) {   // a width, height pair in main's data (not its text)
+        uint64_t o = rows[r].hfn;
+        if (o < m->text_end || o + 8 > m->size || (o & 3)) { LOG("[RED] window_fn: main+%#llx is not a size pair in main's data; the window stays the game's", (unsigned long long)o); return; }
+        uint32_t *p = (uint32_t *)(m->base + o);
+        if (p[0] != rows[r].w || p[1] != rows[r].h) { LOG("[RED] window_fn: main+%#llx holds %ux%u, not the game's own %ux%u: the window stays the game's", (unsigned long long)o, p[0], p[1], rows[r].w, rows[r].h); return; }
+        p[0] = w; p[1] = h;
+        LOG("window: %ux%u (%s; the size table entry main+%#llx; the game's own %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE", (unsigned long long)o, rows[r].w, rows[r].h);
+        // The game's output size is the smaller of the entry and the size its own settings give, per axis (main+0x6505ec; Ocarina of Time's settings give 2048x1152 docked):
+        // a size above that cannot raise it, and the nvnWindow textures keep the game's own allocation (the game crops them, nvnWindowSetCrop)
+        if (!own && (w > rows[r].w || h > rows[r].h)) LOG("[RED] DM_WINDOW_SIZE=%s: above the game's own %ux%u; the game takes the smaller of this and the size its settings allow", e, rows[r].w, rows[r].h);
+        return;
+    }
+    uint64_t fn[2] = {rows[r].wfn, rows[r].hfn}; unsigned v[2] = {w, h}, mine[2] = {rows[r].w, rows[r].h}, was[2] = {0, 0};
     for (int i = 0; i < 2; i++) {
+        if (!fn[i]) continue;   // no width instruction: the game derives the width from the height
         if (fn[i] + 8 > m->text_end) { LOG("[RED] window_fn: main+%#llx is outside main's text; the window stays the pack's", (unsigned long long)fn[i]); return; }
         const uint32_t *p = (const uint32_t *)(m->base + fn[i]);
-        if ((p[0] & 0xFFE0001Fu) != 0x52800000u || p[1] != 0xD65F03C0u) {
-            LOG("[RED] window_fn: main+%#llx is %08x %08x, not movz w0,#imm; ret: the window stays the pack's", (unsigned long long)fn[i], p[0], p[1]); return;
+        // movz w<n>,#imm (32-bit, no shift); a leaf getter (then ret) may hold another size (an older pack's cut), any other site must hold the game's own value
+        if ((p[0] & 0xFFE00000u) != 0x52800000u || (p[1] != 0xD65F03C0u && ((p[0] >> 5) & 0xFFFF) != mine[i])) {
+            LOG("[RED] window_fn: main+%#llx is %08x %08x, neither movz w0,#imm; ret nor a movz of the game's own %u: the window stays the pack's", (unsigned long long)fn[i], p[0], p[1], mine[i]); return;
         }
         was[i] = (p[0] >> 5) & 0xFFFF;
     }
-    for (int i = 0; i < 2; i++) *(uint32_t *)(m->base + fn[i]) = 0x52800000u | (v[i] << 5);   // movz w0,#v (the old cut's bytes: 1920 = 00f08052, 1080 = 00878052)
+    for (int i = 0; i < 2; i++)
+        if (fn[i]) { uint32_t *p = (uint32_t *)(m->base + fn[i]); *p = (*p & ~(0xFFFFu << 5)) | (v[i] << 5); }   // movz w<n>,#v (the old cut's bytes: 1920 = 00f08052, 1080 = 00878052)
+    if (!fn[0]) {   // the game keeps its own aspect ratio: say the width it will compute, and when the height bound cannot raise the size above the game's own
+        unsigned gw = h * rows[r].w / rows[r].h;
+        LOG("window: height bound %u (%s; main+%#llx; the game's own %ux%u, the pack's bound %u): the game derives the width, about %ux%u", h, own ? "the game's own" : "DM_WINDOW_SIZE",
+            (unsigned long long)fn[1], rows[r].w, rows[r].h, was[1], gw, h);
+        if (!own && w != gw) LOG("[RED] DM_WINDOW_SIZE=%s: this game keeps its own %ux%u aspect ratio; the window is about %ux%u", e, rows[r].w, rows[r].h, gw, h);
+        if (h > rows[r].h) LOG("[RED] DM_WINDOW_SIZE=%s: a bound above the game's own %u does not raise the game's configured sizes", e, rows[r].h);
+        return;
+    }
     LOG("window: %ux%u (%s; main+%#llx / +%#llx; the game's own %ux%u, the pack's %ux%u)", w, h, own ? "the game's own" : "DM_WINDOW_SIZE",
         (unsigned long long)fn[0], (unsigned long long)fn[1], rows[r].w, rows[r].h, was[0], was[1]);
 }
 
-static uint8_t *slurp(const char *path, size_t *n) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) die("open %s", path);
-    struct stat st; fstat(fd, &st);
-    uint8_t *p = malloc(st.st_size);
-    if (read(fd, p, st.st_size) != st.st_size) die("read %s", path);
-    close(fd); *n = st.st_size; return p;
+// The game's dynamic-resolution controller (profile key dynres_fn): one instruction of it, and the instruction that takes the controller's own "dynamic resolution disabled"
+// branch instead (Ocarina of Time's main+0x805bd0: tbz w8,#0 on the controller's enable bit, made a b to the path that returns a scale of 1.0, the full size of its render
+// targets; the community "Max Resolution" patch, as Lichii's built-in one). DM_DYNAMIC_RESOLUTION as for NieR:Automata (hle_fpslock.c): unset or 0 keeps full resolution, so
+// the host writes the branch at load (main's text still writable, before the seal) after checking that the instruction is the game's own; 1 leaves the game's controller, which
+// follows the GPU time between the game's timestamp reports. Only for the main build the row names: fixed addresses never run on another build. Without a row nothing is said
+// (NieR's builds read the same switch)
+static void dynres_apply(module_t *m) {
+    static const struct { const char *build; uint64_t off; uint32_t orig, fixed; } rows[] = DM_GAME_DYNRES_FN;
+    int r = -1;
+    for (int i = 0; i < DM_GAME_NDYNRES_FN; i++) if (!strcmp(rows[i].build, m->build_id)) r = i;
+    if (r < 0) return;
+    const char *e = getenv("DM_DYNAMIC_RESOLUTION");
+    if (e && *e && strcmp(e, "0") && strcmp(e, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", e);
+    if (e && !strcmp(e, "1")) { LOG("dynamic resolution: on, the game's controller (DM_DYNAMIC_RESOLUTION=1; main+%#llx kept)", (unsigned long long)rows[r].off); return; }
+    if (rows[r].off + 4 > m->text_end) { LOG("[RED] dynres_fn: main+%#llx is outside main's text; the game's controller stays", (unsigned long long)rows[r].off); return; }
+    uint32_t *p = (uint32_t *)(m->base + rows[r].off);
+    if (*p != rows[r].orig) { LOG("[RED] dynres_fn: main+%#llx is %08x, not the game's %08x: the game's controller stays", (unsigned long long)rows[r].off, *p, rows[r].orig); return; }
+    *p = rows[r].fixed;
+    LOG("dynamic resolution: off, full resolution (%s; main+%#llx %08x -> %08x, the controller's own disabled branch; DM_DYNAMIC_RESOLUTION=1 keeps the controller)",
+        e && *e ? "DM_DYNAMIC_RESOLUTION" : "the default", (unsigned long long)rows[r].off, rows[r].orig, rows[r].fixed);
 }
 
-// Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
+// main's load-time settings, at the place map_image calls them (the key page installed, the text still writable)
+static void window_apply(module_t *m) {
+    if (strcmp(m->name, "main") || m->nro) return;
+    dynres_apply(m); window_size(m);
+}
+
+// Read into the final anonymous mapping: a full-file malloc followed by memcpy kept two
+// copies resident during loading. The file may return short reads or be interrupted.
+static void read_image(int fd, void *dst, size_t size, off_t off, const char *path) {
+    uint8_t *p = dst;
+    while (size) {
+        size_t want = size > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : size;
+        ssize_t n = pread(fd, p, want, off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) die("read %s at %#llx: %s", path, (unsigned long long)off, n ? strerror(errno) : "unexpected end of file");
+        p += n; size -= (size_t)n; off += n;
+    }
+}
+
+// Seal the code area immediately after reading into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.patched.bin", dir, m->name);
-    size_t sz; uint8_t *raw = slurp(path, &sz);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) die("open %s", path);
+    struct stat st;
+    if (fstat(fd, &st)) die("stat %s", path);
+    if (st.st_size <= 0 || (uint64_t)st.st_size > SIZE_MAX - 0x3FFF) die("%s: invalid image file size", path);
+    size_t sz = (size_t)st.st_size;
+    m->size = m->patch_off < 0 ? m->image_size : (sz + 0x3FFF) & ~0x3FFFull;
+    uint64_t image_len = m->patch_off < 0 ? m->file_image_len : sz;
+    if (m->text_end > image_len || m->text_end > UINT64_MAX - 0x3FFF ||
+        m->key_page_off > m->size || m->key_page_size > m->size - m->key_page_off)
+        die("%s: text or key page outside the image", path);
+    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+    if (rx > m->key_page_off) die("%s: text overlaps the key page", path);
     if (m->patch_off < 0) {
         // Patch area before the base: file = the first part of the image (text + ro + data) + patch area; bss and the key page are anonymous zero pages. The gap from the patch area's end to the base is left inaccessible (PROT_NONE)
-        // With a back patch area (patch_nso.py TWO) the file ends with it, BACK_LEN bytes, copied to BACK_OFF in the image
-        uint64_t pre = (uint64_t)-m->patch_off, fl = m->file_image_len, bl = m->back_len;
-        if (sz < fl + bl) die("%s is shorter than FILE_IMAGE_LEN %#llx + BACK_LEN %#llx", path, (unsigned long long)fl, (unsigned long long)bl);
-        m->size = m->image_size; m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
+        // With a back patch area (patch_nso.py TWO) the file ends with it, BACK_LEN bytes, read at BACK_OFF in the image
+        uint64_t pre = 0 - (uint64_t)m->patch_off, fl = m->file_image_len, bl = m->back_len;
+        if (fl > sz || bl > sz - fl) die("%s is shorter than FILE_IMAGE_LEN %#llx + BACK_LEN %#llx", path, (unsigned long long)fl, (unsigned long long)bl);
+        if (fl > m->key_page_off || pre > SIZE_MAX - m->size ||
+            m->back_off > m->size || bl > m->size - m->back_off ||
+            (bl && m->back_off < m->key_page_off + m->key_page_size))
+            die("%s: image or back patch range outside its mapping", path);
+        m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
         uint8_t *a = mmap(NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
-        memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m); window_apply(m);
+        read_image(fd, m->base, fl, 0, path); read_image(fd, a, sz - bl - fl, (off_t)fl, path);
+        if (bl) read_image(fd, m->base + m->back_off, bl, (off_t)(sz - bl), path);
+        close(fd); install_key_page(m); window_apply(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
-        uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
-        if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+        if (m->patch_len && mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
         return;
     }
-    m->size = (sz + 0x3FFF) & ~0x3FFFull;
+    uint64_t po = (uint64_t)m->patch_off & ~0x3FFFull;
+    if (!m->patch_off || po < m->key_page_off + m->key_page_size || po > m->size)
+        die("%s: patch area outside the image", path);
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m); window_apply(m);
-    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+    read_image(fd, m->base, sz, 0, path); close(fd); install_key_page(m); window_apply(m);
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
-    uint64_t po = m->patch_off & ~0x3FFFull;
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
 }
 #endif

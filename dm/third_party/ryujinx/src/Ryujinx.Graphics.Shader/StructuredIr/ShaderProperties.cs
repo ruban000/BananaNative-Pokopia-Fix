@@ -77,14 +77,14 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
         public static TextureFormat GetTextureFormat(IGpuAccessor gpuAccessor, int handle, int cbufSlot = -1)
         {
-            // When the formatted load extension is supported, we don't need to
-            // specify a format, we can just declare it without a format and the GPU will handle it.
-            if (gpuAccessor.QueryHostSupportsImageLoadFormatted())
+            // Formatless access removes the image format qualifier, not the numeric
+            // type of its texels. Preserve known integer formats so the image and
+            // its load/store values use the descriptor's signedness.
+            TextureFormat format = gpuAccessor.QueryTextureFormat(handle, cbufSlot);
+            if (format == TextureFormat.Unknown && gpuAccessor.QueryHostSupportsImageLoadFormatted())
             {
                 return TextureFormat.Unknown;
             }
-
-            TextureFormat format = gpuAccessor.QueryTextureFormat(handle, cbufSlot);
 
             if (format == TextureFormat.Unknown)
             {

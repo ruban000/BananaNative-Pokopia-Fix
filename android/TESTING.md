@@ -262,6 +262,7 @@ android/tools/nxctl.sh env DM_VK_DRAW=0          # draws off from the next frame
 android/tools/nxctl.sh capture 30                # one line per frame: ms, draws, passes, barriers, clears / copies, submissions, recording ms, GPU ms
 android/tools/nxctl.sh screenshot shot.png       # the next game frame (the window texture, before the present scales it) → ./shot.png
 android/tools/nxctl.sh stats                     # the last 60 frames' averages, fps, placed memory, the switches set live
+android/tools/nxctl.sh burst 12 out/              # the next 12 presented game frames, consecutive (copied without a wait between them), as out/ctl-burst-<frame>.png: frame-to-frame flicker
 android/tools/nxctl.sh fps 30                    # the frame rate cap, as the in-game panel sets it (0 = the game's own)
 android/tools/nxctl.sh A~0.2                     # any other DM_CTL line: a press, dump, ...
 android/tools/nxctl.sh log 40                    # the run's last log lines (nothing sent)

@@ -239,7 +239,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     };
 
                     imageType = context.TypeImage(
-                        context.TypeFP32(),
+                        context.GetType(sampler.Format.GetComponentType()),
                         dim,
                         sampler.Type.HasFlag(SamplerType.Shadow),
                         sampler.Type.HasFlag(SamplerType.Array),

@@ -18,6 +18,7 @@
 // mtl_pool_need returns. DM_VK_MEM_LOCK_WHOLE=1 holds the write lock across a placement as before (diagnostic A/B)
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "vka_pageout.h"
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_dirty.h"
 #include "vka_place.h"
@@ -891,8 +892,49 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     if (buf) *buf = (void *)b; if (off) *off = o; return 1;
 }
 uint64_t vka_mem_placed_nolock(void) { return g_placed_bytes; }
+// The placed segments for the ctl census: count, and the largest (address, MiB, references); the pool census (hle_nvn.c, DM_NVN_POOLS) says what each pool holds
+void vka_mem_segs(char *b, size_t n) {
+    enum { K = 16 }; int top[K]; int nt = 0; size_t o = 0;
+    pthread_rwlock_rdlock(&g_rw);
+    for (; nt < K && nt < g_nsg; nt++) {   // the K largest, by selection
+        int best = -1;
+        for (int i = 0; i < g_nsg; i++) { int used = 0; for (int k = 0; k < nt; k++) used |= top[k] == i;
+            if (!used && (best < 0 || g_sg[i].hi - g_sg[i].lo > g_sg[best].hi - g_sg[best].lo)) best = i; }
+        top[nt] = best; }
+    o += (size_t)snprintf(b + o, n - o, "placed segments: %d, largest:", g_nsg);
+    for (int k = 0; k < nt && o < n; k++) o += (size_t)snprintf(b + o, n - o, " %#lx+%.0f MiB (%d)", (unsigned long)g_sg[top[k]].lo, (g_sg[top[k]].hi - g_sg[top[k]].lo) / 1048576.0, g_sg[top[k]].refs);
+    pthread_rwlock_unlock(&g_rw);
+}
 uint64_t vka_mem_placed_bytes(uint64_t *peak) { pthread_rwlock_rdlock(&g_rw); uint64_t n = g_placed_bytes; if (peak) *peak = g_placed_peak; pthread_rwlock_unlock(&g_rw); return n; }
 
-// The hook hle_svc.c calls when it gives guest memory back (weak no-op there for the Apple builds; its region and open hooks stay the weak no-ops)
+// Only heap/alias ranges registered by the host qualify: dm_guest_unmapped alone
+// intentionally answers zero outside these regions too. Registration precedes replay.
+static struct { uintptr_t lo, hi; } g_guest_region[2]; static int g_nguest_region;
+void dm_gfx_guest_region(void *base, size_t size, const char *name) {
+    (void)name; uintptr_t lo = (uintptr_t)base;
+    pthread_mutex_lock(&g_pl);
+    if (size && size <= UINTPTR_MAX - lo && g_nguest_region < 2)
+        g_guest_region[g_nguest_region++] = (typeof(g_guest_region[0])){lo, lo + size};
+    pthread_mutex_unlock(&g_pl);
+}
+int vka_mem_pageout(uintptr_t lo, uintptr_t hi) {
+    int r = 0, guest = 0;
+    // g_rw alone cannot exclude a placement: its segment is published only after
+    // the driver map. g_pl excludes that work; pending give-backs outlive g_pl.
+    pthread_mutex_lock(&g_pl);
+    for (int i = 0; i < g_nguest_region; i++) if (lo >= g_guest_region[i].lo && hi <= g_guest_region[i].hi) guest = 1;
+    if (!guest || hi <= lo || dm_guest_unmapped(lo, hi - lo)) goto out;
+    pthread_rwlock_rdlock(&g_rw);
+    int k = sg_find(lo); if (k < 0 || g_sg[k].hi <= lo) k++;
+    int placed = k < g_nsg && g_sg[k].lo < hi;
+    pthread_rwlock_unlock(&g_rw);
+    pthread_mutex_lock(&g_pendmu); int pending = pend_overlaps(lo, hi); pthread_mutex_unlock(&g_pendmu);
+    if (!placed && !pending) r = vkp_advise(lo, hi) ? -1 : 1;
+out:
+    pthread_mutex_unlock(&g_pl);
+    return r;
+}
+
+// The hook hle_svc.c calls before releasing guest memory; mapping changes use its lease.
 int dm_gfx_guest_release(uintptr_t lo, uintptr_t hi) { return vka_mem_release(lo, hi); }
 #endif

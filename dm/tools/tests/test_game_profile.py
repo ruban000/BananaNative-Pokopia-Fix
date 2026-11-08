@@ -1,5 +1,6 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>
+# and a profile without the key generates its header unchanged; romfs_check (a RomFS file line that tells a version's data apart) takes <path> <line> <expected | main>;
+# window_fn takes two getters, "-" and a height bound, or "pair" and a size pair in data; dynres_fn takes one instruction and its replacement (loader.c window_apply)
 from pathlib import Path
 import os
 import subprocess
@@ -51,6 +52,50 @@ class RomfsCheck(unittest.TestCase):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': romfs_check takes <path in the RomFS> <line, from 1>', out, rows)
+
+
+class WindowFn(unittest.TestCase):
+    B = '9e244438c3d8ef1c703a6a85ef99c4f0'
+
+    def rows(self, rc_out):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + rc_out)
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+            return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'WINDOW_FN' in l]
+
+    def test_getters_and_bound(self):
+        self.assertIn('{"' + self.B + '", 0x5bf770, 0x5bf780, 2880, 1620}', self.rows(f'window_fn\t{self.B}\t0x5bf770\t0x5bf780\t2880x1620\n')[0])
+        self.assertIn('{"' + self.B + '", 0, 0xc10190, 2560, 1440}', self.rows(f'window_fn\t{self.B}\t-\t0xc10190\t2560x1440\n')[0])   # no width: the game derives it
+        self.assertIn('{"' + self.B + '", ~0ull, 0x3f58568, 2560, 1440}', self.rows(f'window_fn\t{self.B}\tpair\t0x3f58568\t2560x1440\n')[0])   # a size pair in main's data
+
+    def test_rejected(self):
+        for r in (f'{self.B}\t0x1\t-\t2560x1440', f'{self.B}\t-\t-\t2560x1440', f'{self.B}\tx\t0x1\t2560x1440', f'{self.B[:8]}\t-\t0x1\t2560x1440', f'{self.B}\t-\t0x1\t2560',
+                  f'{self.B}\tpair\t-\t2560x1440'):
+            rc, out = header(f'window_fn\t{r}\n')
+            self.assertNotEqual(rc, 0, r)
+            self.assertIn('window_fn takes', out, r)
+
+
+class DynresFn(unittest.TestCase):
+    B = 'e0f3ccfaf50065ae4ea01eb5aeb13b1a'
+
+    def test_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + f'dynres_fn\t{self.B}\t0x805bd0\t360041E8\t1400020f\n')
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+            h = (Path(d, ID) / 'game.h').read_text()
+        self.assertIn('#define DM_GAME_DYNRES_FN {{"' + self.B + '", 0x805bd0, 0x360041e8u, 0x1400020fu}}', h)
+        self.assertIn('#define DM_GAME_NDYNRES_FN 1', h)
+        self.assertEqual(header('')[0], 0)   # without the key: an empty table
+
+    def test_rejected(self):
+        for r in (f'{self.B}\t0x805bd2\t360041e8\t1400020f', f'{self.B}\t0x805bd0\t360041e\t1400020f', f'{self.B[:8]}\t0x805bd0\t360041e8\t1400020f',
+                  f'{self.B}\t0x805bd0\t360041e8', f'{self.B}\t-\t360041e8\t1400020f'):
+            rc, out = header(f'dynres_fn\t{r}\n')
+            self.assertNotEqual(rc, 0, r)
+            self.assertIn('dynres_fn takes', out, r)
 
 
 if __name__ == '__main__':

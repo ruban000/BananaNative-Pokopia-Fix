@@ -45,6 +45,8 @@ extern uint64_t vka_n_rp, vka_n_bar; static uint64_t g_n_ub, g_n_sub, g_rec_ns, 
 static _Atomic uint64_t g_fstart[64], g_fstart_f[64];   // when the replay began recording each frame's first submission (its number mod 64): the adaptive floor's spans
 static uint64_t g_job_frame; static int g_job_frame_set;   // the frame of the submission the worker replays (vka_exec_sub_frame)
 void vka_exec_sub_frame(uint64_t f) { g_job_frame = f; g_job_frame_set = 1; }
+// Replay diagnostics use the queued submission identity, with live-frame fallback for inline replay.
+uint64_t vka_exec_frame(void) { return g_job_frame_set && vka_worker_on() ? g_job_frame : g_frame; }
 uint64_t vka_frame_start_ns(uint64_t f) { unsigned k = f % 64; return atomic_load(&g_fstart_f[k]) == f ? atomic_load(&g_fstart[k]) : 0; }   // now_ns; 0 = not known (vka_perf.c)
 void mtl_set_frame(uint64_t f) {
     g_frame = f; vka_ctl_frame(f);
@@ -201,7 +203,7 @@ void vka_perf_thread(int nice);   // vka_perf.c
 // What each recent submission held, by fence, for the [RED] line of a GPU hang (vka_dev.c hang_declare)
 enum { NHREC = 16 };
 static struct { uint64_t fence, frame, queue, draws, ops, skipped, t_ns; } g_hrec[NHREC];
-static uint64_t g_sub_draws0, g_sub_ops0, g_sub_skip0, g_sub_t0;
+static uint64_t g_sub_draws0, g_sub_ops0, g_sub_skip0, g_sub_t0, g_sub_frame;   // frame latched for this recording, across asynchronous game presents
 void vka_exec_hang_report(uint64_t fence) {
     for (int i = 0; i < NHREC; i++) if (g_hrec[i].fence == fence || g_hrec[i].fence == fence + 1) {
         VRED("GPU hang: submission %llu (frame %llu, queue serial %llu): %llu draws, %llu clears / copies, %llu skipped, recorded in %.2f ms", (unsigned long long)g_hrec[i].fence,
@@ -210,8 +212,9 @@ void vka_exec_hang_report(uint64_t fence) {
 }
 
 void vka_rp_sub_begin(void) {
+    g_sub_frame = vka_exec_frame();
     vka_perf_thread(0); vka_ctl_sub();
-    { uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
+    { uint64_t f = g_sub_frame; if (atomic_load(&g_fstart_f[f % 64]) != f) { atomic_store(&g_fstart[f % 64], now_ns()); atomic_store(&g_fstart_f[f % 64], f); } }
     g_npost = 0; g_nrc_ts = 0; g_cb = VK_NULL_HANDLE;
     if (!vka_init()) return;
     vka_gpu_floor();
@@ -234,7 +237,7 @@ void vka_rp_sub_begin(void) {
     vk.vkBeginCommandBuffer(g_cb, &bi);
     if (ts_init()) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
-        g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame);
+        g_slot_frame[k] = g_sub_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_sub_frame);
         g_sq_n = 0; g_sq_base = (int)k * SEGQ;
         if (seg_ts() && !g_sqp) {
             VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
@@ -243,7 +246,7 @@ void vka_rp_sub_begin(void) {
         }
         if (g_sqp) qf.reset(g_cb, g_sqp, (uint32_t)g_sq_base, SEGQ);
     }
-    vka_gp_sub_begin(g_cb, g_frame);
+    vka_gp_sub_begin(g_cb, g_sub_frame);
     vka_enc_start(g_cb);
     vka_barrier(g_cb);   // the host's writes to guest memory before this submission (made available by the submit), and earlier submissions' writes
     vka_tex_prepare(g_cb);
@@ -264,7 +267,7 @@ static void part_submit(const void *a) {   // the part ends and goes to the queu
     if (pa.q != UINT32_MAX) qf.write(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, pa.q);
     VkResult r = vk.vkEndCommandBuffer(cb);
     if (!r) r = vka_submit(cb, 0, 0, NULL, NULL, NULL, VK_NULL_HANDLE);
-    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); }
+    if (r) { vka_buffer_trace_failed(); static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); }
 }
 static void part_begin(const void *a) {
     part_arg pa; memcpy(&pa, a, sizeof pa); VkCommandBuffer cb = pa.cb;
@@ -306,13 +309,14 @@ static inline void chunk_check(void) {
     if (cp > 0 && in >= (uint64_t)cp && vka_rp_open_for(&S.rt, S.has_rt)) { vka_rp_end(); chunk(); }
 }
 static uint64_t g_cur_fence;   // the fence of the submission being replayed, reserved before it (vka_worker.c); 0 = reserved at its commit
+uint64_t vka_exec_reserved_fence(void) { return g_cur_fence; }
 uint64_t vka_rp_sub_commit(uint64_t reserved) {
     uint64_t fence = reserved ? reserved : vka_fence_next(); g_cur_fence = 0;
     int tail = 0;   // counted for the tail floor (DM_VK_GPU_FLOOR_AUTO=2): given back by the span op when it completes
-    if (g_cb && g_stat_draws > g_sub_draws0) { int vka_floor_tail_add(void); tail = vka_floor_tail_add(); post((pop){3, 0, (uint32_t)tail, 0, g_job_frame_set ? g_job_frame : g_frame}); }   // the frame's span at the end of this submission with draws (post_run)
+    if (g_cb && g_stat_draws > g_sub_draws0) { int vka_floor_tail_add(void); tail = vka_floor_tail_add(); post((pop){3, 0, (uint32_t)tail, 0, g_sub_frame}); }   // the frame's span at the end of this submission with draws (post_run)
     pop *ops = g_npost ? malloc((size_t)g_npost * sizeof *ops) : NULL; if (ops) memcpy(ops, g_post, (size_t)g_npost * sizeof *ops);
     int n = g_npost; g_npost = 0;
-    if (!g_cb) { vka_fence_cpu(fence, ops, n, post_run); return fence; }
+    if (!g_cb) { vka_buffer_trace_commit(fence, -1); vka_fence_cpu(fence, ops, n, post_run); return fence; }
     vka_rp_end();
     vka_tex_writeback(g_cb);   // linear textures the GPU wrote, back into their storage for the CPU
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
@@ -323,12 +327,13 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     vka_gp_commit(g_cb, fence);
     VkResult r = vk.vkEndCommandBuffer(g_cb);
     g_rec_ns += now_ns() - g_sub_t0;
-    g_hrec[fence % NHREC] = (typeof(g_hrec[0])){fence, g_frame, S.serial, g_stat_draws - g_sub_draws0, g_stat_ops - g_sub_ops0, g_stat_skipped - g_sub_skip0, now_ns() - g_sub_t0};
+    g_hrec[fence % NHREC] = (typeof(g_hrec[0])){fence, g_sub_frame, S.serial, g_stat_draws - g_sub_draws0, g_stat_ops - g_sub_ops0, g_stat_skipped - g_sub_skip0, now_ns() - g_sub_t0};
     vka_tex_gw_commit(fence);
     vka_floor_commit(tail);
     vka_up_flush(); vka_up_throttle();   // before the submission that may use what it made
     if (!r) r = vka_submit(g_cb, fence, 0, NULL, NULL, NULL, VK_NULL_HANDLE);
     g_slot[(g_slot_i - 1) % NSLOT].fence = fence;
+    vka_buffer_trace_commit(fence, r == VK_SUCCESS);
     if (vka_nan_on()) vka_nan_commit(fence);
     vka_scratch_retire(fence);
     if (r) {
@@ -342,7 +347,7 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     }
     vka_fence_post(fence, ops, n, post_run);
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0)
-        VLOG("sync sub: frame %llu fence %llu: %llu draws, %d parts, recorded %.2f-%.2f ms, queued", (unsigned long long)g_frame, (unsigned long long)fence,
+        VLOG("sync sub: frame %llu fence %llu: %llu draws, %d parts, recorded %.2f-%.2f ms, queued", (unsigned long long)g_sub_frame, (unsigned long long)fence,
              (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, (g_sub_t0 % 1000000000000ull) / 1e6, ms_now());
     g_cb = VK_NULL_HANDLE;
     return fence;
@@ -473,7 +478,7 @@ static void clear_color(const p_clear_color *c) {
     const tex_t *t = S.rt.color[c->index]; const view_t *v = &S.rt.cview[c->index]; int hv = S.rt.has_cview[c->index];
     vka_img *im = vka_tex_get(t, g_cb); vka_fmt f;
     if (!im || !vka_fmt_of(hv && v->set_format ? v->format : t->d.format, &f)) return;
-    if (f.kind) { VRED_ONCE("color clear of a depth texture (format %#x)", t->d.format); return; }
+    if (f.kind >= 3) { VRED_ONCE("color clear of a depth texture (format %#x)", t->d.format); return; }   // (kind 1 / 2: integer colour, cleared with the integer value, color_value)
     if ((c->mask & 0xf) != 0xf) { VRED_ONCE("color clear with channel mask %#x is not on Vulkan yet (needs a pipeline): skipped", c->mask); return; }
     vka_tex_own(im, g_cb);   // (zero-shared: memory of its own before the clear, which may also become the next pass's loadOp)
     uint32_t lv, l0, nl; rt_range(im, v, hv, &lv, &l0, &nl);
@@ -713,13 +718,21 @@ static void exec(const uint8_t *p, int depth) {
             }
             post((pop){2, 0, q, (uint32_t)t, ad});
             if ((t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP) && DM_GAME_RENDER_COND && g_nrc_ts < RC_PEND) g_rc_ts[g_nrc_ts++] = ad;
-            if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_frame,
+            if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) VLOG("sync report: frame %llu type %llu at draw %llu of the submission, part %d, recording at %.2f ms", (unsigned long long)g_sub_frame,
                                                                            (unsigned long long)t, (unsigned long long)(g_stat_draws - g_sub_draws0), g_nx + 1, ms_now());
             break; }
-        case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_cur_fence ? g_cur_fence : vka_fence_last() + 1; s->fenced = 1; break; }   // the fence this submission commits with
+        // Reserved worker submissions published their syncs before enqueue. Replaying an older job must not overwrite a later fence on the same sync.
+        case OP_FENCE_SYNC: if (!g_cur_fence) { sync_t *s; memcpy(&s, a, 8); s->fence = vka_fence_last() + 1; s->fenced = 1; } break;   // inline: the fence taken at commit
         case OP_RENDER_COND: { const p_render_cond *rc = a;
             if (rc->mode >= 2) S.rc_skip = rc->mode == 3;
-            else { uint64_t x, y; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y); }
+            else { uint64_t x = 0, y = 0; int known = rc_known(rc->addr, &x) && rc_known(rc->addr + 16, &y); S.rc_skip = known && (rc->mode ? x == y : x != y);
+                   if (VKA_ENV("DM_VK_RC_LOG", 0) > 0) {   // diagnostic: each condition as evaluated while recording, with this submission's reports to its pair
+                       static _Atomic long left = -1; if (atomic_load(&left) < 0) atomic_store(&left, (long)VKA_ENV("DM_VK_RC_LOG", 0));
+                       if (atomic_fetch_sub(&left, 1) > 0) { int t0 = -1, t1 = -1; for (int i = 0; i < g_npost; i++) if (g_post[i].kind == 2) { if (g_post[i].addr == rc->addr) t0 = (int)g_post[i].type; if (g_post[i].addr == rc->addr + 16) t1 = (int)g_post[i].type; }
+                           VLOG("rc: frame %llu mode %u pair %#llx: %#llx / %#llx%s → %s; reports in this submission: type %d / %d", (unsigned long long)g_sub_frame, rc->mode, (unsigned long long)rc->addr,
+                                (unsigned long long)x, (unsigned long long)y, known ? "" : " (not readable)", S.rc_skip ? "not drawn" : "drawn", t0, t1); } }
+                   if (!VKA_ENV("DM_VK_RENDER_COND", 1)) S.rc_skip = 0;   // diagnostic (live): conditions ignored, everything drawn
+            }
             break; }
         case OP_RESET_COUNTER: break;
         case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;

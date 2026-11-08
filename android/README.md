@@ -13,12 +13,14 @@ The Android port of the host: one launcher APK (`android/app`) that holds the ho
 
 ## The environment
 
-The packer runs the rewriter, which needs Capstone 5 and lz4 (`pyproject.toml`, dependency group `android-pack`). Keep the environment on the dump drive, not in the home folder:
+The packer runs the rewriter, which needs Capstone 5 and lz4 (`pyproject.toml`, dependency group `android-pack`), and zbic for a game built with SDK 22 or later (system 22.0.0 on: its NSO segments are ZBIC, Nintendo's zstd variant, which `dm/tools/nso.py` decodes with that package; The Legend of Zelda: Ocarina of Time). Keep the environment on the dump drive, not in the home folder:
 
 ```sh
 micromamba create -p <dump folder>/.venv-nxnative python=3.12 -c conda-forge
-<dump folder>/.venv-nxnative/bin/python -m pip install "capstone>=5,<6" lz4
+<dump folder>/.venv-nxnative/bin/python -m pip install "capstone>=5,<6" lz4 zbic
 ```
+
+An environment that cannot take the package (a shared one) can find it in a folder of its own: `pip install --target <folder> zbic==1.0.1.post1`, then `PYTHONPATH=<folder>` for the packer, which hands it to the rewriter and the shader split it starts. Without it a ZBIC module stops the rewrite with `ZBIC (zstd) segments need the zbic package`.
 
 Capstone comes from pip: conda-forge's Capstone 5 finds its library only through `CONDA_PREFIX`, so it fails when the environment's Python is run without activating it.
 

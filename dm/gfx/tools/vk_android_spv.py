@@ -1,6 +1,8 @@
 """SPIR-V reading and the few rewrites the Android Vulkan library needs (vk_android_build.py): the descriptor set / binding renumbering into the Vulkan ABI
 (dm/gfx/nvn/dmsh_abi_vk.h), vertex outputs that start as (0, 0, 0, 1), the GL depth and alpha test constants, the integer-output and dual-source variants, the
 viewport mask of an emulated passthrough geometry shader, and the facts the reflection reads (resources, vertex inputs, colour outputs, capabilities). The translator's modules are taken as they come; every rewrite keeps the module valid for spirv-val --target-env vulkan1.3."""
+import hashlib
+import json
 import struct
 
 MAGIC = 0x07230203
@@ -16,7 +18,7 @@ OP_SPEC_CONSTANT_FALSE, OP_SELECT, OP_IMAGE_READ, OP_IMAGE_WRITE = 49, 169, 98, 
 # decorations, storage classes, builtins
 DEC_SPEC_ID, DEC_BLOCK, DEC_BUFFER_BLOCK, DEC_BUILTIN, DEC_LOCATION, DEC_BINDING, DEC_SET = 1, 2, 3, 11, 30, 33, 34
 SC_UNIFORM_CONSTANT, SC_INPUT, SC_UNIFORM, SC_OUTPUT, SC_FUNCTION, SC_PUSH_CONSTANT, SC_STORAGE_BUFFER = 0, 1, 2, 3, 7, 9, 12
-BUILTIN_POSITION = 0
+BUILTIN_POSITION, BUILTIN_BASE_INSTANCE = 0, 4425
 # VkDescriptorType
 VK_SAMPLER, VK_COMBINED, VK_SAMPLED_IMAGE, VK_STORAGE_IMAGE, VK_UNIFORM_TEXEL, VK_STORAGE_TEXEL, VK_UNIFORM_BUFFER, VK_STORAGE_BUFFER = 0, 1, 2, 3, 4, 5, 6, 7
 DIM_BUFFER = 5
@@ -230,6 +232,44 @@ def vec4_const(m, f32, vals):
         if x[0] & 0xffff == OP_CONSTANT_COMPOSITE and x[1] == vt and x[3:] == ids: return x[2]
     c = m.new_id(); m._insert_decl([7 << 16 | OP_CONSTANT_COMPOSITE, vt, c, *ids])
     return c
+
+
+def vs_base_instance(m):
+    """Vertex c0+0x644 is the draw's base instance. An indirect record may be written by the GPU, so the CPU-filled driver word is not its value. Read the Vulkan
+    builtin instead, as dmsh_build.py vs_base_instance does for Metal. The translator's scalar load holds raw float bits: preserve those bits, not a numeric conversion.
+    Only this constant driver-word access is replaced; adjacent words and other stages keep their existing semantics. Return the number of loads replaced."""
+    if m.model != 'vs': return 0
+    c0 = {v for v, (_, sc) in m.vars.items() if sc == SC_UNIFORM and m.names.get(v) == 'vp_c0'}
+    ptrs = {x[2] for x in m.ins if x[0] & 0xffff in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN) and len(x) == 7
+            and x[3] in c0 and [const_int(m, i) for i in x[4:]] == [0, 100, 1]}
+    loads = {x[2] for x in m.ins if x[0] & 0xffff == OP_LOAD and x[3] in ptrs
+             and (m.int_type(x[1]) in ((32, 0), (32, 1)) or m.types.get(x[1], [0])[0] & 0xffff == OP_TYPE_FLOAT and m.types[x[1]][2] == 32)}
+    if not loads: return 0
+    base, member = m.builtin_var(SC_INPUT, BUILTIN_BASE_INSTANCE)
+    if base is None:
+        ty = m.add_type(OP_TYPE_INT, 32, 0); pt = m.add_type(OP_TYPE_POINTER, SC_INPUT, ty)
+        base = m.new_id(); m._insert_decl([4 << 16 | OP_VARIABLE, pt, base, SC_INPUT])
+        at = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_DECORATE)
+        m.ins.insert(at, [4 << 16 | OP_DECORATE, base, DEC_BUILTIN, BUILTIN_BASE_INSTANCE])
+        m.entry.append(base); m.entry[0] = len(m.entry) << 16 | OP_ENTRY_POINT
+    else:
+        ty = m.pointee(m.vars[base][0])[1]
+        if member is not None: ty = m.types[ty][2 + member]
+        if m.int_type(ty) not in ((32, 0), (32, 1)): raise ValueError('BaseInstance is not a 32-bit integer')
+    if 4427 not in m.caps: m.ins.insert(0, [2 << 16 | OP_CAPABILITY, 4427])   # DrawParameters, core in the translator's SPIR-V 1.3
+    if member is not None:
+        pt = m.add_type(OP_TYPE_POINTER, SC_INPUT, ty); ci = m.add_const(m.add_type(OP_TYPE_INT, 32, 0), member)
+    out = []
+    for x in m.ins:
+        if x[0] & 0xffff != OP_LOAD or x[2] not in loads: out.append(x); continue
+        ptr = base
+        if member is not None:
+            ptr = m.new_id(); out.append([5 << 16 | OP_ACCESS_CHAIN, pt, ptr, base, ci])
+        value = x[2] if ty == x[1] else m.new_id()
+        out.append([4 << 16 | OP_LOAD, ty, value, ptr])
+        if value != x[2]: out.append([4 << 16 | OP_BITCAST, x[1], x[2], value])
+    m.ins = out; m.index()
+    return len(loads)
 
 
 def init_outputs(m, extra_locations=()):
@@ -981,3 +1021,169 @@ def hmma_lds(m):
     m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
     m.index()
     return calls
+
+
+# The named tensor helper has a fixed software contract (HelperFunctionManager.GenerateHmma16816F16).
+# Canonicalize local IDs and external definitions, including constants and the full body; only the
+# scratch array's extent may vary with workgroup size. Refuse new contracts rather than silently
+# replacing changed arithmetic. This is a semantic implementation fingerprint, not a shader key.
+def _hmma_contract(m, fid):
+    body=[];inside=False
+    for x in m.ins:
+        op=x[0]&65535
+        if op==54:inside=x[2]==fid
+        if inside:body.append(x)
+        if op==56:inside=False
+    allowed={54,55,248,59,61,194,124,62,199,128,196,65,224,12,81,80,254,56}
+    noresult={62,224,254,56}
+    loc={};scratch=set();imports={x[1]:bytes().join(int(v).to_bytes(4,'little') for v in x[2:]).split(b'\0')[0].decode() for x in m.ins if x[0]&65535==11}
+    for x in body:
+        op=x[0]&65535
+        if op not in allowed:raise ValueError('compact HMMA: unexpected helper opcode')
+        if op not in noresult:loc[x[1] if op==248 else x[2]]=len(loc)
+    def ref(i):
+        if i in loc:return ('local',loc[i])
+        if i in m.consts:
+            t,v=m.consts[i];return ('constant',ref(t),v)
+        if i in m.types:
+            x=m.types[i];op=x[0]&65535
+            if op in (21,22):return ('type',op,x[2:])
+            if op==23:return ('vector',ref(x[2]),x[3])
+            if op==32:return ('pointer',x[2],ref(x[3]))
+            if op==33:return ('function',*[ref(v) for v in x[2:]])
+            raise ValueError('compact HMMA: unexpected helper type')
+        if i in imports:return ('import',imports[i])
+        if i in m.vars:
+            ptr,sc=m.vars[i];t=m.pointee(ptr)[1];x=m.types[t]
+            if sc!=4 or x[0]&65535!=28 or m.int_type(x[2])!=(32,0):raise ValueError('compact HMMA: unexpected scratch memory type')
+            n=m.consts[x[3]][1][0]
+            if n<256 or n%256:raise ValueError('compact HMMA: unexpected scratch memory extent')
+            scratch.add(i);return ('scratch',)
+        raise ValueError(f'compact HMMA: unknown helper reference {i}')
+    norm=[]
+    for x in body:
+        op=x[0]&65535; literal={54:{3},59:{3},12:{4},81:set(range(4,len(x)))}.get(op,set())
+        norm.append([op,*[('literal',v) if j in literal else ref(v) for j,v in enumerate(x[1:],1)]])
+    if len(scratch)!=1:raise ValueError('compact HMMA: expected one scratch array')
+    return hashlib.sha256(json.dumps(norm,separators=(',',':')).encode()).hexdigest(),scratch.pop(),set(loc)
+
+
+def compact_hmma(m):
+    """Keep the software HMMA arithmetic in a bounded SSA loop, before Vulkan drivers inline it.
+
+    The Metal chain replaces this helper with native matrix operations. Vulkan previously sent
+    its 2,164-instruction unrolled body and pointer parameters to the driver at every call site;
+    hundreds of calls made Turnip's NIR copy propagation exhaust the Android allocator. The
+    scratch layout, both subgroup barriers, ascending 16 FMAs and final half rounding stay the
+    same. Every input becomes a value and the two packed results return as a vector.
+    """
+    targets = [i for i, n in m.names.items() if n == 'dmsh_hmma16816_f16']
+    if not targets: return 0
+    if len(targets) != 1 or m.model != 'cs': raise ValueError('compact HMMA: expected one compute helper')
+    fid = targets[0]
+    digest, scratch, removed = _hmma_contract(m, fid)
+    if digest != '17475bdb479798b4984357a3d168c67568e4c1cc833da69dc27e5dc145a89f05':
+        raise ValueError('compact HMMA: software helper contract changed')
+    decorated = {i for i in removed if i in m.decos}
+    fmas = {x[2] for x in m.ins if x[0] & 0xffff == OP_EXT_INST and x[2] in removed and x[4] == 50}
+    if decorated and (decorated != fmas or any(m.decos[i] != {42: []} for i in decorated)):
+        raise ValueError('compact HMMA: unexpected helper decorations')
+    calls = [x for x in m.ins if x[0] & 0xffff == 57 and x[3] == fid]
+    if any(len(x) != 15 or m.int_type(x[1]) != (32, 1) for x in calls):
+        raise ValueError('compact HMMA: unexpected call signature')
+
+    u = m.add_type(OP_TYPE_INT, 32, 0); si = m.add_type(OP_TYPE_INT, 32, 1)
+    f = m.add_type(OP_TYPE_FLOAT, 32); v2f = m.add_type(OP_TYPE_VECTOR, f, 2)
+    v2u = m.add_type(OP_TYPE_VECTOR, u, 2); boolean = m.add_type(OP_TYPE_BOOL)
+    pwork = m.add_type(OP_TYPE_POINTER, 4, u)
+    ftype = m.add_type(33, v2u, *([u] * 10))
+    glsl = next(x[1] for x in m.ins if x[0] & 0xffff == OP_EXT_INST_IMPORT and string_at(x, 2)[0] == 'GLSL.std.450')
+    constants = {v: m.add_const(u, v) for v in (0, 1, 2, 3, 4, 8, 128, 192, 264)}
+    body = []; precise = []
+
+    def ins(op, *a): return [((len(a) + 1) << 16) | op, *a]
+    def emit(op, *a): body.append(ins(op, *a))
+    def val(op, ty, *a, ident=None):
+        ident = m.new_id() if ident is None else ident
+        emit(op, ty, ident, *a)
+        return ident
+    def add(a, b): return val(128, u, a, b)
+    def shl(a, bits): return val(196, u, a, constants[bits])
+    def unpack(a): return val(OP_EXT_INST, v2f, glsl, 62, a)
+    def component(a, i): return val(OP_COMPOSITE_EXTRACT, f, a, i)
+    def pointer(index): return val(OP_ACCESS_CHAIN, pwork, scratch, index)
+    def barrier(): emit(224, constants[3], constants[3], constants[264])
+
+    emit(OP_FUNCTION, v2u, fid, 2, ftype)  # DontInline is a hint; the loop also stays compact if the driver must inline.
+    args = [val(55, u) for _ in range(10)]
+    lane, base = args[:2]
+    entry, header, loop_body, cont, end = [m.new_id() for _ in range(5)]
+    emit(OP_LABEL, entry)
+    row = val(194, u, lane, constants[2]); t = val(199, u, lane, constants[3])
+    row8 = add(row, constants[8])
+    arows = [add(base, shl(r, 3)) for r in (row, row8)]
+    # A row-major, B transposed; C's stores remain part of the shared helper contract.
+    for r in range(4):
+        emit(OP_STORE, pointer(add(arows[r & 1], add(t, constants[4 if r >= 2 else 0]))), args[2 + r])
+    for r in range(2):
+        emit(OP_STORE, pointer(add(arows[0], add(constants[128], add(t, constants[4 if r else 0])))), args[6 + r])
+    for r, rr in enumerate((row, row8)):
+        emit(OP_STORE, pointer(add(base, add(constants[192], add(shl(rr, 2), t)))), args[8 + r])
+    barrier()
+    initial = [component(unpack(args[8 + r]), c) for r in range(2) for c in range(2)]
+    col = shl(t, 1)
+    brows = [add(base, add(constants[128], shl(add(col, constants[c]), 3))) for c in range(2)]
+    emit(249, header)
+    emit(OP_LABEL, header)
+    index, next_index = m.new_id(), m.new_id()
+    acc, updated = [m.new_id() for _ in range(4)], [m.new_id() for _ in range(4)]
+    val(245, u, constants[0], entry, next_index, cont, ident=index)
+    for i in range(4): val(245, f, initial[i], entry, updated[i], cont, ident=acc[i])
+    more = val(176, boolean, index, constants[8])
+    emit(246, end, cont, 2)  # DontUnroll: eight pairs, low half then high half, for each accumulator.
+    emit(250, more, loop_body, end)
+    emit(OP_LABEL, loop_body)
+    aa = [unpack(val(OP_LOAD, u, pointer(add(r, index)))) for r in arows]
+    bb = [unpack(val(OP_LOAD, u, pointer(add(c, index)))) for c in brows]
+    for r in range(2):
+        for c in range(2):
+            i = 2 * r + c
+            low = val(OP_EXT_INST, f, glsl, 50, component(aa[r], 0), component(bb[c], 0), acc[i])
+            val(OP_EXT_INST, f, glsl, 50, component(aa[r], 1), component(bb[c], 1), low, ident=updated[i])
+            if decorated: precise.extend((low, updated[i]))
+    emit(249, cont)
+    emit(OP_LABEL, cont)
+    val(128, u, index, constants[1], ident=next_index)
+    emit(249, header)
+    emit(OP_LABEL, end)
+    packed = [val(OP_EXT_INST, u, glsl, 58, val(80, v2f, acc[2 * r], acc[2 * r + 1])) for r in range(2)]
+    barrier()
+    emit(OP_RETURN_VALUE, val(80, v2u, *packed))
+    emit(OP_FUNCTION_END)
+
+    rewritten = []; inside = False
+    for x in m.ins:
+        op = x[0] & 0xffff
+        if op == OP_DECORATE and x[1] in removed: continue
+        if op == OP_NAME and x[1] in removed and x[1] != fid: continue
+        if op == OP_FUNCTION and x[2] == fid:
+            rewritten.extend(body); inside = True
+        if inside:
+            if op == OP_FUNCTION_END: inside = False
+            continue
+        if op == 57 and x[3] == fid:
+            values = []
+            for ptr in x[4:14]:
+                loaded, bits = m.new_id(), m.new_id()
+                rewritten += [ins(OP_LOAD, si, loaded, ptr), ins(OP_BITCAST, u, bits, loaded)]
+                values.append(bits)
+            result, d0, d1, out = [m.new_id() for _ in range(4)]
+            rewritten += [ins(57, v2u, result, fid, *values), ins(OP_COMPOSITE_EXTRACT, u, d0, result, 0),
+                          ins(OP_BITCAST, si, x[2], d0), ins(OP_COMPOSITE_EXTRACT, u, d1, result, 1),
+                          ins(OP_BITCAST, si, out, d1), ins(OP_STORE, x[14], out)]
+        else:
+            rewritten.append(x)
+    at = next(i for i, x in enumerate(rewritten) if 19 <= x[0] & 0xffff <= 39)
+    rewritten[at:at] = [ins(OP_DECORATE, i, 42) for i in precise]
+    m.ins = rewritten; m.index()
+    return len(calls)

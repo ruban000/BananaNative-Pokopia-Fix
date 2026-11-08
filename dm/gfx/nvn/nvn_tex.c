@@ -177,6 +177,15 @@ uint64_t nvn_tex_level_offset(const nvn_texdesc *d, unsigned level) {
     return level_offset(d, level, dpl, w, h, z, L.tileH, L.tileD, t);
 }
 
+// CPU source extent through the last mip of the last layer. Keep the allocation
+// size and layer stride above: sparse tiles and layered images align those, but
+// the final alignment bytes are not texels and need not have guest backing.
+uint64_t nvn_tex_data_size(const nvn_texdesc *d) {
+    nvn_texlayout L; nvn_tex_layout(d, &L);
+    if (!L.size || (d->flags & 0x50) || d->target == 10) return L.size;
+    return (uint64_t)(L.layers - 1) * L.layer_size + nvn_tex_level_offset(d, d->levels ? d->levels : 1);
+}
+
 uint32_t nvn_tex_level_gobs(const nvn_texdesc *d, unsigned level) {
     fmt_t t = fmt_of(d->format);
     unsigned dpl; int layered; uint32_t w, h, z, g = 0;

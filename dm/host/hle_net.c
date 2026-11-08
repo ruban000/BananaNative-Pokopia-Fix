@@ -35,6 +35,16 @@ HLE_FORCE("nnsslFinalize", "pairs with nnsslInitialize (cut)", Result, h_ssl_Fin
 #define SK_ENETDOWN 50                  // Horizon sockets use FreeBSD error codes
 static __thread int t_skerr = SK_ENETDOWN;
 static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
+// An error of a call the host serves (the event descriptors, hle_eventfd.c): kept for nnsocketGetLastErrno and written to the game's C errno, which nn::socket sets on Horizon
+// (sdk's socket::detail::SetLastErrno stores into __errno_location) and gRPC reads straight after a failed call
+static int sk_err(int e) {
+    t_skerr = e;
+    static int *(*errno_at)(void); if (!errno_at) errno_at = (int *(*)(void))guest_sym("__errno_location");
+    if (errno_at) *errno_at() = e;
+    return -1;
+}
+int dm_efd_is(int fd); int dm_efd_create(uint64_t init, unsigned flags); int dm_efd_read(int fd, uint64_t *v); int dm_efd_write(int fd, uint64_t v); int dm_efd_close(int fd);
+int dm_efd_poll(void *fds, uint64_t n, int64_t ms);
 #define SKF(m, cname, ...) HLE_FORCE(m, "bsd socket service (cut): returns -1/ENETDOWN", int, cname, __VA_ARGS__)
 // Poll / Select with nothing to wait on: the host creates no socket, so a game's descriptors are all -1, or it passes none. POSIX and Horizon's bsd service ignore negative
 // descriptors and wait out the timeout, returning 0. Failing at once made Dark Souls Remastered's network thread ("NexusRevolution Socket", main+0x92c7c4) spin a core at 100%
@@ -45,7 +55,13 @@ static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
     sk_pollfd *p = fds;
-    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) return sk_fail();
+    int efd = 0;
+    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) { if (!dm_efd_is(p[i].fd)) return sk_fail(); efd = 1; }
+    if (efd) {   // event descriptors (gRPC's wakeup descriptor): their state, waiting as long as asked (without a limit: 100 ms, as below)
+        dm_guest_suspend_wait();
+        int r = dm_efd_poll(fds, n, ms < 0 ? 100 : ms);
+        return r < 0 ? sk_fail() : r;
+    }
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
     return sk_idle(ms);
 }
@@ -59,7 +75,7 @@ SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, un
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
+SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { int r = dm_efd_close(s); return r ? sk_fail() : 0; }   // an event descriptor closes; there is no other
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
@@ -67,9 +83,17 @@ SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, i
 SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
 SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
-SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }
-SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
+// Event descriptors are served (hle_eventfd.c): they are the bsd service's own counters and work offline
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "event descriptor of the bsd service: a counter the host keeps (hle_eventfd.c)", int, h_sk_EventFd, uint64_t v, unsigned f) {
+    int r = dm_efd_create(v, f);
+    static _Atomic int logged; if (atomic_fetch_add(&logged, 1) < 4) LOG("socket: EventFd(%llu, flags %#x) → %d", (unsigned long long)v, f, r);
+    return r < 0 ? sk_err(-r) : r;
+}
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "event descriptor read (hle_eventfd.c)", int, h_sk_EventFdRead, int s, uint64_t *v) {
+    if (!v) return sk_err(22);
+    int r = dm_efd_read(s, v); return r ? sk_err(-r) : 0;
+}
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "event descriptor write (hle_eventfd.c)", int, h_sk_EventFdWrite, int s, uint64_t v) { int r = dm_efd_write(s, v); return r ? sk_err(-r) : 0; }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
@@ -85,7 +109,7 @@ HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host",
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("nnsocketClose", h_nsk_Close, int s) { (void)s; return sk_fail(); }
+SKF("nnsocketClose", h_nsk_Close, int s) { int r = dm_efd_close(s); return r ? sk_fail() : 0; }   // an event descriptor closes (gRPC closes its wakeup descriptor this way)
 SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }

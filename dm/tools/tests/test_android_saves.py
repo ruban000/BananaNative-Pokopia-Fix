@@ -1,5 +1,5 @@
 """The Android launcher's save backup / restore (SaveStore.java: verified copies of the save and its device save, the automatic backup before a restore, the lock, the
-roll-forward journal it shares with the host's plat_rename_swap) and its game table (Profile.java), on the JVM: javac compiles them with a stub BuildConfig and
+roll-forward journal it shares with the host's plat_rename_swap), its game table (Profile.java) and a pack's paths in a game folder of either layout (Pack.java), on the JVM: javac compiles them with a stub BuildConfig and
 android/app/src/jvmtest's LauncherJvmTest. Also: the lock held by another process, and the journal's recovery rules checked against the host's own plat_swap_recover
 (its swap code cut out of dm/host/plat/plat_android.c and compiled for the Mac), case by case, so the two sides keep one format and one set of rules.
 Skipped without a JDK (the C half: without cc)."""
@@ -17,9 +17,14 @@ PLAT = REPO / 'dm/host/plat/plat_android.c'
 STUB = '''package dev.nxnative.android;
 public final class BuildConfig {
     public static final String NX_PROFILES = "040074A01BF12000\\tDonkey Kong Bananza\\t22852\\tabcdef012345\\t458752 main=aa";
+    public static final String NX_DMSH_VK_CHAIN = "0123456789ab";
+    public static final String NX_DMSH_VK_ABI = "ba9876543210";
 }
 '''
-HARNESS = '''#include <dirent.h>
+HARNESS = '''#ifndef _GNU_SOURCE
+#define _GNU_SOURCE   // glibc's nftw flags (FTW_DEPTH); plat_android.c defines it itself, and the Android build for every file
+#endif
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
@@ -111,7 +116,7 @@ class LauncherJvm(unittest.TestCase):
         (d / 'stub').mkdir()
         (d / 'stub/BuildConfig.java').write_text(STUB)
         cls.classes = d / 'classes'
-        subprocess.run(['javac', '-Xlint:all,-try', '-Werror', '-d', str(cls.classes), str(SRC / 'SaveStore.java'), str(SRC / 'SaveMigrate.java'), str(SRC / 'Profile.java'), str(TEST), str(d / 'stub/BuildConfig.java')],
+        subprocess.run(['javac', '-Xlint:all,-try', '-Werror', '-d', str(cls.classes), str(SRC / 'SaveStore.java'), str(SRC / 'SaveMigrate.java'), str(SRC / 'Profile.java'), str(SRC / 'Pack.java'), *[str(SRC / f'{n}.java') for n in ('BuildCheck', 'DumpLayout', 'RomfsCheck', 'Nup', 'Zstd', 'ShaderLibs')], str(TEST), str(d / 'stub/BuildConfig.java')],
                        check=True, capture_output=True, text=True)
 
     @classmethod

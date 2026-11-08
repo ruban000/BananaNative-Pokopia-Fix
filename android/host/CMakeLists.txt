@@ -61,6 +61,18 @@ add_library(vpx STATIC ${VPX_C})
 target_include_directories(vpx PRIVATE ${TP}/libvpx ${TP}/libvpx/config)
 target_compile_options(vpx PRIVATE -O2 -w)
 
+# dav1d (AV1 movies, BSD-2-Clause, dm/third_party/dav1d, vendored): ON by default when its sources are in the tree. hle_codec_video.c then decodes the nn::codec AV1
+# decoders with it (hle_av1_dav1d.c; Zelda: Ocarina of Time's movies); OFF (Gradle -PnxAv1Dav1d=false) builds a host whose AV1 Initialize fails, as before
+if(EXISTS ${TP}/dav1d/src/lib.c)
+  set(NX_AV1_DAV1D_DEFAULT ON)
+else()
+  set(NX_AV1_DAV1D_DEFAULT OFF)
+endif()
+option(NX_AV1_DAV1D "AV1 movies decoded with dav1d (dm/third_party/dav1d)" ${NX_AV1_DAV1D_DEFAULT})
+if(NX_AV1_DAV1D)
+  add_subdirectory(${TP}/dav1d dav1d)
+endif()
+
 # zstd's decompressor (one file, dm/third_party/zstd): the Vulkan replay's shader library stores its SPIR-V modules as zstd frames (vka_shlib.c)
 add_library(zstddec STATIC ${TP}/zstd/zstddeclib.c)
 target_compile_options(zstddec PRIVATE -O2 -w -fvisibility=hidden)
@@ -85,6 +97,9 @@ function(nxhost_add tgt game)
   target_link_options(${tgt} PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined -Wl,--error-limit=0 -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libnxhost.map)
   set_target_properties(${tgt} PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libnxhost.map)
   target_link_libraries(${tgt} PRIVATE vpx zstddec aaudio mediandk android log m dl z)   # libvulkan.so is opened at run time (vka_dev.c)
+  if(NX_AV1_DAV1D)
+    target_link_libraries(${tgt} PRIVATE dav1d_nx)   # NX_DAV1D and its include directory come with the target
+  endif()
 endfunction()
 
 if(NX_GAMES)

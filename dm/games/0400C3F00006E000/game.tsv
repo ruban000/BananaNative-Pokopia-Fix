@@ -1,6 +1,7 @@
-# Mario Kart World (Switch 2), 1.8.0: one Application content (version 0) that carries the 1.8.0 code and data, no separate update. In bring-up
-# Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2), SDK 21.4.0 built for the Switch 2 (spec Ounce), NVN2; modules main + subsdk0 (NintendoSDK movie 21.4.0)
-# + subsdk1 (nn::ecli, Nintendo's embedded Mono runtime; main imports its allocator) + sdk.
+# Mario Kart World (Switch 2), the build of the dump the user supplies (SDK 19.3.3, no control data, so no display version): one Application content (version 0), no separate update. In bring-up
+# Nintendo EPD's engine (sead / agl / gsys, Phive, Havok 2023.2), SDK 19.3.3 built for the Switch 2 (spec Ounce), NVN2; modules main + subsdk0 (nn::ecli, Nintendo's embedded Mono runtime; main
+# imports its allocator) + sdk. This build has no movie module: the 1.8.0 build (SDK 21.4.0: main d00e4f39..., subsdk0 = NintendoSDK movie 746302f4..., subsdk1 = ecli 8dec9c0b..., sdk 7a68b13d...) is
+# not registered any more (README, Builds): its dump is not on this machine and a profile has one build row a version and one module list.
 # Packed from a dump folder (base/). Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code), as Donkey Kong Bananza.
 
 # ---- Identity ----
@@ -14,14 +15,13 @@ app_category	public.app-category.racing-games
 pad_layout	full
 
 # ---- Versions ----
-# The 1.8.0 dump is version 0 as the earlier base-game dump was, so it takes the v0 row: the earlier build (main 9e244438c3d8ef1c703a6a85ef99c4f0, subsdk0 d39a7a3d44530bb6..., the ecli module
-# that 1.8.0 loads as subsdk1, sdk 90ebba182862b9ec..., SDK 19.3.3) had no build-keyed cuts or host fixes and is not registered any more (README, Builds)
-build	v0	1.8.0	main=d00e4f399e411d0613aa8d26b1c02fef	subsdk0=746302f49f095cfca3d2188423c2bd77	subsdk1=8dec9c0b1bed821364e77b10a07b9a28	sdk=7a68b13d88183767fb9c7babffe89f3d
+# The dump is version 0 as the 1.8.0 one was, so this build takes the v0 row. Its display version is not known (no control.nacp in the dump): the row says "unknown"
+build	v0	unknown	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
 package	v0
 shader_versions	v0
 
 # ---- Files ----
-modules	main subsdk0 subsdk1 sdk
+modules	main subsdk0 sdk
 romfs_marker	System/Resource/ResourceSizeTable.Product.100.Nin_Ounce_NVN2.rsizetable.zs
 zip_store	.zs:.bwav:.webm:.metallib
 
@@ -43,6 +43,9 @@ shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Mario Kart World shaders
 
 # ---- Graphics ----
+# The window size is not this game's lever in the profile: main+0xc10190 (movz w21,#1440, in the function at main+0xc0ff60 that fills the renderer's size table) caps the twelve
+# heights GamePerformanceGraphicsConfigGParam gives, and a window_fn row naming it ("-", that offset, 2560x1440) was measured to work (the game note, Window size), but game.py allows one
+# lever for Game resolution and the profile uses the Switch 2 graphics scale below (measured on the phone on main)
 # agl's render buffer binding: Donkey Kong Bananza's clears are wrapped in render conditions; the same engine, not yet checked on this game
 render_cond	on
 # The 3D scenes' size follows the operation mode and the Switch 2 graphics scale, not the window (README, Render resolution): the Android launcher's Game resolution

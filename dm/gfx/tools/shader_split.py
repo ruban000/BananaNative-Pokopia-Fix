@@ -155,6 +155,7 @@ def bnsh_shaders(d, base, label):
     for v in range(nvar):
         prog = field(d, '<Q', base + pvar + 0x40 * v + 0x10, f'{where} variation {v}')[0]
         if not prog: continue
+        nvn2 = False
         for si, st in enumerate(STAGES):
             sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} variation {v} program')[0]
             if not sc: continue
@@ -162,8 +163,27 @@ def bnsh_shaders(d, base, label):
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
+            nvn2 = nvn2 or nvn2_ctl(ctl)
             if nvn2_ctl(ctl) and len(ctl) > 0x56 and NVN2_CTL_STAGE.get(ctl[0x56]) in ('ts', 'ms'): st = NVN2_CTL_STAGE[ctl[0x56]]   # filed in a graphics slot
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
+        if nvn2: out.extend(bnsh_nvn2_extra(d, base, prog, label, v))
+    return out
+
+NVN2_EXTRA = ((7, 'ts'), (8, 'ms'))   # an NVN2 program's stage slots past the six of NVN: slot 7 (+0x40) task, slot 8 (+0x48) mesh (slot 6, +0x38, is 0 in every program seen)
+def bnsh_nvn2_extra(d, base, prog, label, v):
+    """The task and mesh stages of an NVN2 BNSH program (one whose six NVN slots hold an NVN2 control section). Ocarina of Time's Model and Foliage packs keep them in slots 7 and 8,
+    after the six slots the NVN reader takes (1,683 task + mesh variations in Model): read by those six alone, 360 of its task / mesh control sections had no code area paired
+    (runtime_shaders.py). Mario Kart World files its task and mesh programs in the graphics slots instead (bnsh_shaders). Each must be an NVN2 control section of its slot's stage"""
+    where, out = f'{label} BNSH @{base:#x} variation {v}', []
+    for si, want in NVN2_EXTRA:
+        sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} program')[0]
+        if not sc: continue
+        pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} {want}')
+        ctl, code = span(d, base + pctl, nctl, f'{where} {want} control section'), span(d, base + pcode, ncode, f'{where} {want} code area')
+        if not (nvn2_ctl(ctl) and len(ctl) > 0x56 and NVN2_CTL_STAGE.get(ctl[0x56]) == want): red(f'{where}: slot {si} is not an NVN2 {STAGE_NAME[want]} control section')
+        why = check(label, want, ctl, code)
+        if why: red(f'{where} {want}: {why}')
+        out.append((f'{label}#BNSH@{base:#x}#var{v}', want, ctl, code))
     return out
 
 NVN2_CTL_STAGE = {5: 'cs', 6: 'ts', 7: 'ms'}   # NVN2 control +0x56: 0 vertex, 1 pixel, 5 compute, 6 task, 7 mesh
@@ -2580,9 +2600,11 @@ def mesh_facts(key, st, ctl, code, keys, mesh_pairs):
     if not threads: return warn('control +0x58 thread count is 0')
     if st == 'ts': return {'local': [threads, 1, 1], 'shared': 0, 'mesh': [0, 0, payload], 'pair': pairs}
     # the planes are counted from position and the generic vectors only: an output-map bit of another output (system values before position at 0x30..0x35 bits 0..3,
-    # colours / clip distances after the generics) would be a plane of its own and shift every one after it. None in Mario Kart World 1.8.0's 19 mesh programs
-    if any(code[0x30:0x35]) or code[0x35] & 0xf or any(code[0x46:0x50]): return warn('its SPH output map has outputs besides position and the generic vectors, whose planes are not known')
-    planes = [c for c in range(4) if code[0x35] >> (4 + c) & 1] + [4 + i for i in range(128) if code[0x36 + i // 8] >> (i % 8) & 1]
+    # colours / clip distances after the generics) would be a plane of its own and shift every one after it. None in Mario Kart World 1.8.0's 19 mesh programs.
+    # The point size (0x35 bit 3, the word before position.x as in the input map's system values B) is a plane the translator drops (-3): the programs output
+    # triangles, which do not use it. Ocarina of Time's 5 Foliage and AglShader mesh programs write it as their first plane (0x35 = 0xf8)
+    if any(code[0x30:0x35]) or code[0x35] & 0x7 or any(code[0x46:0x50]): return warn('its SPH output map has outputs besides the point size, position and the generic vectors, whose planes are not known')
+    planes = [-3] * (code[0x35] >> 3 & 1) + [c for c in range(4) if code[0x35] >> (4 + c) & 1] + [4 + i for i in range(128) if code[0x36 + i // 8] >> (i % 8) & 1]
     layout = [maxv, maxp, payload, *planes]
     flats, reads = set(), set()
     for ps in pairs:

@@ -386,6 +386,29 @@ static int norm_rest(const char *rest, char *out, size_t n) {
     }
     return 1;
 }
+// A folder missing from a read-only content mount (the RomFS folder): on hardware the RomFS is the game's whole, read-only file system, so a path through a folder it does not
+// have is either a probe for a folder the game does not ship or a copy of the game files that is not complete. The second fails later, far from the cause, and silently:
+// "not found" is logged only under DM_FS=1 (games probe for files all the time). Mario Kart World with its Tex folder not yet copied to the phone read a null texture
+// in its Prepare Thread 4 s into nnMain (dm/games/0400C3F00006E000/README.md). So the first lookup through each missing folder is a [RED] line (up to ROM_DIR_MISSING_MAX
+// folders a run), naming the folder and the path that went through it. A lookup only reads the result; nothing is answered differently.
+#define ROM_DIR_MISSING_MAX 8
+static char g_rom_dir_missing[ROM_DIR_MISSING_MAX][0x301]; static int g_nrom_dir_missing, g_rom_dir_missing_more;
+static pthread_mutex_t g_rom_dir_missing_lock = PTHREAD_MUTEX_INITIALIZER;
+// m: the mount; rest0 .. end: the guest path after "<mount>:" up to and including the missing folder; path: the whole guest path
+static void rom_dir_missing(const mount_t *m, const char *rest0, const char *end, const char *path) {
+    while (*rest0 == '/') rest0++;
+    size_t k = (size_t)(end - rest0); if (k >= sizeof g_rom_dir_missing[0]) return;
+    pthread_mutex_lock(&g_rom_dir_missing_lock);
+    int seen = 0;
+    for (int j = 0; j < g_nrom_dir_missing && !seen; j++) seen = !strncmp(g_rom_dir_missing[j], rest0, k) && !g_rom_dir_missing[j][k];
+    int say = 0, more = 0;
+    if (!seen && g_nrom_dir_missing < ROM_DIR_MISSING_MAX) { memcpy(g_rom_dir_missing[g_nrom_dir_missing], rest0, k); g_rom_dir_missing[g_nrom_dir_missing++][k] = 0; say = 1; }
+    else if (!seen && !g_rom_dir_missing_more) more = g_rom_dir_missing_more = 1;
+    pthread_mutex_unlock(&g_rom_dir_missing_lock);
+    if (say) LOG("[RED] fs: %s:/%.*s is not a folder in %s (%s not found): a probe for a folder the game does not ship, or a copy of the game files that is not complete",
+                 m->name, (int)k, rest0, m->dir, path);
+    if (more) LOG("[RED] fs: more than %d folders missing from read-only mounts; the others are not logged", ROM_DIR_MISSING_MAX);
+}
 // create only allows the last component to not exist yet; intermediate directories still need an exact match.
 static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create) {
     char fwd[1024]; p = fwd_slashes(p, fwd, sizeof fwd); const char *c = strchr(p, ':');
@@ -398,6 +421,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // only paths with "." components are normalized; the rest walk component by component as before
         if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
         strlcpy(out, g_mnt[i].dir, n);
+        const char *rest0 = rest;
         while (*rest) {
             while (*rest == '/') rest++;
             if (!*rest) break;
@@ -407,7 +431,10 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
             memcpy(part, rest, k); part[k] = 0;
             if (!strcmp(part, "..")) { errno = ENOENT; return 0; }
             const char *next = end; while (*next == '/') next++;
-            if (strcmp(part, ".") && !path_component(out, n, part, create && !*next, g_mnt[i].ro)) return 0;
+            if (strcmp(part, ".") && !path_component(out, n, part, create && !*next, g_mnt[i].ro)) {
+                if (errno == ENOENT && g_mnt[i].ro && *next) { rom_dir_missing(&g_mnt[i], rest0, end, p); errno = ENOENT; }   // the log line may set errno; the caller answers from it
+                return 0;
+            }
             rest = end;
         }
         return 1;

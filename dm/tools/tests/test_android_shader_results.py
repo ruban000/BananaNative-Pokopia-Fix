@@ -79,7 +79,7 @@ class Layout(unittest.TestCase):
         src = SRC.read_text(encoding='utf-8')
         self.assertIn(f'"{magic().decode()}"', src)
         tool = TOOL.read_text(encoding='utf-8')
-        head = re.search(r"h = \{'vk': TOOLS.*?\}", tool, re.S).group(0)
+        start = tool.index("h = {'vk': TOOLS"); head = tool[start:tool.index("'modules'", start)]   # (up to the last key: a value may hold a {} of its own)
         self.assertLess(head.index("'st'"), head.index("'refl'"))
 
 

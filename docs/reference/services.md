@@ -54,6 +54,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4).
 
+### The Switch 2 audio device manager (`auddmg:u`)
+
+- **Symptom:** `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99, call site sdk+0x1f61ac` (SDK 22.2.8), soon after the audio renderer opened; the abort's frames are `nn::audio::detail::ListVirtualInputDevices` → `nn::audio::devmgr::Initialize`.
+- **Cause:** the Switch 2 SDK's device calls (`ListVirtualOutputDevices` / `ListVirtualInputDevices`, `GetDefaultVirtualOutputDevice`, `GetVirtualOutputDeviceProperties`, `Is…StreamFormatSupported`, and `OpenOutputStream` / `OpenInputStream`, which read the device's profile before they make a sound mixer stream) go through `nn::audio::devmgr`, an HIPC client of `auddmg:u` (`nn::sf` Hipc2 proxies, message type 6, no domain). `devmgr::detail::InitializeImpl` (`sdk+0x2ac7f0`) turns a refused connection into 0xa99 and the public calls abort on it.
+- **Fix:** `hle_sf.c` decodes a host session's request for a service that answers it (`sf_call`, `hle_sf.h`: A / B / X buffers, process ID, raw data) and writes its answer (output data, copy handles, objects as move handles that become host sessions); it answers the CMIF Close message (type 2) `devmgr::Finalize` sends. `hle_sf_auddmg.c` serves `auddmg:u`: `IUserSessionManager` command 0 hands out an `IUserSession`, whose commands were read from the SDK's proxy (vtable order against the `devmgr::detail::*Impl` calls, each sender's header word, buffers and data stores): 0 `ListVirtualDeviceNames` (one output device, no input device: the host has no microphone), 100 default name (none for input), 200 available, 300 stream format supported, 401 the 0x228-byte profile (name; channels at +0x108 and latency in ns at +0x218, which `GetVirtualOutputDeviceProperties` copies; the device ID at +0x220, `sysmix::CreateStream`'s first argument; `OutputStreamImpl::Open` refuses a stream shorter than latency × rate frames), 500 / 600 a state change event that never fires, 900 physical name, 1000 stream format. Streams (700 `AttachStream`, 800 `DetachStream`, and `audsmx:u`) are not served: a red line if a game reaches them (open). Eglantine's `nx2_audio_device_manager.h` (read in PokeDinner's tree) named the command numbers first; every layout above was checked against the SDK's code.
+- **Check:** `dm/tools/tests/test_sf_auddmg.py` (Linux): requests built as the SDK's senders build them, replies read as its parser reads them.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8: its boot lists the input devices).
+
 ## SDK names that changed between versions
 
 ### Older SDK names for the same calls
@@ -137,6 +145,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** games probe many optional paths (debug parameters, other-language voice files).
 - **Note:** only a missing file followed by a failure matters.
 - **Found on:** every game (general).
+
+### A RomFS folder that is not complete
+
+- **Symptom:** a null read in the game's own code a few seconds into `nnMain`, with no `[RED]` line before it, on a device whose copy of the game files is not complete (a folder not yet copied). Mario Kart World: `CRASH sig=11 addr=0x1c pc=main+0x476180` on the Prepare Thread. Now the first lookup through a missing folder logs `[RED] fs: rom:/<folder> is not a folder in <RomFS folder> (<path> not found): a probe for a folder the game does not ship, or a copy of the game files that is not complete`.
+- **Cause:** not the host's. On hardware the RomFS is complete, and games treat their own resident files as always there: Mario Kart World looks its noise texture up by name in the texture manager and builds a texture from the entry without a null check, and the entry is made only when `Tex/<name>.bntx` loads. The host answers the missing file correctly (`ResultPathNotFound`), but logged it only under `DM_FS=1`, because games probe for optional files all the time ([File-not-found noise from optional paths](#file-not-found-noise-from-optional-paths)), so the crash came with nothing pointing at the files.
+- **Fix:** a diagnostic only (`hle_fs.c` `rom_dir_missing`): a lookup on a read-only folder mount that fails at a folder, not at the last component of its path, logs a `[RED]` line naming the folder, once a folder and up to 8 folders a run. Nothing is answered differently. A missing file in a folder that is there, and an image mount (its identity is checked at startup), are not covered. The remedy is to copy the game files again, completely. A game that does probe for a folder it does not ship gets one such line for it.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#boot-android-registered-build) (phone, `Tex/` and `TerrainArc/` not yet copied).
+- **Check:** `t_fs` (the Mac host tests): a missing folder is named once (also deeper and with backslashes), a missing file in a folder that is there and the missing folder as the last component are not, and every answer stays "not found". Not yet run (written on Linux, where the host tests do not build).
 
 ### Directory, file data cache and save-thumbnail calls
 
@@ -632,6 +648,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** it calls `nn::socket::Poll(fds, 0, 33)`: no descriptors and a 33 ms timeout, which on hardware is a 33 ms sleep. The host failed every socket call at once, so the thread spun 11,000 times a second (88,000 hits of a probe in 8 s).
 - **Fix:** `Poll` and `Select` with nothing to wait on (no descriptors, or only negative ones, which POSIX ignores) now wait out their timeout and return 0, in every mangling the host takes over, including SDK 4's `Select(int, fd_set*, …, timeval*)`; an endless timeout returns 0 after 100 ms, since a thread inside a host hook pauses for IL2CPP's collector only once the hook returns (`hle_net.c`, `dm_guest_sleep_ns` in `hle_thread.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot). Guest CPU fell from 1,030 to 60 ms per second.
+
+### Event descriptors of the bsd service
+
+- **Symptom:** the game's own `abort()` on a thread named `Porter` shortly after the first frames (`game called nn::diag abort: Result 0, call site sdk+0xb8fe8`, frames `nndiagAbort` ← `__assert_fail` ← `main+0x21f0c7c`), right after `fs mount _npln`.
+- **Cause:** gRPC's event engine selection (NPLN's client, `grpc_poll_strategy` "all", `main+0x21f0720`) found no poll engine: the `poll` engine's factory (`main+0x21f1280`) needs a wakeup descriptor, and its availability check (`main+0x21f3bd0`) creates `nn::socket::EventFd(0, 0)` and closes it. The host's offline cut failed every socket call, `EventFd` included, but an eventfd is the bsd service's own counter and works on an offline console.
+- **Fix:** `hle_eventfd.c` keeps event descriptors (counter, semaphore and non-blocking modes as FreeBSD numbers them: 1, 4; blocking reads and writes; `Poll` reports `POLLIN` / `POLLOUT` and waits for a write or the timeout); `EventFd`, `EventFdRead`, `EventFdWrite`, `Close` / `nnsocketClose` and `Poll` take them (`hle_net.c`); every other socket call still fails with `ENETDOWN`. Errors go to the game's C errno (`__errno_location`), where `nn::socket::detail::SetLastErrno` puts them and gRPC reads them (EAGAIN 11).
+- **Check:** `dm/tools/tests/test_eventfd.py` (Linux).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (NPLN 1.55.1).
 
 ## Settings, languages and fonts
 

@@ -71,7 +71,19 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
             // The full 16-byte segments take a constant-size copy (a memcpy of a runtime length is a call per segment);
             // a row whose byte count is not divisible by 16 has a tail (e.g. R8 or RGB formats at an odd width).
             if (to_linear) {
-                for (uint32_t j = 0; j < nfull; j++) memcpy(row + (j << 4), bl + yb + ((uint64_t)(j >> 2) * block) + kox[j & 3], 16);
+                // Four segments share one GOB column. Compute its base once and
+                // expose contiguous destination writes to the compiler; preserve
+                // the segment order and leave partial columns on the same path.
+                uint32_t columns = nfull >> 2;
+                for (uint32_t x = 0; x < columns; x++) {
+                    const uint8_t *src = bl + yb + (uint64_t)x * block;
+                    uint8_t *dst = row + ((size_t)x << 6);
+                    memcpy(dst, src + kox[0], 16);
+                    memcpy(dst + 16, src + kox[1], 16);
+                    memcpy(dst + 32, src + kox[2], 16);
+                    memcpy(dst + 48, src + kox[3], 16);
+                }
+                for (uint32_t j = columns << 2; j < nfull; j++) memcpy(row + (j << 4), bl + yb + ((uint64_t)(j >> 2) * block) + kox[j & 3], 16);
                 if (tail) memcpy(row + (nfull << 4), bl + yb + ((uint64_t)(nfull >> 2) * block) + kox[nfull & 3], tail);
             } else {
                 for (uint32_t j = 0; j < nfull; j++) memcpy(bl + yb + ((uint64_t)(j >> 2) * block) + kox[j & 3], row + (j << 4), 16);

@@ -7,6 +7,9 @@
 //   "capture <n>"     the next n frames, one log line each: draws, skipped draws, render passes, full barriers, clears / copies, submissions, recording ms, GPU ms
 //   "screenshot [p]"  the next presented game frame (the window texture, before the present's scaling) as a PNG, by default ctl-shot-<frame>.png beside the control file
 //   "stats"           one log line now: the last 60 frames' averages, the frame rate, placed memory, pipelines, the switches set live
+//   "census"    the image census: ctl-census-<frame>.tsv beside the control file (a row per live image: content class, size, the texture IDs that name it, storage reuse)
+//                     and summary lines with the host's malloc, scratch and placed memory (vka_tex_census)
+//   "burst [n]"       the next n (8, at most 32) presented game frames, consecutive, as ctl-burst-<frame>.png beside the control file (frame-to-frame differences: flicker)
 // Every answer is a log line starting "[vk] ctl:" (android/tools/nxctl.sh waits for them)
 #if defined(__ANDROID__)
 #include "vka.h"
@@ -17,7 +20,12 @@
 #include <strings.h>
 #include <zlib.h>
 #include <math.h>
+#include <limits.h>
 #include <sys/stat.h>
+#include <malloc.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 _Atomic uint32_t vka_env_gen = 1;   // 1: call sites' zeroed caches read their switch on the first call
 
@@ -57,15 +65,17 @@ double vka_env_slow(vka_envc *c, const char *key, double def) {
 }
 
 // Switches read once (at start, or when a device object is made): a live change is logged as taking effect at the next start
-static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_SUBGROUP_GS", "DM_VK_SHUFFLE_LDS", "DM_VK_ADPF", "DM_VK_ADPF_PIPELINE", "DM_VK_NANSCAN",
+static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_MESH_CS", "DM_VK_SUBGROUP_GS", "DM_VK_SHUFFLE_LDS", "DM_VK_ADPF", "DM_VK_ADPF_PIPELINE", "DM_VK_NANSCAN",
                                         "DM_VK_NANSCAN_STEP", "DM_VK_NANSCAN_DRAWS", "DM_VK_NANSCAN_SERIAL", "DM_VK_NANSCAN_FS", "DM_VK_WORKER",
                                         "DM_VK_WORKER_FRAMES", "DM_VK_TEST_HANG", "DM_LSFG_DLL", "DM_FPS", "NXHOST_VK_SELFTEST", "DM_CTL", "DM_VK_PREWARM", "DM_VK_PREWARM_MAX", "DM_VK_PREWARM_FILE", "DM_VK_LC_GLOBAL",
                                         "DM_VK_PSO_ASYNC", NULL};
 // Switches the replay reads again after a change (VKA_ENV, or at use); a table, so the log line can say which kind a key is
 static const char *const g_live[] = {"DM_VK_DRAW", "DM_VK_STATS", "DM_VK_HANG_S", "DM_VK_HANG_EXIT", "DM_VK_FRAME_RATE", "DM_VK_FRAME_RATE_HOLD", "DM_VK_PCACHE_SAVE_S", "DM_VK_GPL_GIVEUP", "DM_VK_GPL_PROBE", "DM_VK_PREWARM_KEEP", "DM_VK_PRETRANSFORM", "DM_VK_FSR", "DM_VK_FSR_SHARP", "DM_VK_TEX_TRACK",
                                      "DM_VK_CHUNK", "DM_VK_PASS_CLEARS", "DM_VK_PASS_KEEP", "DM_VK_DYN_FILTER", "DM_VK_PROF", "DM_VK_ROWS", "DM_VK_SYNCLOG", "DM_VK_UBWC", "DM_VK_IMG_UPGRADE", "DM_VK_DONE_LAST", "DM_VK_AFF_REPLAY", "DM_VK_AFF_ALL",
-                                     "DM_VK_NANSCAN_DUMP", "DM_VK_VB_FILTER", "DM_VK_ENC_BATCH", "DM_VK_BAR_KEEP", "DM_VK_DRV_MEMO", "DM_VK_PUSH_DELTA", "DM_VK_UPLOAD_MT", "DM_VK_UPLOAD_MT_MIN",
-                                     "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", NULL};
+                                     "DM_VK_NANSCAN_DUMP", "DM_VK_VB_FILTER", "DM_VK_ENC_BATCH", "DM_VK_BAR_KEEP", "DM_VK_DRV_MEMO", "DM_VK_PUSH_DELTA", "DM_VK_UPLOAD_MT", "DM_VK_UPLOAD_MT_MIN", "DM_VK_UPLOAD_TRACE", "DM_VK_PAGEOUT", "DM_VK_PAGEOUT_S", "DM_VK_PAGEOUT_MB",
+                                     "DM_VK_DRAW_TRACE_SHADERS", "DM_VK_DRAW_TRACE_RANGE", "DM_VK_DRAW_TRACE_SLOT", "DM_VK_DRAW_TRACE_COUNT", "DM_VK_DRAW_TRACE_FRAMES",
+                                     "DM_VK_BUFFER_TRACE", "DM_VK_BUFFER_TRACE_DIR", "DM_VK_BUFFER_TRACE_FRAMES", "DM_VK_BUFFER_TRACE_COUNT", "DM_VK_BURST_CROP",
+                                     "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", "DM_VK_POOL_BIND_FILTER", "DM_VK_ENC_WAKE", "DM_VK_ENC_SPIN_US", NULL};
 static int in(const char *const *t, const char *k) { for (; *t; t++) if (!strcmp(*t, k)) return 1; return 0; }
 
 void dm_gfx_ctl_env(const char *key, const char *val) {   // the control thread
@@ -109,14 +119,15 @@ void vka_ctl_sub(void) {   // mtl_sub_begin: the submit lock is held, no submiss
 // ---------- Frame statistics: capture and stats ----------
 extern uint64_t vka_n_rp, vka_n_bar;   // vka_draw.c, vka_tex.c
 void vka_exec_counts(uint64_t *ops, uint64_t *subs, uint64_t *rec_ns);   // vka_exec.c
+void vka_mesh_cs_stats(uint64_t *draws, uint64_t *records);   // vka_draw.c
 double mtl_gpu_ms(uint64_t f);
 enum { NREC = 128 };
-typedef struct { uint64_t frame, t, draws, skipped, disp, rp, bar, ops, subs, rec_ns; } frec;   // counters at the start of frame
+typedef struct { uint64_t frame, t, draws, skipped, disp, rp, bar, ops, subs, rec_ns, mcs; } frec;   // counters at the start of frame
 static frec g_rec[NREC];
-static _Atomic long g_capture; static uint64_t g_cap_from, g_cap_to; static _Atomic int g_stats;
+static _Atomic long g_capture; static uint64_t g_cap_from, g_cap_to; static _Atomic int g_stats, g_census;
 static void snap(frec *r, uint64_t f) {
     r->frame = f; r->t = now_ns(); uint64_t pipes; vka_draw_stats(&r->draws, &r->skipped, &r->disp, &pipes);
-    r->rp = vka_n_rp; r->bar = vka_n_bar; vka_exec_counts(&r->ops, &r->subs, &r->rec_ns);
+    r->rp = vka_n_rp; r->bar = vka_n_bar; vka_exec_counts(&r->ops, &r->subs, &r->rec_ns); vka_mesh_cs_stats(&r->mcs, NULL);
 }
 static void cap_line(uint64_t f) {   // frame f, once its GPU time is in (8 frames on)
     const frec *a = &g_rec[f % NREC], *b = &g_rec[(f + 1) % NREC];
@@ -136,13 +147,67 @@ static void stats_line(uint64_t f) {
     pthread_mutex_lock(&g_emu);
     for (int i = 0; i < g_novr && sn < sizeof sw; i++) sn += (size_t)snprintf(sw + sn, sizeof sw - sn, " %s=%s", g_ovr[i].key, g_ovr[i].set ? g_ovr[i].val : "(unset)");
     pthread_mutex_unlock(&g_emu);
-    VLOG("ctl: stats at frame %llu, last %d frames: %.1f fps (%.1f presented), %.2f ms a frame; per frame %.0f draws (%.0f skipped), %.0f dispatches, %.0f render passes, %.0f full barriers, "
+    VLOG("ctl: stats at frame %llu, last %d frames: %.1f fps (%.1f presented), %.2f ms a frame; per frame %.0f draws (%.0f skipped, %.0f mesh draws as compute), %.0f dispatches, %.0f render passes, %.0f full barriers, "
          "%.0f clears / copies, %.1f submissions, recording %.2f ms, GPU %.2f ms (%d frames); placed memory %.0f MB (peak %.0f); images %.0f MB (%d; GPU-written %.0f MB, from storage %.0f MB); switches set live:%s",
-         (unsigned long long)f, n, fps[0], fps[1], (b->t - a->t) / 1e6 / k, (b->draws - a->draws) / k, (b->skipped - a->skipped) / k, (b->disp - a->disp) / k, (b->rp - a->rp) / k,
+         (unsigned long long)f, n, fps[0], fps[1], (b->t - a->t) / 1e6 / k, (b->draws - a->draws) / k, (b->skipped - a->skipped) / k, (b->mcs - a->mcs) / k, (b->disp - a->disp) / k, (b->rp - a->rp) / k,
          (b->bar - a->bar) / k, (b->ops - a->ops) / k, (b->subs - a->subs) / k, (b->rec_ns - a->rec_ns) / 1e6 / k, ng ? gpu / ng : -1.0, ng, placed / 1e6, peak / 1e6, img / 1e6, img_n, img_gw / 1e6, (img - img_gw) / 1e6, sn ? sw : " none");
-    { char ab[400]; vka_tex_alias_stats(ab, sizeof ab); VLOG("ctl: %s", ab); }
+    { char ab[400]; vka_tex_alias_stats(ab, sizeof ab); uint64_t pb, pc, pfl; vka_tex_pageout_stats(&pb, &pc, &pfl); VLOG("ctl: %s; storage page-out requests %.0f MiB", ab, pb / 1048576.0); }
     { char im[600]; vka_imem_stats(im, sizeof im); VLOG("ctl: %s", im); }
     { char bs[1000]; vka_tex_big_stats(bs, sizeof bs); if (bs[0]) VLOG("ctl: %s", bs); }
+    { char tp[1400]; vka_tex_top(tp, sizeof tp); VLOG("ctl: %s", tp); }
+}
+// "census": the image census (vka_tex_census) written to ctl-census-<frame>.tsv beside the control file, and the host's own memory: malloc's arenas, scratch, placed pools
+static void ctl_dir(void);
+static char g_ctl_dir[1024];
+void nvn_pool_census_log(void);   // hle_nvn.c (DM_NVN_POOLS)
+// The host heap's allocations by size and by what their first bytes look like (ctl census): bionic's malloc_iterate over the allocator's mappings, as libmemunreachable
+// does (looked up at run time: a platform symbol; nothing is printed where it is missing). Nothing may allocate between malloc_disable and malloc_enable, so the mappings
+// are read before into a static buffer and the callback only counts
+typedef void (*mit_cb)(uintptr_t, size_t, void *);
+static struct { uint64_t n[12], b[12], spv_n, spv_b; struct { uintptr_t a; size_t n; uint8_t head[16]; } top[8]; uint8_t smp[12][2][24]; uint32_t sn[12][2]; } g_mh;
+static void mh_cb(uintptr_t a, size_t n, void *arg) {
+    (void)arg; int k = 0; while (k < 11 && n > (64ull << (2 * k))) k++;
+    g_mh.n[k]++; g_mh.b[k] += n;
+    for (size_t o = 0; o + 20 <= n && o < 256; o += 4) if (*(const uint32_t *)(a + o) == 0x07230203u) { g_mh.spv_n++; g_mh.spv_b += n; break; }   // (a driver's module copies the words after a header)
+    if (n >= 24 && (g_mh.n[k] == 1 || g_mh.n[k] == 97)) { int j = g_mh.n[k] == 1 ? 0 : 1; memcpy(g_mh.smp[k][j], (const void *)a, 24); g_mh.sn[k][j] = (uint32_t)n; }   // two samples of each size class
+    int t = 8; while (t > 0 && g_mh.top[t - 1].n < n) t--;
+    if (t < 8) { memmove(&g_mh.top[t + 1], &g_mh.top[t], (size_t)(7 - t) * sizeof g_mh.top[0]); g_mh.top[t].a = a; g_mh.top[t].n = n; memcpy(g_mh.top[t].head, (const void *)a, n < 16 ? n : 16); }
+}
+static void malloc_census(void) {
+    int (*it)(uintptr_t, size_t, mit_cb, void *) = (int (*)(uintptr_t, size_t, mit_cb, void *))dlsym(RTLD_DEFAULT, "malloc_iterate");
+    void (*dis)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "malloc_disable"), (*en)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "malloc_enable");
+    if (!it || !dis || !en) { VLOG("ctl: census: host heap by size: malloc_iterate not available"); return; }
+    static char maps[8 << 20]; static struct { uintptr_t lo, hi; } rg[4096]; int nr = 0; size_t len = 0;
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC); if (fd < 0) return;
+    for (ssize_t r; len < sizeof maps - 1 && (r = read(fd, maps + len, sizeof maps - 1 - len)) > 0; ) len += (size_t)r;
+    close(fd); maps[len] = 0;
+    for (char *l = maps; *l && nr < 4096; ) { char *e = strchr(l, '\n'); if (e) *e = 0;
+        unsigned long lo, hi; if ((strstr(l, "[anon:scudo:") || strstr(l, "[anon:libc_malloc]")) && strstr(l, " rw-p ") && sscanf(l, "%lx-%lx", &lo, &hi) == 2) { rg[nr].lo = lo; rg[nr].hi = hi; nr++; }
+        if (!e) break; l = e + 1; }
+    memset(&g_mh, 0, sizeof g_mh);
+    dis(); for (int i = 0; i < nr; i++) it(rg[i].lo, rg[i].hi - rg[i].lo, mh_cb, NULL); en();
+    char b[1600]; size_t o = (size_t)snprintf(b, sizeof b, "ctl: census: host heap by size (%d mappings):", nr); uint64_t tot = 0;
+    for (int k = 0; k < 12; k++) { tot += g_mh.b[k]; if (g_mh.n[k]) o += (size_t)snprintf(b + o, sizeof b - o, " <=%llu KiB %llu / %.1f MiB;", (unsigned long long)((64ull << (2 * k)) >> 10), (unsigned long long)g_mh.n[k], g_mh.b[k] / 1048576.0); }
+    o += (size_t)snprintf(b + o, sizeof b - o, " in all %.0f MiB; SPIR-V copies %llu / %.1f MiB; largest:", tot / 1048576.0, (unsigned long long)g_mh.spv_n, g_mh.spv_b / 1048576.0);
+    for (int t = 0; t < 8 && g_mh.top[t].n && o < sizeof b; t++) { o += (size_t)snprintf(b + o, sizeof b - o, " %.1f MiB [", g_mh.top[t].n / 1048576.0);
+        for (int j = 0; j < 16 && o < sizeof b; j++) o += (size_t)snprintf(b + o, sizeof b - o, "%02x", g_mh.top[t].head[j]); if (o < sizeof b) o += (size_t)snprintf(b + o, sizeof b - o, "]"); }
+    VLOG("%s", b);
+    o = (size_t)snprintf(b, sizeof b, "ctl: census: host heap samples:");
+    for (int k = 4; k < 12 && o < sizeof b; k++) for (int j = 0; j < 2 && o < sizeof b; j++) if (g_mh.sn[k][j]) {
+        o += (size_t)snprintf(b + o, sizeof b - o, " %u:", g_mh.sn[k][j]); for (int x = 0; x < 24 && o < sizeof b; x++) o += (size_t)snprintf(b + o, sizeof b - o, "%02x", g_mh.smp[k][j][x]); }
+    VLOG("%s", b);
+}
+static void census(uint64_t f) {
+    char path[1100], sum[1600]; ctl_dir(); snprintf(path, sizeof path, "%s/ctl-census-%llu.tsv", g_ctl_dir, (unsigned long long)f);
+    uint64_t t0 = now_ns(); vka_tex_census(path, sum, sizeof sum);
+    VLOG("ctl: %s (%.0f ms)", sum, (now_ns() - t0) / 1e6);
+    struct mallinfo mi = mallinfo(); uint32_t nsb = 0; uint64_t scr = vka_scratch_bytes(&nsb), peak, placed = vka_mem_placed_bytes(&peak);
+    VLOG("ctl: census: host malloc %.0f MiB in use (%.0f MiB mapped by the allocator), scratch %.0f MiB (%u blocks), placed pools %.0f MiB",
+         mi.uordblks / 1048576.0, (double)(mi.hblkhd + mi.arena) / 1048576.0, scr / 1048576.0, nsb, placed / 1048576.0);
+    { char sg[1200]; vka_mem_segs(sg, sizeof sg); VLOG("ctl: census: %s", sg); }
+    { uint64_t pb, pc, pfl; vka_tex_pageout_stats(&pb, &pc, &pfl); VLOG("ctl: census: storage page-out requests: %.0f MiB accepted in %llu attempts (%llu refused); reclaimed bytes unmeasured", pb / 1048576.0, (unsigned long long)pc, (unsigned long long)pfl); }
+    nvn_pool_census_log();
+    malloc_census();
 }
 void vka_ctl_frame(uint64_t f) {   // mtl_set_frame: frame f begins
     snap(&g_rec[f % NREC], f);
@@ -153,6 +218,8 @@ void vka_ctl_frame(uint64_t f) {   // mtl_set_frame: frame f begins
         if (f - 9 + 1 >= g_cap_to) { VLOG("ctl: capture done"); g_cap_from = g_cap_to = 0; }
     }
     if (atomic_exchange_explicit(&g_stats, 0, memory_order_relaxed)) stats_line(f);
+    int cz = atomic_exchange_explicit(&g_census, 0, memory_order_relaxed);
+    if (cz) census(f);
 }
 
 // ---------- Screenshot ----------
@@ -162,7 +229,6 @@ static pthread_mutex_t g_smu = PTHREAD_MUTEX_INITIALIZER;
 static char g_shot_path[1024]; static _Atomic int g_shot_want;
 static VkBuffer g_sbuf; static VkDeviceMemory g_smem; static void *g_smap; static VkDeviceSize g_ssize;
 static struct { int on, w, h, fmt, flip; uint64_t frame; } g_rec_shot;
-static char g_ctl_dir[1024];
 static void ctl_dir(void) {
     if (g_ctl_dir[0]) return;
     const char *c = getenv("DM_CTL"); snprintf(g_ctl_dir, sizeof g_ctl_dir, "%s", c && *c ? c : getenv("HOME") ? getenv("HOME") : "/data/local/tmp/x");
@@ -193,8 +259,110 @@ static int shot_bpp(VkFormat f) {
     default: return 0;
     }
 }
-void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch) {   // present thread, before vkEndCommandBuffer
+// "burst <n>": the next n presented game frames, each copied in the present's own command buffer to its slot of one host-visible buffer (no wait between frames, so the
+// frames in flight overlap as in a normal run); after the last one's submission the present thread waits for it once and a thread writes ctl-burst-<frame>.png for each.
+// For frame-to-frame differences (flicker) that single screenshots, seconds apart, cannot show
+enum { BURST_MAX = 32 };
+static _Atomic int g_burst_want; static int g_burst_n, g_burst_i, g_burst_w, g_burst_h, g_burst_fmt, g_burst_flip, g_burst_done;
+static uint64_t g_burst_frame[BURST_MAX];
+// Latched output-PNG coordinates relative to the present rectangle. Source window
+// geometry stays separate from the smaller copy/PNG dimensions for the whole burst.
+static struct { int on, x, y, w, h, cx, cy, cw, ch; uint32_t iw, ih; } g_burst_crop;
+static int burst_crop_parse(const char *s, int cw, int ch, int rect[4]) {
+    if (!*s) { rect[0] = rect[1] = 0; rect[2] = cw; rect[3] = ch; return 1; }
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9') return 0;
+        unsigned v = 0;
+        do { unsigned d = (unsigned)(*s++ - '0'); if (v > ((unsigned)INT_MAX - d) / 10) return 0; v = v * 10 + d; } while (*s >= '0' && *s <= '9');
+        rect[i] = (int)v;
+        if (i < 3) { if (*s++ != ',') return 0; } else if (*s) return 0;
+    }
+    return cw > 0 && ch > 0 && rect[0] < cw && rect[1] < ch && rect[2] > 0 && rect[3] > 0 && rect[2] <= cw - rect[0] && rect[3] <= ch - rect[1];
+}
+static VkBuffer g_bbuf; static VkDeviceMemory g_bmem; static void *g_bmap; static VkDeviceSize g_bsize;
+static int burst_buf(VkDeviceSize n) {
+    if (g_bsize >= n) return 1;
+    if (g_bbuf) { vk.vkDestroyBuffer(V.dev, g_bbuf, NULL); vk.vkFreeMemory(V.dev, g_bmem, NULL); g_bbuf = VK_NULL_HANDLE; g_bmem = VK_NULL_HANDLE; g_bsize = 0; }
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vk.vkCreateBuffer(V.dev, &bi, NULL, &g_bbuf)) return 0;
+    VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, g_bbuf, &mr);
+    uint32_t t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+    if (t == UINT32_MAX) t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t};
+    if (t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &g_bmem) || vk.vkBindBufferMemory(V.dev, g_bbuf, g_bmem, 0) || vk.vkMapMemory(V.dev, g_bmem, 0, VK_WHOLE_SIZE, 0, &g_bmap)) {
+        if (g_bmem) vk.vkFreeMemory(V.dev, g_bmem, NULL);
+        vk.vkDestroyBuffer(V.dev, g_bbuf, NULL); g_bbuf = VK_NULL_HANDLE; g_bmem = VK_NULL_HANDLE; return 0;
+    }
+    g_bsize = n; return 1;
+}
+static int shot_bpp(VkFormat f);
+static void burst_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch, uint64_t frame) {
+    g_burst_done = 0;
+    if (!g_burst_n) {
+        int n = atomic_exchange_explicit(&g_burst_want, 0, memory_order_relaxed); if (n <= 0) return;
+        int bpp = shot_bpp(im->f.vk);
+        if (bpp != 4 || im->samples != 1 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { VLOG("ctl: burst: the window texture's format %d is not a 4-byte colour one", im->f.vk); return; }
+        char crop[128] = {0}; vka_env_str("DM_VK_BURST_CROP", crop, sizeof crop);
+        int on = crop[0] != 0, rect[4];
+        if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || (uint64_t)cx + (unsigned)cw > im->w || (uint64_t)cy + (unsigned)ch > im->h) {
+            if (on) { VRED("ctl: burst: invalid present rectangle for crop; no frames copied"); return; }
+            cx = cy = 0; cw = (int)im->w; ch = (int)im->h;
+        }
+        if (strlen(crop) == sizeof crop - 1 || !burst_crop_parse(crop, cw, ch, rect)) { VRED("ctl: burst: crop must be x,y,w,h within the output rectangle; no frames copied"); return; }
+        g_burst_crop = (typeof(g_burst_crop)){on, rect[0], rect[1], rect[2], rect[3], cx, cy, cw, ch, im->w, im->h};
+        int w = rect[2], h = rect[3];
+        if (!burst_buf((VkDeviceSize)n * w * h * 4)) { VLOG("ctl: burst: no host-visible buffer of %d frames of %d x %d", n, w, h); return; }
+        g_burst_n = n; g_burst_i = 0; g_burst_w = w; g_burst_h = h; g_burst_fmt = im->f.vk; g_burst_flip = vka_origin_ll();
+        VLOG("ctl: burst of %d frames begins at frame %llu (%dx%d)", n, (unsigned long long)frame, w, h);
+    }
+    if (g_burst_crop.on && (cx != g_burst_crop.cx || cy != g_burst_crop.cy || cw != g_burst_crop.cw || ch != g_burst_crop.ch ||
+        im->w != g_burst_crop.iw || im->h != g_burst_crop.ih || vka_origin_ll() != g_burst_flip || im->samples != 1 || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT)) {
+        VRED("ctl: burst: source geometry/origin changed after %d cropped frames: stopped", g_burst_i); g_burst_n = g_burst_i; g_burst_done = g_burst_i > 0; return;
+    }
+    if (im->f.vk != g_burst_fmt || (int)im->w < g_burst_w || (int)im->h < g_burst_h) { VLOG("ctl: burst: the window texture changed after %d frames: stopped", g_burst_i); g_burst_n = g_burst_i; g_burst_done = g_burst_i > 0; return; }
+    if (g_burst_crop.on) {
+        cx += g_burst_crop.x;
+        cy += g_burst_flip ? g_burst_crop.ch - g_burst_crop.y - g_burst_crop.h : g_burst_crop.y;
+        VLOG("ctl: burst crop: frame %llu output %d,%d,%d,%d window %d,%d,%d,%d source %d,%d origin-ll %d", (unsigned long long)frame,
+             g_burst_crop.x, g_burst_crop.y, g_burst_w, g_burst_h, g_burst_crop.cx, g_burst_crop.cy, g_burst_crop.cw, g_burst_crop.ch, cx, cy, g_burst_flip);
+    } else if (cx < 0 || cy < 0 || cw != g_burst_w || ch != g_burst_h || (uint32_t)(cx + cw) > im->w || (uint32_t)(cy + ch) > im->h) { cx = cy = 0; }
+    vka_barrier(cb);
+    VkBufferImageCopy r = {(VkDeviceSize)g_burst_i * g_burst_w * g_burst_h * 4, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {cx, cy, 0}, {(uint32_t)g_burst_w, (uint32_t)g_burst_h, 1}};
+    vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_bbuf, 1, &r);
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    g_burst_frame[g_burst_i++] = frame;
+    if (g_burst_i == g_burst_n) g_burst_done = 1;
+}
+typedef struct { uint8_t *rgb; int w, h; char path[1100]; uint64_t frame; } shot_job;
+static void *shot_main(void *arg);
+static void burst_done(VkFence fence) {   // present thread, after the submission holding the burst's last copy (the queue runs them in order)
+    if (!g_burst_done) return;
+    g_burst_done = 0; int n = g_burst_n; g_burst_n = 0;
+    if (vk.vkWaitForFences(V.dev, 1, &fence, VK_TRUE, 5000000000ull)) { VLOG("ctl: burst: the last copy did not finish in 5 s"); return; }
+    ctl_dir();
+    for (int i = 0; i < n; i++) {
+        int w = g_burst_w, h = g_burst_h; shot_job *j = calloc(1, sizeof *j); uint8_t *rgb = j ? malloc((size_t)w * h * 3) : NULL;
+        if (!rgb) { free(j); return; }
+        const uint8_t *base = (const uint8_t *)g_bmap + (size_t)i * w * h * 4;
+        for (int y = 0; y < h; y++) {
+            const uint8_t *s = base + (size_t)(g_burst_flip ? h - 1 - y : y) * w * 4; uint8_t *d = rgb + (size_t)y * w * 3;
+            for (int x = 0; x < w; x++, s += 4) {
+                if (g_burst_fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { uint32_t p; memcpy(&p, s, 4); d[3 * x] = (uint8_t)((p & 1023) >> 2); d[3 * x + 1] = (uint8_t)((p >> 10 & 1023) >> 2); d[3 * x + 2] = (uint8_t)((p >> 20 & 1023) >> 2); }
+                else if (g_burst_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_burst_fmt == VK_FORMAT_B8G8R8A8_SRGB) { d[3 * x] = s[2]; d[3 * x + 1] = s[1]; d[3 * x + 2] = s[0]; }
+                else { d[3 * x] = s[0]; d[3 * x + 1] = s[1]; d[3 * x + 2] = s[2]; }
+            }
+        }
+        j->rgb = rgb; j->w = w; j->h = h; j->frame = g_burst_frame[i];
+        snprintf(j->path, sizeof j->path, "%s/ctl-burst-%llu.png", g_ctl_dir, (unsigned long long)j->frame);
+        shot_main(j);   // this thread: the burst is a diagnostic, its frames already taken
+    }
+    VLOG("ctl: burst done: %d frames %llu-%llu → %s/ctl-burst-<frame>.png", n, (unsigned long long)g_burst_frame[0], (unsigned long long)g_burst_frame[n - 1], g_ctl_dir);
+}
+
+void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch, uint64_t frame) {   // present thread, before vkEndCommandBuffer
     g_rec_shot.on = 0;
+    if (im && im->inited && (g_burst_n || atomic_load_explicit(&g_burst_want, memory_order_relaxed))) burst_record(cb, im, cx, cy, cw, ch, frame);
     if (!atomic_load_explicit(&g_shot_want, memory_order_relaxed) || !im || !im->inited) return;
     atomic_store(&g_shot_want, 0);
     int bpp = shot_bpp(im->f.vk);
@@ -206,9 +374,8 @@ void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw
     vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, g_sbuf, 1, &r);
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    g_rec_shot.on = 1; g_rec_shot.w = cw; g_rec_shot.h = ch; g_rec_shot.fmt = im->f.vk; g_rec_shot.flip = vka_origin_ll(); g_rec_shot.frame = vka_frame();
+    g_rec_shot.on = 1; g_rec_shot.w = cw; g_rec_shot.h = ch; g_rec_shot.fmt = im->f.vk; g_rec_shot.flip = vka_origin_ll(); g_rec_shot.frame = frame;
 }
-typedef struct { uint8_t *rgb; int w, h; char path[1100]; uint64_t frame; } shot_job;
 static void put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
 static void chunk(FILE *f, const char *type, const uint8_t *d, uint32_t n) {
     uint8_t h[8]; put32(h, n); memcpy(h + 4, type, 4); fwrite(h, 1, 8, f); if (n) fwrite(d, 1, n, f);
@@ -237,6 +404,7 @@ static uint8_t half8(uint16_t h) {   // an RGBA16F channel, clamped to [0, 1] an
     return (uint8_t)(powf(v, 1 / 2.2f) * 255 + 0.5f);
 }
 void vka_ctl_shot_done(VkFence fence) {   // present thread, after the present's submission
+    burst_done(fence);
     if (!g_rec_shot.on) return;
     g_rec_shot.on = 0;
     if (vk.vkWaitForFences(V.dev, 1, &fence, VK_TRUE, 2000000000ull)) { VLOG("ctl: screenshot: the present's copy did not finish in 2 s"); return; }
@@ -276,6 +444,11 @@ int dm_gfx_ctl(const char *line) {   // the control thread (hle_hid.c ctl_main):
         dm_gfx_shot_at(1, p); VLOG("ctl: screenshot of the next frame queued%s%s", *p ? " → " : "", p); return 1;
     }
     if (!strcmp(line, "stats")) { atomic_store(&g_stats, 1); return 1; }
+    if (!strcmp(line, "census")) { atomic_store(&g_census, 1); VLOG("ctl: census queued"); return 1; }
+    if (!strncmp(line, "burst", 5) && (!line[5] || line[5] == ' ')) {
+        int n = line[5] ? atoi(line + 6) : 8; if (n <= 0) n = 8; if (n > BURST_MAX) n = BURST_MAX;
+        atomic_store(&g_burst_want, n); VLOG("ctl: burst of the next %d frames queued", n); return 1;
+    }
     return 0;
 }
 #endif

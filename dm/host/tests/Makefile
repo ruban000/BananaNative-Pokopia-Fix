@@ -241,12 +241,12 @@ $(B)/t_vorbis_divides: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(
 run: $(B)/t_movie_vpx
 run: $(B)/t_codec_video
 run: $(B)/t_movie_avc
-$(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+$(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_yuv.c ../hle_movie_avc.c ../hle_movie_avc.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_avc.c ../gen/vpx/libvpx.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
-$(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+$(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c ../hle_movie_yuv.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
-$(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+$(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_yuv.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -o $@ t_codec_video.c ../gen/vpx/libvpx.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 ../gen/vpx/libvpx.a: FORCE
@@ -270,17 +270,17 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
-MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
+MEM_DEPS = t_svc_memory.c t_svc_memory_release.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
 $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_unlimited: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=0 -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=0 -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_16k: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=address,undefined -DTEST_PAGE_16K -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=address,undefined -DTEST_PAGE_16K -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_tsan: $(MEM_DEPS) | $(B)
-	$(CLANG) $(MEM_FLAGS) -fsanitize=thread -o $@ t_svc_memory.c
+	$(CLANG) $(MEM_FLAGS) -fsanitize=thread -o $@ t_svc_memory.c t_svc_memory_release.c
 $(B)/t_svc_memory_dirty: $(MEM_DEPS) ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h | $(B)
-	$(CLANG) $(MEM_FLAGS) -DTEST_REAL_DIRTY -o $@ t_svc_memory.c ../../gfx/nvn/nvn_dirty.c
+	$(CLANG) $(MEM_FLAGS) -DTEST_REAL_DIRTY -o $@ t_svc_memory.c t_svc_memory_release.c ../../gfx/nvn/nvn_dirty.c
 .PHONY: memory memory-tsan memory-dirty memory-profile
 memory: $(B)/t_svc_memory $(B)/t_svc_memory_unlimited $(B)/t_svc_memory_16k
 	$(B)/t_svc_memory
@@ -367,5 +367,5 @@ $(B)/t_android_zshare: t_android_zshare.c $(VKA)/vka_zshare.h | $(B)
 $(B)/t_android_place: t_android_place.c $(VKA)/vka_place.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_place.c
 # The replay's SPIR-V rewrite of integer-fed vertex inputs (vka_spvpatch.c): the selftest's vertex shader, validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
-$(B)/t_android_spvpatch: t_android_spvpatch.c $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c
+$(B)/t_android_spvpatch: t_android_spvpatch.c $(VKA)/vka_spvpatch.c $(VKA)/vka_spvmesh.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c $(VKA)/vka_spvmesh.c

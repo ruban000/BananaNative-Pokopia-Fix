@@ -1,0 +1,29 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
+# A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
+
+# In bring-up on Android: packed, never run (the note)
+status	bring-up
+
+# Memory, not measured: nninitStartup sizes its heap from the 9 GB pool (6.2 GB of heap, 2.74 GB kept beside it; the note, Memory). No phone has run it; Mario Kart World,
+# the same engine with the same pool, is stopped by the low-memory killer on the 16 GB phone
+required	ram_gib	10	Memory: the game is made for 9 GB (a 6.2 GB heap and 2.7 GB beside it), which a phone with less than about 12 GB cannot give it
+degraded	ram_gib	14	Memory: not tested on any phone yet; with less than 16 GB, Android may stop the game when memory runs short
+
+# The shader library's needs (vk_android_build.py of 2026-11-05, the note's Android shader library): every vertex module takes draw parameters, 307 modules write storage
+# images without a format and 56 read them, 2,207 read memory through buffer device addresses with 64-bit integers (gmem_map: those shaders do not load without them)
+required	feature.shaderDrawParameters	1	Shader draw parameters: every vertex shader of the game reads them
+required	feature.shaderStorageImageWriteWithoutFormat	1	Storage image writes without a format: 307 of the game's shaders use them
+required	feature.shaderStorageImageReadWithoutFormat	1	Storage image reads without a format: 56 of the game's shaders use them
+required	feature.bufferDeviceAddress	1	Buffer device addresses: 2,207 of the game's shaders read memory through them
+required	feature.shaderInt64	1	64-bit integers in shaders: 2,207 of the game's shaders use them
+
+# Textures are sampled in their own compressed formats (vka_tex.c: no CPU decoding; a format the GPU lacks leaves that texture out). This game's texture formats are not
+# surveyed (open): BC and ASTC are the NVN2 engine's, as Donkey Kong Bananza's and Mario Kart World's
+required	feature.textureCompressionBC	1	BC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
+required	feature.textureCompressionASTC_LDR	1	ASTC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
+
+# The largest compute shader's shared memory (shader_facts.tsv): 18,432 bytes (2 shaders), above Vulkan's minimum of 16 KiB
+required	limit.maxComputeSharedMemorySize	18432	Compute shared memory: the game's largest compute shaders take 18,432 bytes
+
+# Mesh and task programs (509 modules with SPV_EXT_mesh_shader): without VK_EXT_mesh_shader the replay runs them as compute (DM_VK_MESH_CS, vka_draw.c), so no row

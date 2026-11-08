@@ -173,6 +173,14 @@ static int init_once(void) {
     V.placed_align = pmp.minPlacedMemoryMapAlignment ? pmp.minPlacedMemoryMapAlignment : 4096; V.max_alloc = pm3.maxMemoryAllocationSize;
     V.max_push = V.push_desc ? ppd.maxPushDescriptors : 0;
     if (V.mesh && !vk.vkCmdDrawMeshTasksEXT) V.mesh = V.task = 0;
+    // Indirect-count multi-draws with the GPU's count (vka_draw.c mdi_plan): drawIndirectCount, and multiDrawIndirect for a maximum over 1 draw
+    V.draw_count = f12.drawIndirectCount && f2.features.multiDrawIndirect && vk.vkCmdDrawIndirectCount && vk.vkCmdDrawIndexedIndirectCount;
+    // GPU-written indirect records carry the draw's firstInstance (culling's prefix allocation): without drawIndirectFirstInstance a non-zero one is invalid usage, and the
+    // vertex shaders' BuiltIn BaseInstance (c0 + 0x644, vk_android_spv.py vs_base_instance) and per-instance attributes would not see it
+    VLOG("draw path: drawIndirectFirstInstance %d, multiDrawIndirect %d, drawIndirectCount %d, shaderDrawParameters %d, maxDrawIndirectCount %u", f2.features.drawIndirectFirstInstance,
+         f2.features.multiDrawIndirect, f12.drawIndirectCount, f11.shaderDrawParameters, V.props.limits.maxDrawIndirectCount);
+    if (!f2.features.drawIndirectFirstInstance) VRED("the device lacks drawIndirectFirstInstance: indirect draws whose records the GPU wrote with a non-zero firstInstance are invalid usage");
+    if (!f11.shaderDrawParameters) VRED("the device lacks shaderDrawParameters: vertex shaders reading BaseInstance / BaseVertex are invalid usage");
     if (V.mesh) { V.mesh_inv = pmesh.maxMeshWorkGroupInvocations; V.task_inv = pmesh.maxTaskWorkGroupInvocations; V.mesh_out_v = pmesh.maxMeshOutputVertices;
                   V.mesh_out_p = pmesh.maxMeshOutputPrimitives; V.task_payload = pmesh.maxTaskPayloadSize;
                   V.task_groups = pmesh.maxTaskWorkGroupCount[0]; V.mesh_groups = pmesh.maxMeshWorkGroupCount[0]; }

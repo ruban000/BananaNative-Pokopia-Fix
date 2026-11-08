@@ -326,7 +326,9 @@ class RequireAll(unittest.TestCase):
 
     def test_mkw_manifest(self):
         """Mario Kart World's manifest: its one shader that builds nowhere is "-", so a phone build of that version is complete without it"""
-        m = delta.parse_manifest((REPO / 'dm/games/0400C3F00006E000/vk_delta.tsv').read_text())
+        f = REPO / 'dm/games/0400C3F00006E000/vk_delta.tsv'
+        if not f.is_file(): self.skipTest('no manifest: the profile registers another build than the one the last manifest was made for (its game note); a full build publishes it again')
+        m = delta.parse_manifest(f.read_text())
         self.assertEqual(sorted(k for k, h in m['hashes'].items() if h == '-'), ['078997bf631992c5'])
 
 

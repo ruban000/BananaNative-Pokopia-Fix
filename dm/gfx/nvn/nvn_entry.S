@@ -1,12 +1,13 @@
     .arch_extension lse
 // Common entry for unimplemented NVN functions: when the thunk comes in, x16 = this function's slot address (nvn_slot[i]).
-// Calls nvn_unimpl_c(slot, x0, x1, x2) to report a failure and log the name, returns 0.
+// Calls nvn_unimpl_c(slot, x0, x1, x2, x3) to report a failure and log the name, returns 0.
     .text
     .globl _nvn_unimpl_entry
     .p2align 2
 _nvn_unimpl_entry:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
+    mov x4, x3
     mov x3, x2
     mov x2, x1
     mov x1, x0
