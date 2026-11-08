@@ -107,10 +107,36 @@ public final class NupJvmTest {
 
     static byte[] bytes(File f) throws IOException { return Files.readAllBytes(f.toPath()); }
 
+    /** Builds a meta block from type and data pairs */
+    static byte[] tlvs(Object... tp) throws IOException {
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < tp.length; i += 2) {
+            byte[] p = tp[i + 1] instanceof String ? ((String) tp[i + 1]).getBytes(StandardCharsets.UTF_8) : (byte[]) tp[i + 1];
+            int t = (Integer) tp[i];
+            o.write(new byte[] {(byte) t, (byte) (t >> 8), 0, 0, (byte) p.length, (byte) (p.length >> 8), (byte) (p.length >> 16), (byte) (p.length >>> 24)});
+            o.write(p);
+        }
+        return o.toByteArray();
+    }
+
+    /** Meta blocks with the spec's numbers and with the packer's shifted ones, an "icon" that isn't an image, and a record cut off at the end */
+    static void meta() throws IOException {
+        byte[] jpg = {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 1, 2, 3}, npdm = "META".getBytes(StandardCharsets.UTF_8);
+        Nup.Meta m = Nup.Meta.parse(tlvs(1, npdm, 3, jpg, 4, "1.8.0", 5, "Mario Kart World", 6, "Nintendo", 0x8001, "private"));
+        check(m.icon != null && m.icon.length == jpg.length && "1.8.0".equals(m.version) && "Mario Kart World".equals(m.title) && "Nintendo".equals(m.publisher), "meta: the spec's types");
+        m = Nup.Meta.parse(tlvs(0, npdm, 2, jpg, 3, "3.0.0", 4, "Donkey Kong Bananza", 5, "Nintendo", 6, new byte[32]));
+        check(m.icon != null && "3.0.0".equals(m.version) && "Donkey Kong Bananza".equals(m.title) && "Nintendo".equals(m.publisher), "meta: the packer's types, one lower (a type 0 record)");
+        m = Nup.Meta.parse(tlvs(1, npdm, 3, "not an image", 5, "Zelda"));
+        check(m.icon == null && "Zelda".equals(m.title) && m.version == null, "meta: an icon that is no JPEG or PNG is not taken");
+        m = Nup.Meta.parse(java.util.Arrays.copyOf(tlvs(5, "Cut"), 10));
+        check(m.title == null, "meta: a record past the block's end is not read");
+    }
+
     public static void main(String[] args) throws Exception {
         if (args[0].equals("real")) { real(new File(args[1]), new File(args[2])); System.out.println("ok " + n); return; }
         File repo = new File(args[0]), t = new File(args[1]);
         names();
+        meta();
         Zstd.contentSize(new byte[] {(byte) 0x28, (byte) 0xB5, 0x2F, (byte) 0xFD, 0x20, 0x05, 0x01, 0, 0});   // a header alone parses
         File d = new File(t, "Game");
         dump(d);
@@ -384,9 +410,28 @@ public final class NupJvmTest {
         check(p.romfsPath(g).equals(new File(g, "updates/458752/romfs").getPath()) && p.romfsPath(g).equals(p.romfs(g).getPath()), "folder DM_ROMFS " + p.romfsPath(g));
         Map<String, String> l = p.aocLinks(g);
         check(l.size() == 1 && l.get("1").equals(new File(g, "dlc/" + AOC + "/0/romfs").getPath()), "folder aoc links: " + l);
+        aocLinkDir(t, l);
         // a pack made from a .nup, used with the folder: the folder's own RomFS (Pack.romfs falls back), no aoc link
         p = Pack.read(packDir(t, "pack-fold2", "game.nup:update/458752/romfs", "1\tgame.nup:addon/" + AOC + "/romfs"));
         check(p.romfsPath(g).equals(new File(g, "updates/458752/romfs").getPath()) && p.aocLinks(g).isEmpty(), "a .nup pack with a folder: " + p.romfsPath(g));
+    }
+
+    /** Pack.makeAocLinks: an earlier run's entries go, each link is made (the target mapped), a link that cannot be made is a line, never dropped */
+    static void aocLinkDir(File t, Map<String, String> l) throws IOException {
+        File dir = new File(t, "aoc-links");
+        Pack.removeDir(dir);
+        dir.mkdirs();
+        write(new File(dir, "7"), new byte[1]);   // left from an earlier run
+        Pack.Linker real = (target, path) -> Files.createSymbolicLink(new File(path).toPath(), new File(target).toPath());
+        List<String> bad = Pack.makeAocLinks(dir, l, x -> x, real);
+        File one = new File(dir, "1");
+        check(bad.isEmpty() && !new File(dir, "7").exists() && Files.isSymbolicLink(one.toPath()) && one.isDirectory(), "aoc link 1 → the DLC folder: " + bad);
+        bad = Pack.makeAocLinks(dir, Map.of("1.nup", "x.nup"), x -> "fd:9/" + x, real);
+        check(bad.isEmpty() && Files.readSymbolicLink(new File(dir, "1.nup").toPath()).toString().equals("fd:9/x.nup") && !one.exists(), "a mapped target (fd:<n>/<name>) and the old link gone");
+        bad = Pack.makeAocLinks(dir, Map.of("1", "/x", "2", "/y"), x -> x, (target, path) -> { throw new IOException("EPERM (symlink failed)"); });
+        check(bad.size() == 2 && bad.get(0).contains("EPERM") && bad.get(0).contains(" -> /"), "each refused link is a line: " + bad);
+        Pack.removeDir(dir);
+        check(!dir.exists(), "removeDir");
     }
 
     // ---- A real .nup ----

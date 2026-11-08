@@ -792,6 +792,29 @@ static void read_image(int fd, void *dst, size_t size, off_t off, const char *pa
     }
 }
 
+// Pointer authentication, host side. Switch 2 modules return through RETAA/RETAB
+// in every function that has a PAC prologue. On a CPU without FEAT_PAuth
+// (Armv8.2: Cortex-A78/X1 and older, so Snapdragon 888) the HINT forms
+// (PACIBSP/AUTIBSP) run as NOP, so the return address is never signed, but
+// RETAA/RETAB are UNDEFINED and trap. Trapping them would cost a signal round
+// trip per call, so rewrite them here, once, while the text is still writable:
+// RETAB/RETAA become RET, which is exactly what the failed (NOP) signing leaves
+// valid. The cold PAC instructions stay in crash.c's SIGILL path -- the register
+// forms as NOPs, PACGA computed, since it produces a value and has no
+// single-instruction stand-in.
+int dm_host_has_pac(void);   // crash.c
+static void pac_patch_text(module_t *m) {
+    if (dm_host_has_pac()) return;   // the CPU signs return addresses for real: RETAB must stay RETAB
+    uint32_t *w = (uint32_t *)m->base;
+    const size_t n = (size_t)(m->text_end / 4);
+    size_t cnt = 0;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t v = w[i];
+        if (v == 0xD65F0FFFu || v == 0xD65F0BFFu) { w[i] = 0xD65F03C0u; cnt++; }   // RETAB / RETAA -> RET
+    }
+    if (cnt) LOG("%s: %zu RETAB/RETAA returns rewritten to RET (host CPU has no PAC)", m->name, cnt);
+}
+
 // Seal the code area immediately after reading into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
@@ -825,7 +848,7 @@ static void map_image(module_t *m, const char *dir) {
         m->base = a + pre;
         read_image(fd, m->base, fl, 0, path); read_image(fd, a, sz - bl - fl, (off_t)fl, path);
         if (bl) read_image(fd, m->base + m->back_off, bl, (off_t)(sz - bl), path);
-        close(fd); install_key_page(m); window_apply(m); fiber_pac_apply(m);
+        close(fd); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (m->patch_len && mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
@@ -837,7 +860,7 @@ static void map_image(module_t *m, const char *dir) {
         die("%s: patch area outside the image", path);
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    read_image(fd, m->base, sz, 0, path); close(fd); install_key_page(m); window_apply(m); fiber_pac_apply(m);
+    read_image(fd, m->base, sz, 0, path); close(fd); install_key_page(m); window_apply(m); fiber_pac_apply(m); pac_patch_text(m);
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
 }

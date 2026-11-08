@@ -55,6 +55,7 @@ static uint64_t plat_slot_key_entry(unsigned i) { return i * 8; }
     code += r'''
 static void install_fps_state(module_t *m) { (void)m; assert(!"fixture has no frame-step page"); }
 static void fiber_pac_apply(module_t *m) { (void)m; }   // (the SDK's fiber key switch: not under test here)
+static void pac_patch_text(module_t *m) { (void)m; }   // (the RETAB/RETAA rewrite for CPUs without PAuth: not under test here)
 static void window_apply(module_t *m) {
     // Installing the key page must precede the window patch; code must still be writable.
     assert(((uint64_t *)(m->base + m->key_page_off))[3] == 24);

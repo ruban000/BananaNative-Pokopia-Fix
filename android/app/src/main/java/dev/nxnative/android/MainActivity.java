@@ -48,7 +48,7 @@ public final class MainActivity extends Activity {
     private LinearLayout gameBox;   // the game cards (refresh)
     private View accessCard;
     private BananaBackgroundView bananas;   // the drifting bananas behind the screen
-    private Ui.Setting overlayRow, resRow, capRow, lsfgRow, gpuRow, updateRow;
+    private Ui.Setting overlayRow, resRow, capRow, upsRow, sharpRow, drsRow, lsfgRow, gpuRow, updateRow;
     private boolean resumed, settingsPage;
     private boolean merged;   // the list's duplicates were merged (Game.collapse) since this activity started
     private File pendingGame;   // a game folder (or .nup) waiting for its pack folder
@@ -177,6 +177,14 @@ public final class MainActivity extends Activity {
         padMap.view.setOnClickListener(v -> PadMapUi.forDefault(this, () -> padMap.value(PadMapUi.label(this, null))));
         padMap.value(PadMapUi.label(this, null));
         play.addView(padMap.view);
+        upsRow = new Ui.Setting(this, "🔍", "Upscaler", v -> pick("Upscaler", GameUpscaler.MODES, GameUpscaler.mode(this), w -> GameUpscaler.modeDefault(this, w))).chevron(this);
+        play.addView(upsRow.view);
+        sharpRow = new Ui.Setting(this, "✨", "FSR sharpness", v -> pick("FSR sharpness", GameUpscaler.SHARP_NAMES, GameUpscaler.sharpIndex(GameUpscaler.sharp(this)),
+                w -> GameUpscaler.sharpDefault(this, GameUpscaler.SHARPS[w]))).chevron(this);
+        play.addView(sharpRow.view);
+        drsRow = new Ui.Setting(this, "📐", "Dynamic resolution", v -> DrsSlider.dialog(this, "", Prefs.drs(this), null, true, w -> Prefs.drsDefault(this, w),
+                this::refreshSettings)).chevron(this);
+        play.addView(drsRow.view);
         lsfgRow = new Ui.Setting(this, "✨", "Frame generation", v -> frameGen()).chevron(this);
         play.addView(lsfgRow.view);
         TextView hint = Ui.small(this, "A game's own settings (⋯ on its card) override these.");
@@ -226,6 +234,10 @@ public final class MainActivity extends Activity {
         overlayRow.value(ov ? "On · " + n + " of " + Overlay.ITEMS.length + " items" : "Off");
         resRow.value(resLabel());
         capRow.value(capLabel(Prefs.fpsCap(this)));
+        upsRow.value(GameUpscaler.MODES[GameUpscaler.mode(this)]);
+        sharpRow.value(GameUpscaler.sharpName(GameUpscaler.sharp(this)));
+        sharpRow.view.setVisibility(GameUpscaler.mode(this) == GameUpscaler.MODE_FSR ? View.VISIBLE : View.GONE);
+        drsRow.value(Prefs.DRS_NAMES[Prefs.drs(this)]);
         lsfgRow.value(!BuildConfig.NX_LSFG ? "Not in this build" : Lsfg.on(this) ? "On · " + Lsfg.multiplier(this) + "x" + (Lsfg.find(this) == null ? " · Lossless.dll missing" : "") : "Off");
         GpuDriver.Info d = GpuDriver.selected(this);
         gpuRow.value(d == null ? "System" : d.label());
@@ -329,6 +341,7 @@ public final class MainActivity extends Activity {
                 if (!key.equals(updateDone)) { updateDone = key; done = true; }
                 continue;
             }
+            if (j.currentStep().equals("rewrite")) { Ui.status(e.getKey(), s.equals("running") ? "Ready · updating game code" : "Ready · game code update paused", R.color.bn_leaf); continue; }   // (its progress once the rewrite step reports one)
             Ui.status(e.getKey(), ShaderLibs.updatingText(java.util.Locale.getDefault(), j.shadersDone(), j.shadersTotal(), Job.etaText(j.shadersEta()), !s.equals("running")), R.color.bn_leaf);
         }
         if (done) { refresh(); return; }   // the new library is in: the cards' states are checked again ("Ready")
@@ -404,7 +417,8 @@ public final class MainActivity extends Activity {
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(16), dp(16), dp(16));
         LinearLayout top = Ui.row(this);
-        top.addView(Ui.tile(this, g.name, 52));
+        TextView tile = Ui.tile(this, g.name, 52);
+        top.addView(tile);
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.setPadding(dp(14), 0, dp(4), 0);
@@ -412,6 +426,13 @@ public final class MainActivity extends Activity {
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(name);
+        TextView about = Ui.small(this, "");   // the version and publisher from the .nup; its icon goes in the tile
+        about.setVisibility(View.GONE);
+        info.addView(about);
+        GameMeta.load(new File(g.gameDir), m -> {
+            if (m.icon != null) Ui.tileIcon(tile, m.icon);
+            if (m.line() != null) { about.setText(m.line()); about.setVisibility(View.VISIBLE); }
+        });
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
         TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();
@@ -539,6 +560,7 @@ public final class MainActivity extends Activity {
             Boolean ok = null;
             if (problem == null) try { ok = PackCheck.code(this, Pack.read(new File(g.packDir)), new File(g.gameDir)); } catch (IOException e) { ok = null; }
             Boolean code = ok;
+            boolean own = Boolean.FALSE.equals(ok) && Ondevice.ownPack(new File(g.gameDir), new File(g.packDir), g.titleId);   // the app's own pack, its code from older tools
             runOnUiThread(() -> {
                 if (info.getParent() == null) return;
                 // An APK update's new shaders: made in the background with no question when the pack's older library is one the delta manifest knows (Ondevice.autoUpdate)
@@ -579,6 +601,15 @@ public final class MainActivity extends Activity {
                     play.setOnClickListener(v -> { if (!needAccess(new File(g.gameDir))) Ondevice.prepare(this, new File(g.gameDir), false); });
                 }
                 if (!Boolean.FALSE.equals(code)) return;
+                // The app's own pack whose code older tools made (an APK update changed the rewriter or the profile's patches): updated in the background, no question;
+                // the card says so like a shader update. Play stays on: the new code is swapped in only when the rewrite is complete
+                if (own) {
+                    if (Ondevice.autoCodeUpdate(this, new File(g.gameDir), new File(g.packDir))) {
+                        Ui.status(st, "Ready · updating game code", R.color.bn_leaf);
+                        updating.put(st, g); updateTick();
+                    } else Ui.status(st, "Ready · game code update waits", R.color.bn_leaf);   // a game or another job runs (or it was tried this run): the next check starts it
+                    return;   // the app's own pack: no "other tools" chip
+                }
                 // A pack whose code other tools made: a small chip; its tap says what that means
                 TextView n = Ui.warnChip(this, "Pack from other tools", "Pack from other tools",
                         "This game's pack was made by other tools than this app's. It usually still runs. If the game misbehaves, ⋯ › Prepare again remakes it from your dump.");
@@ -1226,4 +1257,8 @@ public final class MainActivity extends Activity {
     void error(String msg) { new AlertDialog.Builder(this).setMessage(msg).setPositiveButton("OK", null).show(); }
 
     private static String touchLabel(int m) { return m == TouchControls.MODE_AUTO ? "Auto: hidden while a controller is connected" : TouchControls.MODE_NAMES[m]; }
+    /** A default's choice in Settings (no "Default" entry: this is the default) */
+    private void pick(String title, String[] items, int cur, java.util.function.IntConsumer set) {
+        new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(items, cur, (d, w) -> { set.accept(w); refreshSettings(); d.dismiss(); }).setNegativeButton("Cancel", null).show();
+    }
 }

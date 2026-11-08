@@ -337,15 +337,26 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
      * FSR, the frame rate cap, the GPU driver, GPU timing, the button labels, the two Vulkan options and the game language. start() and the readiness check (readinessHold) both take it.
      * Returns the GPU driver's line for the log
      */
+    /** The display's refresh rate in whole Hz (60, 90, 120...), 60 when it can't be read */
+    private int displayHz() {
+        android.view.Display d = getDisplay();
+        int hz = d == null ? 60 : Math.round(d.getRefreshRate());
+        return hz >= 30 && hz <= 240 ? hz : 60;
+    }
+
     private String settingsEnv(String id, List<String> env) {
         // Game resolution: the game's own setting, else the main screen's: the window size the host gives the game (window_fn), or the graphics scale and operation
         // mode that give that size (graphics_scale rows), as its profile says (Profile.resolutionEnv); nothing for a game with neither
         Profile prof = Profile.of(id);
         if (prof != null) env.addAll(prof.resolutionEnv(Prefs.gameWindow(this, id)));
         Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
-        Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
+        GameUpscaler.env(this, id, env);   // the Upscaler (Game settings, the in-game panel): the game's own upscaler and the present's scaling
+        if (Prefs.drsGame(id)) { int[] drs = Prefs.DRS[Prefs.drs(this, id)]; env.add("DM_DRS=" + drs[0] + "," + drs[1]); }   // dynamic resolution range (Prefs.DRS)
         int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
-        if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
+        if (Prefs.paced(id)) {   // speed follows the measured rate: presents on the host's own tick at the display's refresh rate, no interval locking, and a frame limit (Prefs.PACE_CAPS)
+            int pace = Prefs.paceCap(this, id);
+            env.add("DM_PRESENT_INTERVAL=display"); env.add("DM_PRESENT_HZ=" + displayHz()); env.add("DM_FPS_TARGET=0"); env.add("DM_FPS_LIMIT=" + (pace > 0 ? pace : 60));
+        } else if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
         String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
         String ts = Prefs.gpuTs(this, id);   // Game settings › GPU timing; unset: the profile's gpu_timestamps (a DM_NVN_GPU_TS line of env.txt or the game's own lines comes later and wins)
         if (ts != null) env.add("DM_NVN_GPU_TS=" + ts);
@@ -354,6 +365,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (xb == 2) env.add("DM_PAD_LABELLED=2");
         if (Prefs.instancedDraws(this, id)) env.add("DM_VK_INSTANCE=1");   // Game settings › Instanced draws
         if (Prefs.classicPasses(this, id)) env.add("DM_VK_CLASSIC_RP=1");   // Game settings › Classic render passes
+        env.add("DM_VK_PSO_ASYNC=" + (Prefs.psoAsync(this, id) ? 2 : 0));   // Game settings › Background pipelines (an env.txt line of the player's comes later and wins)
         String padMap = Prefs.padMap(this, id);   // Button mapping (Game settings, Settings): wins over the label swap's A/B for the buttons it names
         if (!padMap.isEmpty()) env.add("DM_PAD_MAP=" + padMap);
         if (Prefs.stretch(this, id)) env.add("DM_VK_STRETCH=1");   // Game settings › Display › Stretch to screen (or the in-game panel's Picture rows)
@@ -522,7 +534,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             user.addAll(guard(envLines(Prefs.gameEnv(this, id)), "the game's settings", false));   // the game's own lines (its Game settings): after env.txt, so they win for this game
             user.addAll(guard(userEnv(new File(files, "env-" + id + ".txt")), "env-" + id + ".txt", testApp()));   // and env-<title ID>.txt (adb), the same for one game
             File save = saveDir(files, game, id), temp = mkdirs(new File(files, "temp/" + id)), root = mkdirs(new File(files, "root"));
-            File aoc = aocLinks(mkdirs(new File(files, "aoc/" + id)), game, pack, nupFd);
+            // The DLC links live in internal app storage: the external files folder is shared storage (FUSE), which refuses symbolic links (errno not yet confirmed on a phone; a refused link is now a [RED] line), so
+            // every link failed there and no game saw its DLC (docs/reference/packing.md "DLC links in shared storage"). Their targets stay where they are
+            File aoc = aocLinks(mkdirs(new File(getFilesDir(), "aoc/" + id)), game, pack, nupFd);
+            Pack.removeDir(new File(files, "aoc/" + id));   // the folder earlier builds used (empty, or links on a device that took them)
             log = new File(LogProvider.dir(this), id + "-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date()) + ".log");
             pruneLogs(id);
             ExitWatch.log(log);
@@ -569,6 +584,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Native.note("device " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0]
                     + "; game " + game + "; pack " + packDir);
             if (envProblem != null) Native.note("[RED] env.txt: " + envProblem);
+            if (aocLine != null) Native.note(aocLine);
+            for (String n : aocProblems) Native.note(n);
             if (readinessEnv > 0) Native.note("[nxlaunch] readiness check: ran with the game's " + readinessEnv + " environment lines (all but the paths), set before the GPU driver's first device");
             for (String n : unknownNotes) Native.note(n);
             if (!unknownNotes.isEmpty()) android.widget.Toast.makeText(this, unknownNotes.get(0).replace("[RED] ", ""), android.widget.Toast.LENGTH_LONG).show();
@@ -759,17 +776,19 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
     /**
      * DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder, or DM_AOC_DIR/<index>.nup → the .nup (hle_fs.c aoc_dir; Pack.aocLinks), as symbolic links in
-     * app storage. A .nup used where it is (nupFd ≥ 0): the link's target is fd:<n>/<name>, which the host reads with readlink (nothing is at that path)
+     * app storage. A .nup used where it is (nupFd ≥ 0): the link's target is fd:<n>/<name>, which the host reads with readlink (nothing is at that path).
+     * A link that cannot be made is a [RED] line in the run's log (aocProblems): the game runs without that DLC
      */
-    private static File aocLinks(File dir, File game, Pack pack, int nupFd) {
-        File[] old = dir.listFiles();
-        if (old != null) for (File f : old) f.delete();
-        for (Map.Entry<String, String> e : pack.aocLinks(game).entrySet()) {
-            String target = nupFd >= 0 ? PickedPath.forHost(e.getValue(), game, nupFd) : e.getValue();
-            try { Os.symlink(target, new File(dir, e.getKey()).getPath()); } catch (ErrnoException ignored) { /* the game then runs without that DLC */ }
-        }
+    private File aocLinks(File dir, File game, Pack pack, int nupFd) {
+        Map<String, String> links = pack.aocLinks(game);
+        for (String p : Pack.makeAocLinks(dir, links, t -> nupFd >= 0 ? PickedPath.forHost(t, game, nupFd) : t, (target, path) -> {
+            try { Os.symlink(target, path); } catch (ErrnoException e) { throw new IOException(android.system.OsConstants.errnoName(e.errno) + " (" + e.getMessage() + ")"); }
+        })) aocProblems.add("[RED] [nxlaunch] DLC: " + p);
+        aocLine = "[nxlaunch] DLC: " + links.size() + " link" + (links.size() == 1 ? "" : "s") + " in DM_AOC_DIR " + dir + (links.isEmpty() ? "" : " " + links.keySet());
         return dir;
     }
+    private final List<String> aocProblems = new ArrayList<>();
+    private String aocLine;
 
     // A file `adb shell` writes here belongs to the shell user with mode 0660 and group ext_data_rw, which the app is not in: it exists but cannot be read
     // (TESTING.md, Diagnostic switches: chmod 666 after writing it). The run goes on without the switches and the log says why
