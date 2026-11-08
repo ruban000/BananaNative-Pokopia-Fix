@@ -30,7 +30,7 @@ The same from the command line:
 
 ```sh
 scripts/bananative.command pack /path/to/Switch2/DonkeyKongBananza     # Mac
-scripts\bananative.bat pack D:\Switch2\DonkeyKongBananza               # Windows
+scripts\bananative.bat pack --out D:\Switch2\DonkeyKongBananza               # Windows
 ```
 
 ## 4. Get the pack onto the phone
