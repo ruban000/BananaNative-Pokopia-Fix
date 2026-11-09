@@ -3,9 +3,11 @@ package dev.nxnative.android;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.hardware.display.DisplayManager;
 import android.hardware.input.InputManager;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
@@ -18,6 +20,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -74,8 +77,20 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private AudioDeviceCallback route;
     private boolean routeReady;
 
+    /** Phone: sensor landscape as before. DeX / an external display: leave the window free, so the desktop can size it and the
+     *  monitor's own orientation decides. The manifest no longer forces landscape; this applies the phone's lock at runtime. */
+    private void applyOrientation() {
+        boolean external = false;
+        DisplayManager dm = getSystemService(DisplayManager.class);
+        if (dm != null) for (Display d : dm.getDisplays())
+            if (d.getDisplayId() != Display.DEFAULT_DISPLAY && d.getState() == Display.STATE_ON) { external = true; break; }
+        int want = external ? ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+        if (getRequestedOrientation() != want) setRequestedOrientation(want);
+    }
+
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        applyOrientation();
         setShowWhenLocked(true);
         setTurnScreenOn(true);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -940,6 +955,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     @Override public void onConfigurationChanged(Configuration c) {
         super.onConfigurationChanged(c);
+        applyOrientation();
         if (started) Native.motionRotation(getDisplay().getRotation());
     }
 

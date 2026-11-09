@@ -21,6 +21,7 @@
         android:extractNativeLibs="false"
         android:allowNativeHeapPointerTagging="false"
         android:largeHeap="true"
+        android:resizeableActivity="true"
         android:hasFragileUserData="true">
         <activity
             android:name=".MainActivity"
@@ -68,7 +69,8 @@
             android:exported="false"
             android:launchMode="singleTask"
             android:process=":game"
-            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true"
+            android:screenOrientation="unspecified"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
         <!-- The graphics selftest (nxhost_vk_selftest), in a process of its own so it never meets a running game's Vulkan device -->
