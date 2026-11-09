@@ -128,6 +128,7 @@ DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its t
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
+DM_NO_20FPS_CLAMP	switch	`1` clamps dynamic frame intervals above 30 fps to 2 vsyncs max (avoids permanent 20 fps lock when thermal throttling triggers interval 3)
 DM_NUP_CACHE_MB	diagnostic	`=<MB>` sizes the cache of closed, decompressed `.nup` files (nup_image.c; default 128, `0` keeps nothing after close)
 DM_NUP_DISK_MB	diagnostic	`=<MB>` (default 64; `0` none) a compressed `.nup` file of at least this size is decompressed into an unlinked temporary file and mapped, instead of whole into memory (nup_image.h)
 DM_NUP_FD	path	`=<fd>:<path>` reads the `.nup` at `<path>` through descriptor `<fd>` instead (`dm/tools/nup.py`; duplicated for each reader, read with pread only), whether or not anything is at that path. The phone's packer sets it for a `.nup` picked with the system file picker, which the app may not open by any path (`PickedNup`; android/NUP.md)
