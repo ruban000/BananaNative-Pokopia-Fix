@@ -2423,9 +2423,14 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
       const dmsh_vk_entry *ce = sh[5]->e;
       // (seen: 14a8aaf3e0a9edbd 2x, 9e5597e2fcfc3c2f, a9fed0568668bf97, 7629d857a0a93833 at 67 %, 3b716012fcd10575 at 60 %: 9.6-10.9 KB of shared memory;
       //  Splatoon Raiders' agl_ndsr.pck: c1b8edc09e3313b1 at 4,608 B and 30d8ee33de9dee85 at 24,576 B, named by DM_GAME_UPSCALER_KEYS and classified by vka_up_color)
-      int ndsr = DM_GAME_UPSCALER_N > 0 ? (up_is_key(sh[5]->key) && sh[5]->up_color != 3)
-                 : (sh[5]->key == 0x14a8aaf3e0a9edbdull || sh[5]->key == 0x9e5597e2fcfc3c2full || sh[5]->key == 0x7629d857a0a93833ull || sh[5]->key == 0x3b716012fcd10575ull
-                    || (ce->local[0] == 128 && ce->local[1] == 1 && ce->local[2] == 1 && ce->shared >= 8000 && ce->shared <= 12000 && (ce->flags & 0x84) == 0x84));
+      // The rule that was here before (the keys and the shape of Donkey Kong Bananza's network, which other games' shader maps have too: Ocarina of Time, Mario Kart World) stays as it
+      // was; the profile's list with the classifier is added to it: a shader either rule names is replaced, and the classifier alone says whether it decodes sRGB (Splatoon Raiders' two upscalers match the old shape rule as well)
+      int ndsr_old = sh[5]->key == 0x14a8aaf3e0a9edbdull || sh[5]->key == 0x9e5597e2fcfc3c2full || sh[5]->key == 0x7629d857a0a93833ull || sh[5]->key == 0x3b716012fcd10575ull
+                     || (ce->local[0] == 128 && ce->local[1] == 1 && ce->local[2] == 1 && ce->shared >= 8000 && ce->shared <= 12000 && (ce->flags & 0x84) == 0x84);
+      int ndsr_new = DM_GAME_UPSCALER_N > 0 && up_is_key(sh[5]->key) && sh[5]->up_color != 3;
+      int ndsr = ndsr_old || ndsr_new;
+      if (ndsr) { static uint64_t seen[8]; static int ns; int k = 0; for (; k < ns; k++) if (seen[k] == sh[5]->key) break;
+        if (k == ns && ns < 8) { seen[ns++] = sh[5]->key; VLOG("NDSR upscaler %016llx: colour curve %d (0 unread, 1 linear, 2 sRGB, 3 keep), old rule %d, profile list %d", (unsigned long long)sh[5]->key, sh[5]->up_color, ndsr_old, ndsr_new); } }
       if (on && ndsr) {
         int tin = 0, tout = 0, srgb = sh[5]->up_color == 2;
         for (int i = 0; i < g_wk.n[5]; i++) { const vka_res *r = &g_wk.r[5][i];
