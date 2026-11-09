@@ -226,11 +226,19 @@ static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
                                                             stage == DMSH_VK_STAGE_GS && V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? "Turnip's geometry stage (DM_VK_SUBGROUP_GS)" : V.subgroup_stages & g_stage_bit[stage] ? "the device's subgroup size in this stage is not the library's and cannot be pinned" : "the device has none in this stage");
     free(*w); *w = o; *nb = on * 4;
 }
+static void ssbo_idx(uint64_t key, uint32_t **w, size_t *nb) {
+    if (!VKA_ENV("DM_VK_SSBO_WIDE", 1)) return;
+    size_t on = 0; uint32_t rw = 0, *o = vka_spv_ssbo_idx(*w, *nb / 4, &on, &rw);
+    if (!o) return;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("shader %016llx: %u storage-buffer word indices shared from their first word's shift (DM_VK_SSBO_WIDE)", (unsigned long long)key, rw);
+    free(*w); *w = o; *nb = on * 4;
+}
 static VkShaderModule spv_module_(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn, uint8_t *fcomp) {
     size_t nb = 0; uint32_t *w = vka_shlib_spirv(L, m, &nb, err, errn);
     if (!w) { *why = err; return VK_NULL_HANDLE; }
     if (fcomp && vka_spv_fout_comps(w, nb / 4, fcomp)) memset(fcomp, 0xf, 8);   // a pixel shader's output components (the colour write mask: vka_draw.c)
     if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, e->stage, &w, &nb);
+    ssbo_idx(key, &w, &nb);
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod);
     free(w);
@@ -460,6 +468,7 @@ VkShaderModule vka_shader_tex_module(vka_shader *s, const vka_texmod_key *key) {
     size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
     if (!m) snprintf(err, sizeof err, "no module of variant %d", k.variant);
     if (w && (s->e->flags & DMSH_VK_F_SUBGROUP)) single_lane(s->key, s->e->stage, &w, &nb);
+    if (w) ssbo_idx(s->key, &w, &nb);
     size_t on = 0; uint32_t *o;
     if (w && (k.vin_u | k.vin_s)) { o = vka_spv_vin_retype(w, nb / 4, k.vin_u, k.vin_s, &on, err, sizeof err); free(w); w = o; nb = on * 4; }
     if (w && (k.fout_u | k.fout_s)) { o = vka_spv_fout_retype(w, nb / 4, k.fout_u, k.fout_s, &on, err, sizeof err); free(w); w = o; nb = on * 4; }
@@ -649,6 +658,14 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
         if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)p->serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
         out->sh[st] = vka_shader_make(&g_lib, key);
         if (!out->sh[st]) out->bad |= 1u << st;
+        else if (st == 5 && !out->sh[5]->up_color && p->sd[i].control && p->sd[i].data) {
+            uint32_t ncode = 0, nctl = 0; nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);
+            if (ncode >= 64 && ncode < (1u << 24)) {
+                void *code = malloc(ncode);
+                if (code && mem_read(p->sd[i].data, code, ncode)) out->sh[5]->up_color = (uint8_t)vka_up_color(code, ncode);
+                free(code);
+            }
+        }
     }
     vka_prog_put(p->serial, out);
     return 1;

@@ -300,7 +300,8 @@ VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage
 void vka_tex_id_desc(int id, char *b, size_t n);   // texture ID id described for a [RED] line
 void vka_tex_id_peek(int id, char *b, size_t n);   // the same with its storage address and its image's (DM_VK_TEX_PEEK)
 void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n);   // the open pass's attachments and their levels (n 0: none), for vka_tex_id_view
-int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (vka_tex_feedback's set)
+int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (1 = colour, 2 = depth / stencil, 0 = neither)
+int vka_tex_id_in_pass_rec(int id, uint8_t dim);
 int vka_tex_id_target(int id);                      // the NVN target texture ID id stands for (its view's), -1 = not registered
 int vka_tex_id_pending(int id);                     // texture ID id is registered and its image is not made yet (its first use records commands)
 VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // the same on the recording thread, through a memo (DM_VK_TEX_MEMO)
@@ -333,6 +334,7 @@ typedef struct vka_shader {
     uint32_t inst_bind;                 // an instanced variant: the uniform binding it was made for + 1 (the prewarm list records it with the base key)
     struct vka_gslink *gslink;          // a geometry shader's modules with outputs added for a pixel shader's inputs, by vertex / pixel pair (vka_shader_gs_link_module)
     uint8_t fcomp[8];                   // a pixel shader: the components of each colour output its module can write (vka_spv_fout_comps), for the write mask; all 0xf when not read
+    uint8_t up_color;                   // a compute shader's upscaler colour curve from its Ampere code (vka_up_color: VKA_UP_*)
     uint64_t chash;                     // its library entry's hash (vka_shlib_entry_hash), for the pipeline cache's stamp (vka_pso.c); 0 = not in the library
 } vka_shader;
 // An instanced variant's key (vka_draw.c's instanced runs): its base shader's key XOR this. It is no key of the shader library, and the variant depends on the uniform
@@ -413,6 +415,8 @@ int vka_rp_split_ok(const p_set_rt *rt, int has_rt);
 void vka_draw_cb_switch(VkCommandBuffer cb);
 void vka_dyn_invalidate(void);                       // the draws' dynamic state is set again in full at the next draw (another pipeline was bound)
 int vka_pass_keep(void);                             // DM_VK_PASS_KEEP=0: a SET_RT ends the pass, as before
+void vka_rp_set_rt(const p_set_rt *rt);              // OP_SET_RT while a pass stays open: notes a continuation of the same targets
+int vka_rp_ub_defer(uint64_t dst, uint64_t n, const void *data);   // OP_UPDATE_UB while a pass is open: 1 = kept for the pass's UBOs and flushed at vka_rp_end
 int vka_rp_open_for(const p_set_rt *rt, int has_rt);   // a pass is open over these targets
 int vka_rp_on(void);                                 // a pass is open
 int vka_mesh_on(void);                               // VK_EXT_mesh_shader is on
@@ -458,6 +462,7 @@ void vka_tex_gw_copy(uint64_t src, uint64_t dst, uint64_t n);
 void vka_tex_gw_fill(uint64_t dst, uint64_t n, uint32_t value);
 void vka_tex_gw_update(uint64_t dst, uint64_t n, const void *data);
 void vka_tex_gw_opaque(uint64_t dst, uint64_t n);   // bytes the host does not know at recording (shader stores, texture → buffer copies)
+int vka_tex_gw_read(uint64_t addr, uint64_t n, void *out);   // [addr, addr + n) as the GPU sees it now (guest RAM + pending gw_t writes); out NULL = only whether known (no opaque write)
 int vka_tex_gml_take(VkDescriptorBufferInfo *bi);  // a raw global memory write log for one draw or dispatch, read when its submission is done (0 = none free)
 void vka_tex_gw_commit(uint64_t fence);
 void vka_tex_watch_dispatch(uint64_t key);         // DM_VK_NANSCAN: compute shaders by submission, for the storage watch             // the writes recorded since the last commit belong to this submission

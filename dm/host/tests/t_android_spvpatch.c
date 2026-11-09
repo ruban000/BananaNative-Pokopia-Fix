@@ -86,6 +86,50 @@ int main(void) {
         g = vka_spv_gs_link(SPV_PASS_GEOM, gn, SPV_TRI_VERT, vn, SPV_FILL_COMP, sizeof SPV_FILL_COMP / 4, &cp, &nl, &on, err, sizeof err);   // a next stage with no inputs
         CHECK(!g && !err[0], "nothing to add: no module, no error (%s)", err);
     }
+    {   // Neural upscaler colour curve classification from Ampere machine code (vka_up_color): linear-in/out, sRGB-in/linear-out, and encoded-out
+        uint32_t lin[32] = {0}; uint16_t srgb[48] = {0}; uint32_t keep[32] = {0};
+        for (int i = 0; i < 8; i++) { lin[i] = 0x3b4d2e1cu; lin[8 + i] = 0x3ed55555u; lin[16 + i] = 0x3d25aee6u; lin[24 + i] = 0x4019999au; }
+        for (int i = 0; i < 8; i++) { srgb[i] = 0x292du; srgb[8 + i] = 0x40ccu; srgb[16 + i] = 0x2cf5u; }
+        CHECK(vka_up_color(lin, sizeof lin) == VKA_UP_LINEAR, "linear-in, linear-out upscaler classified as VKA_UP_LINEAR");
+        CHECK(vka_up_color(srgb, sizeof srgb) == VKA_UP_SRGB, "sRGB-in, linear-out upscaler classified as VKA_UP_SRGB");
+        CHECK(vka_up_color(keep, sizeof keep) == VKA_UP_KEEP, "encoded-out upscaler classified as VKA_UP_KEEP");
+        CHECK(vka_up_color(lin, 32) == VKA_UP_UNREAD, "short buffer classified as VKA_UP_UNREAD");
+    }
+    {   // Split storage-buffer word indices (vka_spv_ssbo_idx): four consecutive words at base + 32, + 36, + 40, + 44 share the first word's >> 2 shift
+        // 1 void, 2 fn_t, 3 i32, 4 u32, 5 rta_u32, 6 blk_t, 7 ptr_sb_blk, 8 ptr_sb_u32, 9 buf, 10 c_i0, 11 c_i32, 12 c_i4, 13 c_i8, 14 c_i12, 15 c_u2,
+        // 16 fn, 17 lbl, 18 a0(0+32), 19 u0, 20 s0(>>2), 21 i0, 22 p0, 23 v0, 24 a1(+4), 25 u1, 26 s1(>>2), 27 i1, 28 p1, 29 v1, 30 a2(+8), 31 u2, 32 s2(>>2), 33 i2, 34 p2, 35 v2
+        static const uint32_t ssbo[] = {0x07230203, 0x00010300, 0, 36, 0,
+            2u << 16 | 17, 1,                                         // OpCapability Shader
+            3u << 16 | 14, 0, 1,                                      // OpMemoryModel Logical GLSL450
+            5u << 16 | 15, 5, 16, 0x6e69616d, 0,                      // OpEntryPoint GLCompute %16 "main"
+            6u << 16 | 16, 16, 17, 1, 1, 1,                           // OpExecutionMode %16 LocalSize 1 1 1
+            4u << 16 | 71, 5, 6, 4,                                   // OpDecorate %5 ArrayStride 4
+            3u << 16 | 71, 6, 3,                                      // OpDecorate %6 BufferBlock
+            5u << 16 | 72, 6, 0, 35, 0,                               // OpMemberDecorate %6 0 Offset 0
+            4u << 16 | 71, 9, 34, 0, 4u << 16 | 71, 9, 33, 0,         // OpDecorate %9 DescriptorSet 0, Binding 0
+            2u << 16 | 19, 1, 3u << 16 | 33, 2, 1,                    // OpTypeVoid %1, OpTypeFunction %2 %1
+            4u << 16 | 21, 3, 32, 1, 4u << 16 | 21, 4, 32, 0,         // OpTypeInt %3 32 1, %4 32 0
+            3u << 16 | 29, 5, 4, 3u << 16 | 30, 6, 5,                 // OpTypeRuntimeArray %5 %4, OpTypeStruct %6 %5
+            4u << 16 | 32, 7, 2, 6, 4u << 16 | 32, 8, 2, 4,           // OpTypePointer Uniform %6, %4
+            4u << 16 | 59, 7, 9, 2,                                   // OpVariable %7 %9 Uniform
+            4u << 16 | 43, 3, 10, 0, 4u << 16 | 43, 3, 11, 32, 4u << 16 | 43, 3, 12, 4, 4u << 16 | 43, 3, 13, 8, 4u << 16 | 43, 4, 15, 2,
+            5u << 16 | 54, 1, 16, 0, 2, 2u << 16 | 248, 17,
+            5u << 16 | 128, 3, 18, 10, 11, 4u << 16 | 124, 4, 19, 18, 5u << 16 | 194, 4, 20, 19, 15, 4u << 16 | 124, 3, 21, 20,
+            6u << 16 | 65, 8, 22, 9, 10, 21, 4u << 16 | 61, 4, 23, 22,
+            5u << 16 | 128, 3, 24, 18, 12, 4u << 16 | 124, 4, 25, 24, 5u << 16 | 194, 4, 26, 25, 15, 4u << 16 | 124, 3, 27, 26,
+            6u << 16 | 65, 8, 28, 9, 10, 27, 4u << 16 | 61, 4, 29, 28,
+            5u << 16 | 128, 3, 30, 18, 13, 4u << 16 | 124, 4, 31, 30, 5u << 16 | 194, 4, 32, 31, 15, 4u << 16 | 124, 3, 33, 32,
+            6u << 16 | 65, 8, 34, 9, 10, 33, 4u << 16 | 61, 4, 35, 34,
+            1u << 16 | 253, 1u << 16 | 56};
+        uint32_t rw = 0, *x = vka_spv_ssbo_idx(ssbo, sizeof ssbo / 4, &on, &rw);
+        CHECK(x && rw == 2, "two subsequent storage-buffer word shifts rewritten to OpIAdd (rw=%u)", rw);
+        if (x) {
+            CHECK(count_op(x, on, 194) == 1, "only the first >> 2 shift remains (%d)", count_op(x, on, 194));
+            CHECK(count_op(x, on, 128) == count_op(ssbo, sizeof ssbo / 4, 128) + 2, "two OpIAdd instructions replace the shifts");
+            if (val) CHECK(validate(x, on, "ssbo_idx"), "rewritten ssbo_idx module valid");
+            free(x);
+        }
+    }
     const char *dir = getenv("DM_VK_SPV_DIR");
     if (dir) {
         DIR *d = opendir(dir); struct dirent *e; int done = 0, refused = 0;

@@ -1009,3 +1009,156 @@ out:
     free(loc); free(ty); free(ptee); free(cval); free(isc); free(var);
     return rc;
 }
+
+static int up_count32(const void *code, uint32_t ncode, uint32_t w) {
+    const uint32_t *u = (const uint32_t *)code; int n = 0;
+    for (uint32_t i = 0; i < ncode / 4; i++) if (u[i] == w) n++;
+    return n;
+}
+static int up_count16(const void *code, uint32_t ncode, uint16_t h) {
+    const uint16_t *u = (const uint16_t *)code; int n = 0;
+    for (uint32_t i = 0; i < ncode / 2; i++) if (u[i] == h) n++;
+    return n;
+}
+int vka_up_color(const void *code, uint32_t ncode) {
+    if (!code || ncode < 64) return VKA_UP_UNREAD;
+    if (up_count32(code, ncode, 0x3b4d2e1cu) >= 8 && up_count32(code, ncode, 0x3ed55555u) >= 8
+        && up_count32(code, ncode, 0x3d25aee6u) >= 8 && up_count32(code, ncode, 0x4019999au) >= 8)
+        return VKA_UP_LINEAR;
+    if (up_count16(code, ncode, 0x292du) >= 8 && up_count16(code, ncode, 0x40ccu) >= 8 && up_count16(code, ncode, 0x2cf5u) >= 8)
+        return VKA_UP_SRGB;
+    return VKA_UP_KEEP;
+}
+
+// vka_spv_ssbo_idx: storage-buffer word indices the translator computed separately from one byte offset, shared from the first word's shifted index.
+// Ampere reads a storage buffer 64 or 128 bits at a time (LDG.E.64 / .128); the translator splits each into 32-bit LoadStorage operations at byte_base + 4*k, each with its
+// own (uint(byte_base + 4*k) >> 2) index. Because + 4*k sits inside >> 2 and SPIR-V OpIAdd has no unsigned no-wrap flag, neither LLVM (Qualcomm's compiler) nor NIR
+// (Turnip's nir_opt_load_store_vectorize) can fold ((x + 36) >> 2) to ((x + 32) >> 2) + 1: the words stay separate scalar loads with separate address arithmetic
+// (Splatoon Raiders' Hoian_UBER 3e5a302ac52b73bf: 20 words per 80-byte light in a loop, ~240 words in all). Within each basic block, when a shift by constant 2 feeds an
+// OpAccessChain index and its byte operand traces through OpIAdd / OpISub / OpBitcast / OpCopyObject (and same-block loads of Function variables) to (root, off) with
+// (off - off0) % 4 == 0 from an earlier such shift s0 of the same result type at (root, off0), the shift is replaced by OpCopyObject(s0) or OpIAdd(s0, (off - off0) / 4).
+enum { OpFunctionCallS = 57, OpIAddS = 128, OpISubS = 130, OpShiftRightLogicalS = 194, OpShiftRightArithmeticS = 195 };
+uint32_t *vka_spv_ssbo_idx(const uint32_t *w, size_t nw, size_t *out_nw, uint32_t *rewritten) {
+    uint32_t done = 0;
+    if (rewritten) *rewritten = 0;
+    if (nw < 5 || w[0] != 0x07230203) return NULL;
+    uint32_t bound = w[3], t_u32 = 0, t_i32 = 0; size_t first_fn = nw;
+    uint8_t *is_c32 = calloc(bound, 1), *is_fvar = calloc(bound, 1), *feeds_ac = calloc(bound, 1), *has_add = calloc(bound, 1);
+    uint32_t *cval = calloc(bound, 4), *bcast_src = calloc(bound, 4), *alias = calloc(bound, 4), *add_root = calloc(bound, 4);
+    int64_t *add_off = calloc(bound, sizeof(int64_t)), *anc_off = calloc(bound, sizeof(int64_t));
+    uint32_t *fvar_gen = calloc(bound, 4), *fvar_cur = calloc(bound, 4), *anc_gen = calloc(bound, 4), *anc_s0 = calloc(bound, 4), *anc_ty = calloc(bound, 4);
+    uint32_t *rw_s0 = calloc(bound, 4), *rw_wd = calloc(bound, 4), *rw_ty = calloc(bound, 4);
+    vec_t o = {0}, cdecl = {0};
+    if (!is_c32 || !is_fvar || !feeds_ac || !has_add || !cval || !bcast_src || !alias || !add_root || !add_off || !anc_off || !fvar_gen || !fvar_cur || !anc_gen || !anc_s0 || !anc_ty || !rw_s0 || !rw_wd || !rw_ty) goto out;
+    uint32_t p_fn_u32 = 0, p_fn_i32 = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) goto out;
+        if (op == OpFunction && first_fn == nw) first_fn = i;
+        if (i < first_fn) {
+            if (op == OpTypeInt && len >= 4 && w[i + 2] == 32 && w[i + 1] < bound) { if (w[i + 3]) t_i32 = w[i + 1]; else t_u32 = w[i + 1]; }
+            else if (op == OpTypePointer && len >= 4 && w[i + 2] == 7 && w[i + 1] < bound) { if (w[i + 3] == t_u32 && t_u32) p_fn_u32 = w[i + 1]; else if (w[i + 3] == t_i32 && t_i32) p_fn_i32 = w[i + 1]; }
+            else if (op == OpConstant && len == 4 && w[i + 2] < bound) {
+                if (w[i + 1] == t_u32 && t_u32) { is_c32[w[i + 2]] = 1; cval[w[i + 2]] = w[i + 3]; }
+                else if (w[i + 1] == t_i32 && t_i32) { is_c32[w[i + 2]] = 2; cval[w[i + 2]] = w[i + 3]; }
+            }
+        } else {
+            if (op == OpVariable && len >= 4 && w[i + 3] == 7 && w[i + 2] < bound && ((w[i + 1] == p_fn_u32 && p_fn_u32) || (w[i + 1] == p_fn_i32 && p_fn_i32))) is_fvar[w[i + 2]] = 1;
+            else if ((op == OpBitcast || op == OpCopyObject) && len == 4 && w[i + 2] < bound && w[i + 3] < bound) bcast_src[w[i + 2]] = w[i + 3];
+            else if ((op == OpAccessChain || op == OpInBoundsAccessChain) && len >= 5) {
+                for (uint32_t k = 4; k < len; k++) {
+                    uint32_t u = w[i + k];
+                    for (int d = 0; d < 8 && u && u < bound; d++, u = bcast_src[u]) feeds_ac[u] = 1;
+                }
+            }
+        }
+        i += len;
+    }
+    if (first_fn == nw || (!t_u32 && !t_i32)) goto out;
+    uint32_t blk_gen = 1, n_rw = 0;
+    for (size_t i = first_fn; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OpFunction || op == OpLabel || op == OpFunctionCallS) { blk_gen++; i += len; continue; }
+        if (op == OpLoad && len == 4 && w[i + 2] < bound && w[i + 3] < bound && is_fvar[w[i + 3]]) {
+            uint32_t res = w[i + 2], fv = w[i + 3];
+            if (fvar_gen[fv] != blk_gen) { fvar_gen[fv] = blk_gen; fvar_cur[fv] = res; }
+            alias[res] = fvar_cur[fv];
+            if (has_add[alias[res]]) { add_root[res] = add_root[alias[res]]; add_off[res] = add_off[alias[res]]; has_add[res] = 1; }
+        } else if (op == OpStore && len >= 3 && w[i + 1] < bound && w[i + 2] < bound && is_fvar[w[i + 1]]) {
+            uint32_t fv = w[i + 1], val = w[i + 2], uv = alias[val] ? alias[val] : val;
+            fvar_gen[fv] = blk_gen; fvar_cur[fv] = uv;
+        } else if ((op == OpBitcast || op == OpCopyObject) && len == 4 && (w[i + 1] == t_u32 || w[i + 1] == t_i32) && w[i + 2] < bound && w[i + 3] < bound) {
+            uint32_t res = w[i + 2], src = w[i + 3], us = alias[src] ? alias[src] : src;
+            alias[res] = us;
+            if (has_add[us]) { add_root[res] = add_root[us]; add_off[res] = add_off[us]; has_add[res] = 1; }
+        } else if ((op == OpIAddS || op == OpISubS) && len == 5 && (w[i + 1] == t_u32 || w[i + 1] == t_i32) && w[i + 2] < bound && w[i + 3] < bound && w[i + 4] < bound) {
+            uint32_t res = w[i + 2], a = w[i + 3], b = w[i + 4];
+            uint32_t ua = alias[a] ? alias[a] : a, ub = alias[b] ? alias[b] : b;
+            if (op == OpIAddS && !is_c32[ub] && is_c32[ua]) { uint32_t t = ua; ua = ub; ub = t; }
+            if (is_c32[ub]) {
+                int64_t k = op == OpISubS ? -(int64_t)(int32_t)cval[ub] : (int64_t)(int32_t)cval[ub];
+                add_root[res] = has_add[ua] ? add_root[ua] : ua;
+                add_off[res] = (has_add[ua] ? add_off[ua] : 0) + k;
+                has_add[res] = 1;
+            }
+        } else if ((op == OpShiftRightLogicalS || op == OpShiftRightArithmeticS) && len == 5 && (w[i + 1] == t_u32 || w[i + 1] == t_i32)
+                   && w[i + 2] < bound && w[i + 3] < bound && w[i + 4] < bound && is_c32[w[i + 4]] && cval[w[i + 4]] == 2 && feeds_ac[w[i + 2]]) {
+            uint32_t rt = w[i + 1], res = w[i + 2], val = w[i + 3], uv = alias[val] ? alias[val] : val;
+            uint32_t root = has_add[uv] ? add_root[uv] : uv;
+            int64_t off = has_add[uv] ? add_off[uv] : 0;
+            if (root < bound) {
+                if (anc_gen[root] == blk_gen && anc_ty[root] == rt && (off - anc_off[root]) % 4 == 0) {
+                    int64_t wd = (off - anc_off[root]) / 4;
+                    if (wd >= -65536 && wd <= 65536) {
+                        rw_s0[res] = anc_s0[root]; rw_wd[res] = (uint32_t)(int32_t)wd; rw_ty[res] = rt; n_rw++;
+                        if (wd == 0) alias[res] = anc_s0[root];
+                    }
+                } else if (anc_gen[root] != blk_gen) {
+                    anc_gen[root] = blk_gen; anc_s0[root] = res; anc_ty[root] = rt; anc_off[root] = off;
+                }
+            }
+        }
+        i += len;
+    }
+    if (!n_rw) goto out;
+    // Constants for word deltas not already in the module
+    uint32_t nb = bound;
+    uint32_t mk_ty[256], mk_val[256], mk_id[256]; int nmk = 0;
+    for (uint32_t id = 1; id < bound; id++) {
+        if (!rw_s0[id] || !rw_wd[id]) continue;
+        uint32_t rt = rw_ty[id], v = rw_wd[id], cid = 0;
+        uint8_t want_k = rt == t_u32 ? 1 : 2;
+        for (uint32_t c = 1; c < bound && !cid; c++) if (is_c32[c] == want_k && cval[c] == v) cid = c;
+        for (int k = 0; k < nmk && !cid; k++) if (mk_ty[k] == rt && mk_val[k] == v) cid = mk_id[k];
+        if (!cid) {
+            if (nmk == 256) { rw_s0[id] = 0; n_rw--; continue; }
+            cid = nb++; mk_ty[nmk] = rt; mk_val[nmk] = v; mk_id[nmk++] = cid;
+            uint32_t x[4] = {4u << 16 | OpConstant, rt, cid, v};
+            if (!put_n(&cdecl, x, 4)) goto out;
+        }
+        rw_wd[id] = cid;   // holds the constant ID now
+    }
+    if (!n_rw) goto out;
+    if (!put_n(&o, w, 5)) goto out;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (i == first_fn && cdecl.n && !put_n(&o, cdecl.w, cdecl.n)) goto out;
+        if (i >= first_fn && (op == OpShiftRightLogicalS || op == OpShiftRightArithmeticS) && len == 5 && w[i + 2] < bound && rw_s0[w[i + 2]]) {
+            uint32_t rt = w[i + 1], res = w[i + 2], s0 = rw_s0[res], cid = rw_wd[res];
+            if (!cid) { uint32_t x[4] = {4u << 16 | OpCopyObject, rt, res, s0}; if (!put_n(&o, x, 4)) goto out; }
+            else { uint32_t x[5] = {5u << 16 | OpIAddS, rt, res, s0, cid}; if (!put_n(&o, x, 5)) goto out; }
+            i += len; continue;
+        }
+        if (!put_n(&o, w + i, len)) goto out;
+        i += len;
+    }
+    o.w[3] = nb;
+    done = n_rw;
+    if (rewritten) *rewritten = n_rw;
+    *out_nw = o.n;
+out:
+    free(is_c32); free(is_fvar); free(feeds_ac); free(has_add); free(cval); free(bcast_src); free(alias); free(add_root);
+    free(add_off); free(anc_off); free(fvar_gen); free(fvar_cur); free(anc_gen); free(anc_s0); free(anc_ty); free(rw_s0); free(rw_wd); free(rw_ty); free(cdecl.w);
+    if (!done) { free(o.w); return NULL; }
+    return o.w;
+}

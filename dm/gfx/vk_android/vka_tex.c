@@ -730,7 +730,7 @@ static uint64_t mem_hash(const uint8_t *p, uint64_t n) { uint64_t h = 1469598103
 // Images whose content is the GPU's (gpu_owned: render targets, copy destinations) keep it, as for CPU writes
 enum { GW_COPY, GW_FILL, GW_UPDATE, GW_OPAQUE };
 typedef struct { uint64_t lo, hi, src, seq, fence; uint32_t kind, value; uint8_t *data; } gw_t;
-static gw_t *g_gw; static int g_ngw, g_gwcap; static uint64_t g_gwseq = 1, g_gw_redo, g_gw_over, g_gw_late;
+static gw_t *g_gw; static int g_ngw, g_gwcap; static uint64_t g_gwseq = 1, g_gw_over, g_gw_late;
 static void gw_add(int kind, uint64_t dst, uint64_t n, uint64_t src, uint32_t value, const void *data) {
     if (!n) return;
     pthread_mutex_lock(&g_tmu);
@@ -738,6 +738,16 @@ static void gw_add(int kind, uint64_t dst, uint64_t n, uint64_t src, uint32_t va
     if (kind == GW_OPAQUE)   // the same range again in this submission (a storage buffer bound by draw after draw): one entry, at the newest place
         for (int i = g_ngw - 1; i >= 0 && i >= g_ngw - 16 && !g_gw[i].fence; i--) if (g_gw[i].kind == GW_OPAQUE && g_gw[i].lo == dst && g_gw[i].hi == dst + n) {
             gw_t w = g_gw[i]; memmove(&g_gw[i], &g_gw[i + 1], (size_t)(g_ngw - 1 - i) * sizeof *g_gw); w.seq = g_gwseq++; g_gw[g_ngw - 1] = w; pthread_mutex_unlock(&g_tmu); return; }
+    if (kind == GW_UPDATE)   // the same inline update range again in this submission (Splatoon Raiders' 1,550 occlusion queries: 11,010 updates to 7 ranges): overwrite in place
+        for (int i = g_ngw - 1; i >= 0 && i >= g_ngw - 16 && !g_gw[i].fence; i--) {
+            if (g_gw[i].kind == GW_COPY) break;
+            if (g_gw[i].kind == GW_UPDATE && g_gw[i].lo == dst && g_gw[i].hi == dst + n && g_gw[i].data) {
+                memcpy(g_gw[i].data, data, (size_t)n);
+                gw_t w = g_gw[i]; memmove(&g_gw[i], &g_gw[i + 1], (size_t)(g_ngw - 1 - i) * sizeof *g_gw); w.seq = g_gwseq++; g_gw[g_ngw - 1] = w;
+                pthread_mutex_unlock(&g_tmu); return;
+            }
+            if (g_gw[i].lo < dst + n && dst < g_gw[i].hi) break;
+        }
     uint8_t *cp = NULL; if (kind == GW_UPDATE && (cp = malloc(n))) memcpy(cp, data, n); else if (kind == GW_UPDATE) kind = GW_OPAQUE;
     g_gw[g_ngw++] = (gw_t){dst, dst + n, src, g_gwseq++, 0, (uint32_t)kind, value, cp};
     pthread_mutex_unlock(&g_tmu);
@@ -908,6 +918,38 @@ static uint8_t *gw_content(const uint8_t *mem, uint64_t n, uint64_t *seen) {
     *seen = cap;
     return c;
 }
+// Guest range [addr, addr + n) as the GPU sees it after the writes recorded so far (for a uniform buffer shadowed in scratch while inline updates are deferred in an open pass):
+// 1 = known and written to out (or, when out is NULL, known without reading), 0 = an uncompleted opaque write or a copy from a range with a pending write overlaps [addr, addr + n)
+int vka_tex_gw_read(uint64_t addr, uint64_t n, void *out) {
+    if (!n) return 1;
+    if (out) {
+        if (vka_addr(addr, n, NULL, NULL, NULL)) memcpy(out, (const void *)(uintptr_t)addr, (size_t)n);
+        else dm_guest_read_mapped(out, (uintptr_t)addr, (size_t)n);
+    } else if (!vka_addr(addr, n, NULL, NULL, NULL) && dm_guest_unmapped((uintptr_t)addr, n)) return 0;
+    pthread_mutex_lock(&g_tmu);
+    uint64_t a = addr, b = a + n, done = vka_done(); uint8_t *c = out; int ok = 1;
+    for (int i = 0; i < g_ngw; i++) {
+        const gw_t *w = &g_gw[i];
+        if (w->fence && w->fence <= done) continue;
+        if (w->hi <= a || w->lo >= b) continue;
+        if (w->kind == GW_OPAQUE) { ok = 0; break; }
+        uint64_t lo = w->lo > a ? w->lo : a, hi = w->hi < b ? w->hi : b;
+        if (w->kind == GW_COPY) {
+            for (int j = 0; j < i; j++) {
+                const gw_t *x = &g_gw[j];
+                if ((!x->fence || x->fence > done) && x->lo < w->src + (hi - w->lo) && x->hi > w->src + (lo - w->lo)) { ok = 0; break; }
+            }
+            if (!ok) break;
+            if (c) dm_guest_read_mapped(c + (lo - a), (uintptr_t)(w->src + (lo - w->lo)), (size_t)(hi - lo));
+        } else if (c && w->kind == GW_FILL) {
+            for (uint64_t k = lo; k < hi; k++) { uint32_t v = w->value; c[k - a] = ((const uint8_t *)&v)[(k - w->lo) & 3]; }
+        } else if (c && w->kind == GW_UPDATE) {
+            memcpy(c + (lo - a), w->data + (lo - w->lo), (size_t)(hi - lo));
+        }
+    }
+    pthread_mutex_unlock(&g_tmu);
+    return ok;
+}
 // Storage the guest has not mapped (all or part of it): its content as zeros, in a copy (NULL: all mapped). A memory pool is placed memory only once the GPU gets an address
 // in it (vka_mem.c mtl_pool_need); before, placing mapped the whole pool read-write, and Mario Kart World 1.8.0 uploads a texture of a CPU_NO_ACCESS pool whose pages its
 // SDK has not mapped (SIGSEGV in the deswizzle at 0x4074003000, phone m22)
@@ -949,6 +991,60 @@ static int upload_rows_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb, 
     VkBufferImageCopy c = {s.off, bx * f->bw, (r1 - r0) * f->bh, {im->aspect, 0, 0, 1}, {0, (int32_t)y0, 0}, {im->w, y1 - y0, 1}};
     vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     g_rows_up += pitch * (r1 - r0);
+    return 1;
+}
+// A dense block-linear 2D texture whose pages the CPU wrote since im->stamp (old): only the bands (one row of GOB blocks, one range of the storage) with a written page are
+// deswizzled and copied, runs of them through scratch memory, as upload_sparse_parts does. Splatoon Raiders keeps an 8192x8192 BC5 texture (85.3 MiB with its levels) in memory
+// beside data the CPU writes every frame: the whole texture was deswizzled and copied 9-10 times a frame (850 MB, 255 ms) for a few 64 KiB blocks. DM_VK_BANDS=0 = whole
+// texture again. 0 = not such a texture, or content the GPU has pending writes over (the caller uploads all of it)
+static int upload_bands_tracked(vka_img *im, const tex_t *t, VkCommandBuffer cb, uint64_t old) {
+    const nvn_texdesc *d = &t->d; const vka_fmt *f = &im->f;
+    if (!VKA_ENV("DM_VK_BANDS", 1) || im->vpool || im->m.z || im->is_video || vka_nan_on() || f->kind >= 3 || d->target == NVN_TEXTURE_TARGET_3D || im->depth > 1 ||
+        (d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || im->L.size < (1u << 20)) return 0;
+    uint64_t seen; uint8_t *c = gw_content(t->mem, t->L.size, &seen);
+    if (c) { free(c); return 0; }
+    if ((c = unmapped_content(t))) { free(c); return 0; }
+    im->gw_seen = seen;
+    im->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // stamp, protect, then read (upload_tracked)
+    uint64_t up = 0;
+    uint8_t *bst = NULL; uint32_t bst_cap = 0;
+    for (uint32_t lv = 0; lv < im->levels; lv++) {
+        uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
+        uint32_t bx = (w + f->bw - 1) / f->bw, by = (h + f->bh - 1) / f->bh; size_t pitch = (size_t)bx * f->bpb;
+        uint32_t band_rows = by; uint64_t band_bytes = 0;
+        if (nvn_deswizzle_block_rows(d, lv) != (int)by || nvn_deswizzle_bands(d, lv, &band_rows, &band_bytes)) band_rows = by, band_bytes = 0;
+        for (uint32_t ly = 0; ly < im->layers; ly++) {
+            uint64_t off, len; sub_range(d, &im->L, lv, ly, &off, &len);
+            if (!len) continue;
+            uint32_t nb = band_bytes ? (by + band_rows - 1) / band_rows : 1;
+            if (bst_cap < nb) { free(bst); bst_cap = nb; if (!(bst = malloc(bst_cap))) { bst_cap = 0; return 1; } }
+            int any = 0;
+            for (uint32_t k = 0; k < nb; k++) {
+                uint64_t bo = band_bytes ? (uint64_t)k * band_bytes : 0, bl = band_bytes ? (bo < len ? (len - bo < band_bytes ? len - bo : band_bytes) : 0) : len;
+                bst[k] = bl && nvn_dirty_since_span(im->span, t->mem + off + bo, bl, old); any |= bst[k];
+            }
+            if (!any) continue;
+            for (uint32_t k = 0, k1; k < nb; k = k1) {
+                k1 = k + 1;
+                if (!bst[k]) continue;
+                size_t maxrun = 16u << 20; if (maxrun < (size_t)band_rows * pitch) maxrun = (size_t)band_rows * pitch;
+                while (k1 < nb && (size_t)(k1 + 1 - k) * band_rows * pitch <= maxrun && bst[k1]) k1++;
+                if (!band_bytes) k1 = nb;
+                uint32_t y0 = k * band_rows, y1 = k1 * band_rows < by ? k1 * band_rows : by;
+                size_t sz = (size_t)(y1 - y0) * pitch;
+                vka_span s; if (!vka_scratch(sz, 16, &s)) { free(bst); return 1; }
+                if (nvn_deswizzle_rows(d, lv, ly, t->mem, s.ptr - (size_t)y0 * pitch, pitch, y0, y1)) {
+                    VRED_ONCE("texture serial %llu format %#x target %d: no CPU deswizzle", (unsigned long long)t->serial, d->format, d->target); free(bst); return 1; }
+                uint32_t py0 = y0 * f->bh, py1 = y1 * f->bh > h ? h : y1 * f->bh;
+                VkBufferImageCopy cp = {s.off, bx * f->bw, (y1 - y0) * f->bh, {im->aspect, lv, ly, 1}, {0, (int32_t)py0, 0}, {w, py1 - py0, 1}};
+                vk.vkCmdCopyBufferToImage(cb, s.buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+                up += sz;
+                if (!(cb = vka_up_point(cb))) { free(bst); return 1; }
+            }
+        }
+    }
+    free(bst);
+    atomic_fetch_add_explicit(&g_up_bytes, up, memory_order_relaxed);
     return 1;
 }
 // A zero texel block: zeros, except ASTC, whose all-zero block is a reserved mode (the error colour): a void-extent block of colour (0, 0, 0, 0) there
@@ -2034,13 +2130,14 @@ VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage
     return id_view(id, cb, dim, storage, NULL);
 }
 static int in_fb(const vka_img *im) { for (int i = 0; i < g_nfb; i++) if (g_fb_im[i] == im) return 1; return 0; }   // (a view of a pass's own target is cut to its other levels: view_of)
-// Texture ID id stands for an image the open pass draws into (any level): a draw sampling it after a game barrier inside the pass needs the pass ended first (vka_draw.c
-// bar_hazard). An ID whose image is not made yet is not one (the pass's attachments were made when it opened; make_images ends the pass for a new one anyway)
+// Texture ID id stands for an image the open pass draws into (any level): 1 = colour attachment, 2 = depth / stencil attachment, 0 = neither. A draw sampling it after a
+// game barrier inside the pass (or sampling depth after SetRenderTargets continued the pass) needs the pass ended first (vka_draw.c). An ID whose image is not made yet is
+// not one (the pass's attachments were made when it opened; make_images ends the pass for a new one anyway)
 int vka_tex_id_in_pass(int id) {
     if (!g_nfb || id <= 0) return 0;
     pthread_mutex_lock(&g_tmu);
     int r = 0;
-    if (id < g_ntreg && g_treg[id].t.serial) { smap_ent *e = map_get(g_treg[id].t.serial); r = e && e->im && in_fb(e->im); }
+    if (id < g_ntreg && g_treg[id].t.serial) { smap_ent *e = map_get(g_treg[id].t.serial); if (e && e->im && in_fb(e->im)) r = e->im->f.kind >= 3 ? 2 : 1; }
     pthread_mutex_unlock(&g_tmu);
     return r;
 }
@@ -2049,6 +2146,15 @@ static vmemo g_vm[2048]; static struct { int id; uint32_t ver; VkSampler s; } g_
 static inline vmemo *vm_slot(int id, uint8_t dim) { return &g_vm[((unsigned)id * 7u + dim) & 2047]; }
 static inline int vm_hit(const vmemo *m, int id, uint8_t dim) {
     return m->id == id && m->dim == dim && g_tver && m->ver == atomic_load_explicit(&g_tver[id], memory_order_acquire) && m->gen == atomic_load_explicit(&g_tgen, memory_order_acquire) && !in_fb(m->im);
+}
+int vka_tex_id_in_pass_rec(int id, uint8_t dim) {
+    if (!g_nfb || id <= 0) return 0;
+    if (id < (1 << 20) && VKA_ENV("DM_VK_TEX_MEMO", 1)) {
+        const vmemo *m = vm_slot(id, dim);
+        if (m->id == id && m->dim == dim && g_tver && m->ver == atomic_load_explicit(&g_tver[id], memory_order_acquire) && m->gen == atomic_load_explicit(&g_tgen, memory_order_acquire) && m->im)
+            return in_fb(m->im) ? (m->im->f.kind >= 3 ? 2 : 1) : 0;
+    }
+    return vka_tex_id_in_pass(id);
 }
 // vka_tex_id_view for the recording thread (one thread at a time: the replay worker, or the submitting thread inline), with the memo; storage images take the full path
 VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout) {
@@ -2388,6 +2494,7 @@ void vka_tex_prepare(VkCommandBuffer cb) {
             tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
             int rows = VKA_ENV("DM_VK_ROWS", 1);
             if (rows && upload_rows_tracked(im, &t, cb, lo, hi)) continue;
+            if (upload_bands_tracked(im, &t, cb, im->stamp)) { if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x: the bands of its storage that changed re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format); continue; }
             upload_tracked(im, &t, cb);
             if (g_reup++ < 8) VLOG("texture serial %llu %ux%u format %#x flags %#x target %d: its storage changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format, im->d.flags, im->d.target);
         }

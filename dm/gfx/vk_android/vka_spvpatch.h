@@ -29,3 +29,11 @@ uint32_t *vka_spv_instance(const uint32_t *w, size_t nw, uint32_t binding, uint3
 uint32_t *vka_spv_gs_link(const uint32_t *gw, size_t gn, const uint32_t *vw, size_t vn, const uint32_t *fw, size_t fn, uint32_t *copied, uint32_t *nulled, size_t *out_nw, char *err, size_t errn);
 // A pixel shader's colour outputs: the components each location's stores can write (bit c of comp[loc]), for the colour write mask: 0, or -1 when the module is not read
 int vka_spv_fout_comps(const uint32_t *w, size_t nw, uint8_t comp[8]);
+// A neural upscaler compute shader's colour curve from its Ampere machine code (nvn_mtl.m up_mfx_color): VKA_UP_LINEAR when it encodes linear input and decodes its
+// output back to linear (Bananza's 16 linear-out shaders), VKA_UP_SRGB when it reads sRGB-encoded input and decodes its output to linear (Splatoon Raiders' 10 linear-out
+// shaders), VKA_UP_KEEP when it has no decode curve at the end (left to run its own shader), 0 when no code was read
+enum { VKA_UP_UNREAD = 0, VKA_UP_LINEAR = 1, VKA_UP_SRGB = 2, VKA_UP_KEEP = 3 };
+int vka_up_color(const void *code, uint32_t ncode);
+// Storage-buffer word indices the translator computed separately from one byte offset ((uint(base + 4*k) >> 2)), shared from the first word's shifted index (s0 + k) within
+// each basic block so the driver's load vectorizer merges adjacent words into wide 64/128-bit loads: a malloc'd copy (*out_nw words, *rewritten shifts), NULL when unchanged
+uint32_t *vka_spv_ssbo_idx(const uint32_t *w, size_t nw, size_t *out_nw, uint32_t *rewritten);
