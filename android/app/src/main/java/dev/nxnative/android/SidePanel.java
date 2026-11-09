@@ -166,6 +166,20 @@ final class SidePanel extends FrameLayout {
         box.addView(title);
         note("The game runs on behind this panel; every change applies now and is kept, except those marked for the next start.");
 
+        // One tap for a clean picture: host-drawn stats and tag, the log, the touch controls and the panel arrow together. Back /
+        // Home still opens this panel, where the same button brings everything back (GameActivity.clean).
+        final boolean allHidden = !Prefs.overlay(act) && !TouchControls.showLog(act);
+        Button clean = new Button(act);
+        clean.setText(allHidden ? "Show everything" : "Hide everything (clean picture)");
+        clean.setOnClickListener(v -> {
+            boolean show = allHidden;
+            Prefs.overlay(act, show);
+            TouchControls.showLog(act, show);
+            if (act instanceof GameActivity) ((GameActivity) act).clean(!show);
+            close();
+        });
+        box.addView(clean);
+
         head("Frame rate cap");   // the game's own frame rate; frame generation (below, its own heading) adds frames on top
         caps = new RadioGroup(act);
         if (Prefs.paced(game())) {   // a frame limit, no locking (Prefs.PACE_CAPS)

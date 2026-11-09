@@ -644,6 +644,7 @@ final class TouchControls extends View {
 
     /** Whether GameActivity keeps the newest log lines over the picture once the game draws (off by default; the settings dialog's last box) */
     static boolean showLog(Context c) { return Prefs.open(c, "touch_controls").getBoolean("log", false); }
+    static void showLog(Context c, boolean on) { Prefs.open(c, "touch_controls").edit().putBoolean("log", on).commit(); }
 
     private void save() { prefs().edit().putFloat("opacity", opacity).putFloat("scale", scale).putBoolean("haptics", haptics).commit(); }
 }

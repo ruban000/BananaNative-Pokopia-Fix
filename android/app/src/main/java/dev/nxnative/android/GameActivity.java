@@ -63,6 +63,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static Boolean overlayEnv;   // DM_OVERLAY in env.txt: overrides the setting for this run (static: a screen created again keeps it)
     private TouchControls controls;
     private SidePanel panel;
+    private TextView handle;   // the panel's arrow (clean mode hides it too; Back still opens the panel)
     private final HashSet<Integer> pads = new HashSet<>();   // the gamepads connected: the on-screen controls hide while there is one
     private File log;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -131,7 +132,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         controls.onEditEnd = () -> { if (paused) pausedView.setVisibility(View.VISIBLE); };
         // The panel's handle: a small translucent arrow at the right edge, a quarter of the way down (above the shoulder and face buttons of the automatic layout on both of
         // the PNM-N49's screens; half way down it covered A on the outer screen and ZR on the inner one), over the controls so it keeps its own touches wherever they are dragged
-        TextView handle = new TextView(this);
+        handle = new TextView(this);
         handle.setText("\u2039");
         handle.setTextColor(Color.WHITE);
         handle.setTextSize(22);
@@ -203,6 +204,16 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
 
     private boolean overlayOn() { return overlayEnv != null ? overlayEnv : Prefs.overlay(this); }
+
+    /** The panel's one-tap clean picture: stats, tag, log, touch controls and the panel arrow. The host's present stops drawing the
+     *  overlay through Prefs.overlay (SidePanel); Back / Home still opens the panel, where the same button restores the views. */
+    void clean(boolean hidden) {
+        if (fps != null) fps.setVisibility(hidden ? View.GONE : View.VISIBLE);
+        if (tag != null) tag.setVisibility(hidden || !overlayOn() || !Prefs.overlayItem(this, "tag") ? View.GONE : View.VISIBLE);
+        if (overlay != null) overlay.setVisibility(!hidden && TouchControls.showLog(this) ? View.VISIBLE : View.GONE);
+        if (controls != null) controls.setVisibility(hidden ? View.GONE : View.VISIBLE);
+        if (handle != null) handle.setVisibility(hidden ? View.GONE : View.VISIBLE);
+    }
 
     /** Thread placement (Native.pinThreads): every 5 s, for threads the game and the replay start later; stops when the phone reports no clocks */
     private final Runnable pinRun = this::pinTick;
