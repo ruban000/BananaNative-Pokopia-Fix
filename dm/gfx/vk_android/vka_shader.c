@@ -649,6 +649,14 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
         if (out->sh[st]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("program serial %llu has two %s shaders (%016llx, %016llx): the second is used", (unsigned long long)p->serial, stage_name(en->stage), (unsigned long long)out->sh[st]->key, (unsigned long long)key); }
         out->sh[st] = vka_shader_make(&g_lib, key);
         if (!out->sh[st]) out->bad |= 1u << st;
+        else if (st == 5 && !out->sh[5]->up_color && p->sd[i].control && p->sd[i].data) {
+            uint32_t ncode = 0, nctl = 0; nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);
+            if (ncode >= 64 && ncode < (1u << 24)) {
+                void *code = malloc(ncode);
+                if (code && mem_read(p->sd[i].data, code, ncode)) out->sh[5]->up_color = (uint8_t)vka_up_color(code, ncode);
+                free(code);
+            }
+        }
     }
     vka_prog_put(p->serial, out);
     return 1;

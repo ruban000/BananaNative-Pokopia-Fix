@@ -86,6 +86,15 @@ int main(void) {
         g = vka_spv_gs_link(SPV_PASS_GEOM, gn, SPV_TRI_VERT, vn, SPV_FILL_COMP, sizeof SPV_FILL_COMP / 4, &cp, &nl, &on, err, sizeof err);   // a next stage with no inputs
         CHECK(!g && !err[0], "nothing to add: no module, no error (%s)", err);
     }
+    {   // Neural upscaler colour curve classification from Ampere machine code (vka_up_color): linear-in/out, sRGB-in/linear-out, and encoded-out
+        uint32_t lin[32] = {0}; uint16_t srgb[48] = {0}; uint32_t keep[32] = {0};
+        for (int i = 0; i < 8; i++) { lin[i] = 0x3b4d2e1cu; lin[8 + i] = 0x3ed55555u; lin[16 + i] = 0x3d25aee6u; lin[24 + i] = 0x4019999au; }
+        for (int i = 0; i < 8; i++) { srgb[i] = 0x292du; srgb[8 + i] = 0x40ccu; srgb[16 + i] = 0x2cf5u; }
+        CHECK(vka_up_color(lin, sizeof lin) == VKA_UP_LINEAR, "linear-in, linear-out upscaler classified as VKA_UP_LINEAR");
+        CHECK(vka_up_color(srgb, sizeof srgb) == VKA_UP_SRGB, "sRGB-in, linear-out upscaler classified as VKA_UP_SRGB");
+        CHECK(vka_up_color(keep, sizeof keep) == VKA_UP_KEEP, "encoded-out upscaler classified as VKA_UP_KEEP");
+        CHECK(vka_up_color(lin, 32) == VKA_UP_UNREAD, "short buffer classified as VKA_UP_UNREAD");
+    }
     const char *dir = getenv("DM_VK_SPV_DIR");
     if (dir) {
         DIR *d = opendir(dir); struct dirent *e; int done = 0, refused = 0;

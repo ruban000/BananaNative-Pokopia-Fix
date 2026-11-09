@@ -1009,3 +1009,23 @@ out:
     free(loc); free(ty); free(ptee); free(cval); free(isc); free(var);
     return rc;
 }
+
+static int up_count32(const void *code, uint32_t ncode, uint32_t w) {
+    const uint32_t *u = (const uint32_t *)code; int n = 0;
+    for (uint32_t i = 0; i < ncode / 4; i++) if (u[i] == w) n++;
+    return n;
+}
+static int up_count16(const void *code, uint32_t ncode, uint16_t h) {
+    const uint16_t *u = (const uint16_t *)code; int n = 0;
+    for (uint32_t i = 0; i < ncode / 2; i++) if (u[i] == h) n++;
+    return n;
+}
+int vka_up_color(const void *code, uint32_t ncode) {
+    if (!code || ncode < 64) return VKA_UP_UNREAD;
+    if (up_count32(code, ncode, 0x3b4d2e1cu) >= 8 && up_count32(code, ncode, 0x3ed55555u) >= 8
+        && up_count32(code, ncode, 0x3d25aee6u) >= 8 && up_count32(code, ncode, 0x4019999au) >= 8)
+        return VKA_UP_LINEAR;
+    if (up_count16(code, ncode, 0x292du) >= 8 && up_count16(code, ncode, 0x40ccu) >= 8 && up_count16(code, ncode, 0x2cf5u) >= 8)
+        return VKA_UP_SRGB;
+    return VKA_UP_KEEP;
+}

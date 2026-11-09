@@ -2275,7 +2275,7 @@ static void nf_pass(VkPipeline pipe, VkImageView src, VkImageLayout ls, VkImageV
     vk.vkCmdPushConstants(g_cb, g_nf.lay, VK_SHADER_STAGE_COMPUTE_BIT, 0, 72, pc);
     vk.vkCmdDispatch(g_cb, (w + 7) / 8, (h + 7) / 8, 1);
 }
-static int ndsr_fsr(int tin, int tout, vka_img *a, vka_img *b) {
+static int ndsr_fsr(int tin, int tout, vka_img *a, vka_img *b, int mode, int srgb) {
     if (!nf_ready() || b->f.vk != VK_FORMAT_B10G11R11_UFLOAT_PACK32) return 0;
     static int st_ok = -1;
     if (st_ok < 0) { VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, b->f.vk, &fp); st_ok = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
@@ -2285,19 +2285,21 @@ static int ndsr_fsr(int tin, int tout, vka_img *a, vka_img *b) {
     VkImageView va = vka_tex_id_view_rec(tin, g_cb, 1, 0, &la), vb = vka_tex_id_view_rec(tout, g_cb, 1, 1, &lb);   // dim 1: 2D; sampled / storage
     if (!va || !vb) return 0;
     float sharp = VKA_ENVF("DM_VK_NDSR_SHARP", 0.25);   // RCAS's sharpness in stops (0 = the most, AMD's default 0.25); below 0: no RCAS
-    int rcas = sharp >= 0 && nf_mid(b->w, b->h);
+    int rcas = mode == 2 && sharp >= 0 && nf_mid(b->w, b->h);
     float sx = (float)a->w / b->w, sy = (float)a->h / b->h, rw = 1.0f / a->w, rh = 1.0f / a->h;
     float easu[16] = {sx, sy, 0.5f * sx - 0.5f, 0.5f * sy - 0.5f, rw, rh, rw, -rh, -rw, 2 * rh, rw, 2 * rh, 0, 4 * rh, 0, 0};   // AMD's FsrEasuCon for the whole image
-    uint32_t pc[18] = {0}; for (int i = 0; i < 16; i++) pc[i] = nf_bits(easu[i]); pc[16] = b->w; pc[17] = b->h;
+    uint32_t pc[18] = {0}; for (int i = 0; i < 16; i++) pc[i] = nf_bits(easu[i]);
+    pc[15] = (!rcas && srgb) ? 1u : 0u; pc[16] = b->w; pc[17] = b->h;
     vka_barrier(g_cb);
     nf_pass(g_nf.easu, va, la, rcas ? g_nf.mv : vb, rcas ? VK_IMAGE_LAYOUT_GENERAL : lb, pc, b->w, b->h);
     if (rcas) {
         vka_barrier(g_cb);
         memset(pc, 0, 64); pc[0] = nf_bits(exp2f(-sharp));   // FsrRcasCon's con0.x (the packed half at word 1 is for the 16-bit path)
+        pc[15] = srgb ? 1u : 0u;
         nf_pass(g_nf.rcas, g_nf.mv, VK_IMAGE_LAYOUT_GENERAL, vb, lb, pc, b->w, b->h);
     }
     vka_barrier(g_cb);
-    static int noted; if (!noted++) VLOG("NDSR upscaler replaced by FSR 1 (EASU%s): %ux%u -> %ux%u (DM_VK_NDSR: 0 the game's network, 1 the stretch, 2 FSR 1, 3 nearest)", rcas ? " + RCAS" : "", a->w, a->h, b->w, b->h);
+    static int noted; if (!noted++) VLOG("NDSR upscaler replaced by FSR 1 (EASU%s%s): %ux%u -> %ux%u (DM_VK_NDSR: 0 the game's network, 1 the stretch, 2 FSR 1, 3 nearest)", rcas ? " + RCAS" : "", srgb ? ", sRGB->linear" : "", a->w, a->h, b->w, b->h);
     return 1;
 }
 // ---------- Dispatch order ----------
@@ -2351,6 +2353,25 @@ void vka_disp_census(uint64_t frame) {
     }
     memset(g_dc, 0, sizeof g_dc); g_dc_drop = 0; g_dc_frame = frame; g_disp_settled = g_disp_saved = vka_disp_cleared = 0;
 }
+static int up_is_key(uint64_t key) {
+#if DM_GAME_UPSCALER_N > 0
+    static uint64_t keys[DM_GAME_UPSCALER_N];
+    static int init;
+    if (!__atomic_load_n(&init, __ATOMIC_ACQUIRE)) {
+        const char *p = DM_GAME_UPSCALER_KEYS;
+        for (int i = 0; i < DM_GAME_UPSCALER_N && *p; i++) {
+            char *end = NULL;
+            keys[i] = strtoull(p, &end, 16);
+            p = end && *end == ',' ? end + 1 : (end ? end : "");
+        }
+        __atomic_store_n(&init, 1, __ATOMIC_RELEASE);
+    }
+    for (int i = 0; i < DM_GAME_UPSCALER_N; i++) if (keys[i] == key) return 1;
+#else
+    (void)key;
+#endif
+    return 0;
+}
 void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++; return; }
     if (!d->inited) vka_dstate_reset(d);
@@ -2400,13 +2421,16 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
       // Every variant of the network: the exact 2x one (14a8aaf3e0a9edbd) and the others the game picks at other ratios (9e5597e2fcfc3c2f at 1.833: 27 ms of the GPU at
       // 1080p, a hitch at every step of the dynamic resolution, 2026-11-05), known by their shape: 128-wide workgroups in x, 8-12 KB of shared memory, flags 0x84
       const dmsh_vk_entry *ce = sh[5]->e;
-      // (seen: 14a8aaf3e0a9edbd 2x, 9e5597e2fcfc3c2f, a9fed0568668bf97, 7629d857a0a93833 at 67 %, 3b716012fcd10575 at 60 %: 9.6-10.9 KB of shared memory)
-      int ndsr = sh[5]->key == 0x14a8aaf3e0a9edbdull || sh[5]->key == 0x9e5597e2fcfc3c2full || sh[5]->key == 0x7629d857a0a93833ull || sh[5]->key == 0x3b716012fcd10575ull
-                 || (ce->local[0] == 128 && ce->local[1] == 1 && ce->local[2] == 1 && ce->shared >= 8000 && ce->shared <= 12000 && (ce->flags & 0x84) == 0x84);
+      // (seen: 14a8aaf3e0a9edbd 2x, 9e5597e2fcfc3c2f, a9fed0568668bf97, 7629d857a0a93833 at 67 %, 3b716012fcd10575 at 60 %: 9.6-10.9 KB of shared memory;
+      //  Splatoon Raiders' agl_ndsr.pck: c1b8edc09e3313b1 at 4,608 B and 30d8ee33de9dee85 at 24,576 B, named by DM_GAME_UPSCALER_KEYS and classified by vka_up_color)
+      int ndsr = DM_GAME_UPSCALER_N > 0 ? (up_is_key(sh[5]->key) && sh[5]->up_color != 3)
+                 : (sh[5]->key == 0x14a8aaf3e0a9edbdull || sh[5]->key == 0x9e5597e2fcfc3c2full || sh[5]->key == 0x7629d857a0a93833ull || sh[5]->key == 0x3b716012fcd10575ull
+                    || (ce->local[0] == 128 && ce->local[1] == 1 && ce->local[2] == 1 && ce->shared >= 8000 && ce->shared <= 12000 && (ce->flags & 0x84) == 0x84));
       if (on && ndsr) {
-        int tin = 0, tout = 0;
+        int tin = 0, tout = 0, srgb = sh[5]->up_color == 2;
         for (int i = 0; i < g_wk.n[5]; i++) { const vka_res *r = &g_wk.r[5][i];
-          if (r->desc == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && r->tid) tin = r->tid; else if (r->desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && r->tid) tout = r->tid; }
+          if ((r->desc == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || r->desc == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) && r->tid) tin = r->tid;
+          else if (r->desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && r->tid) tout = r->tid; }
         vka_img *a = tin ? vka_tex_id_img(tin, g_cb) : NULL, *b = tout ? vka_tex_id_img(tout, g_cb) : NULL;
         if (a && b && fmt_ok < 0) {
           VkFormatProperties fa, fb; vk.vkGetPhysicalDeviceFormatProperties(V.pd, a->f.vk, &fa); vk.vkGetPhysicalDeviceFormatProperties(V.pd, b->f.vk, &fb);
@@ -2414,9 +2438,10 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
                 && (fb.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT);
           if (!fmt_ok) VRED("NDSR blit: format %d -> %d cannot be blitted with a linear filter on this device: the network runs (DM_VK_NDSR)", a->f.vk, b->f.vk);
         }
-        if (a && b && mode == 2 && a->aspect == VK_IMAGE_ASPECT_COLOR_BIT && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT && a->samples <= 1 && b->samples <= 1 && ndsr_fsr(tin, tout, a, b)) {
+        if (a && b && (mode == 2 || (mode == 1 && srgb)) && a->aspect == VK_IMAGE_ASPECT_COLOR_BIT && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT
+            && a->samples <= 1 && b->samples <= 1 && ndsr_fsr(tin, tout, a, b, mode, srgb)) {
             g_dispatches++; return; }
-        if (a && b && fmt_ok > 0 && (a->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && (b->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+        if (a && b && !srgb && fmt_ok > 0 && (a->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && (b->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
             && a->aspect == VK_IMAGE_ASPECT_COLOR_BIT && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT && a->samples <= 1 && b->samples <= 1) {
           VkImageLayout la = VK_IMAGE_LAYOUT_GENERAL, lb = VK_IMAGE_LAYOUT_GENERAL;
           vka_tex_id_view_rec(tin, g_cb, 1, 0, &la); vka_tex_id_view_rec(tout, g_cb, 1, 1, &lb);   // dim 1: 2D   // the layouts the images are kept in

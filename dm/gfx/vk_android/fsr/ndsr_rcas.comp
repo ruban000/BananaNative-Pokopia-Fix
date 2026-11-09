@@ -18,5 +18,9 @@ void main() {
     if (any(greaterThanEqual(p, pc.size))) return;
     AF3 c;
     FsrRcasF(c.r, c.g, c.b, p, pc.con0);
+    if (pc.con3.w != 0u) {
+        c = clamp(c, 0.0, 1.0);
+        c = mix(c * (1.0 / 12.92), pow((c + 0.055) * (1.0 / 1.055), vec3(2.4)), greaterThan(c, vec3(0.04045)));
+    }
     imageStore(dst, ivec2(p), vec4(c, 1.0));
 }
