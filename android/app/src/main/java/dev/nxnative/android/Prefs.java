@@ -21,6 +21,11 @@ final class Prefs {
     static boolean overlay(Context c) { return of(c).getBoolean("overlay", true); }
     static void overlay(Context c, boolean on) { of(c).edit().putBoolean("overlay", on).commit(); }
 
+    /** The in-game clean picture: stats, log, build tag, on-screen controls and the panel arrow hidden together. One saved flag, so hiding survives a
+     *  restart as a whole; the overlay and log settings themselves are not changed, and showing everything returns to them. */
+    static boolean clean(Context c) { return of(c).getBoolean("clean", false); }
+    static void clean(Context c, boolean on) { of(c).edit().putBoolean("clean", on).commit(); }
+
     /** One item of the overlay (Overlay.ITEMS); all on by default, shown only while the overlay is on */
     static boolean overlayItem(Context c, String key) { return of(c).getBoolean("overlay_" + key, true); }
     static void overlayItem(Context c, String key, boolean on) { of(c).edit().putBoolean("overlay_" + key, on).commit(); }
