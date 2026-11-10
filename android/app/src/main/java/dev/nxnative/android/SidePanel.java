@@ -166,15 +166,13 @@ final class SidePanel extends FrameLayout {
         box.addView(title);
         note("The game runs on behind this panel; every change applies now and is kept, except those marked for the next start.");
 
-        // One tap for a clean picture: host-drawn stats and tag, the log, the touch controls and the panel arrow together. Back /
-        // Home still opens this panel, where the same button brings everything back (GameActivity.clean).
-        final boolean allHidden = !Prefs.overlay(act) && !TouchControls.showLog(act);
+        // One tap for a clean picture: host-drawn stats and tag, the log, the touch controls and the panel arrow together, saved as one flag.
+        // Back / Home still opens this panel, where the same button brings everything back; the overlay and log settings themselves are untouched.
+        final boolean allHidden = Prefs.clean(act);
         Button clean = new Button(act);
         clean.setText(allHidden ? "Show everything" : "Hide everything (clean picture)");
         clean.setOnClickListener(v -> {
             boolean show = allHidden;
-            Prefs.overlay(act, show);
-            TouchControls.showLog(act, show);
             if (act instanceof GameActivity) ((GameActivity) act).clean(!show);
             close();
         });
