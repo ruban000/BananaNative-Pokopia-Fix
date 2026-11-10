@@ -7,7 +7,6 @@ import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.hardware.display.DisplayManager;
 import android.hardware.input.InputManager;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
@@ -78,12 +77,12 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private boolean routeReady;
 
     /** Phone: sensor landscape as before. DeX / an external display: leave the window free, so the desktop can size it and the
-     *  monitor's own orientation decides. The manifest no longer forces landscape; this applies the phone's lock at runtime. */
+     *  monitor's own orientation decides. The manifest no longer forces landscape; this applies the phone's lock at runtime.
+     *  The activity's own display is what counts: screen recording, casting and virtual displays also appear in
+     *  DisplayManager.getDisplays() and must not unlock the phone. */
     private void applyOrientation() {
-        boolean external = false;
-        DisplayManager dm = getSystemService(DisplayManager.class);
-        if (dm != null) for (Display d : dm.getDisplays())
-            if (d.getDisplayId() != Display.DEFAULT_DISPLAY && d.getState() == Display.STATE_ON) { external = true; break; }
+        Display d = getDisplay();
+        boolean external = d != null && d.getDisplayId() != Display.DEFAULT_DISPLAY;
         int want = external ? ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
         if (getRequestedOrientation() != want) setRequestedOrientation(want);
     }
