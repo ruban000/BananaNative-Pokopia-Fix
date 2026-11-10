@@ -69,6 +69,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile Rumble rumble;   // the game's vibration on the controller's or the phone's vibrator
     private boolean input, started;
+    private boolean clean;   // the saved clean picture: stats, log, tag, controls and panel arrow hidden together
     private InputManager inputManager;
     private AudioManager audio;
     private AudioFocusRequest focus;
@@ -154,7 +155,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         handle.setOnClickListener(v -> panel.open());
         root.addView(handle, root.indexOfChild(panel), new FrameLayout.LayoutParams(Math.round(22 * dp), Math.round(56 * dp), Gravity.END | Gravity.TOP));
         // Auto with a gamepad connected, or Off: the handle goes with the controls (Back or a gamepad's Home button opens the panel)
-        controls.onSwitch = v -> handle.setVisibility(v ? View.VISIBLE : View.GONE);
+        controls.onSwitch = v -> updateHandle(v);
         controls.setMode(TouchControls.mode(this));
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> handle.setTranslationY((b - t) * 0.25f - 28 * dp));
         // Paused (pause(): the in-game panel's Pause, or the screen coming back with pause-on-return on): the game is suspended until a tap, or A / Start on a gamepad.
@@ -169,6 +170,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         pausedView.setOnClickListener(v -> unpause());
         root.addView(pausedView, root.indexOfChild(handle), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        clean(Prefs.clean(this));   // the saved clean picture applies to the controls and arrow too, not only to the overlay/log settings
         immersive();
         TextInput.screen(this);   // the keyboard applet's input box shows on this screen (again, when the game was waiting on it as the screen was recreated)
         // The host starts once per process. A screen created again while it runs (Android recreated the activity: "Don't keep activities", a font or language
@@ -203,16 +205,23 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         return t;
     }
 
-    private boolean overlayOn() { return overlayEnv != null ? overlayEnv : Prefs.overlay(this); }
+    private boolean overlayOn() { return !clean && (overlayEnv != null ? overlayEnv : Prefs.overlay(this)); }
 
-    /** The panel's one-tap clean picture: stats, tag, log, touch controls and the panel arrow. The host's present stops drawing the
-     *  overlay through Prefs.overlay (SidePanel); Back / Home still opens the panel, where the same button restores the views. */
+    /** The panel's one-tap clean picture: stats, tag, log, touch controls and the panel arrow, saved as one flag. The overlay and log settings are left
+     *  alone (the host's present stops drawing because overlayOn() is false); Back / Home still opens the panel, where the same button restores them. */
     void clean(boolean hidden) {
-        if (fps != null) fps.setVisibility(hidden ? View.GONE : View.VISIBLE);
+        clean = hidden;
+        Prefs.clean(this, hidden);
+        if (fps != null) fps.setVisibility(hidden || !overlayOn() ? View.GONE : View.VISIBLE);
         if (tag != null) tag.setVisibility(hidden || !overlayOn() || !Prefs.overlayItem(this, "tag") ? View.GONE : View.VISIBLE);
         if (overlay != null) overlay.setVisibility(!hidden && TouchControls.showLog(this) ? View.VISIBLE : View.GONE);
-        if (controls != null) controls.setVisibility(hidden ? View.GONE : View.VISIBLE);
-        if (handle != null) handle.setVisibility(hidden ? View.GONE : View.VISIBLE);
+        if (controls != null) controls.setClean(hidden);
+        updateHandle(controls == null || controls.normalVisible());
+    }
+
+    /** The panel arrow follows the clean picture and the controls' own rule (Auto with a gamepad, On, Off). */
+    private void updateHandle(boolean controlsVisible) {
+        if (handle != null) handle.setVisibility(!clean && controlsVisible ? View.VISIBLE : View.GONE);
     }
 
     /** Thread placement (Native.pinThreads): every 5 s, for threads the game and the replay start later; stops when the phone reports no clocks */
@@ -845,7 +854,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             String text = new String(b, StandardCharsets.UTF_8);
             if (text.contains("[nvn] frame ") || text.contains("[longframe]") || text.contains("window frame rate")) drawing = true;   // the host logs these once frames are presented
             if (text.contains("CRASH sig=") || text.contains("FATAL")) failed = true;
-            overlay.setVisibility(!drawing || failed || TouchControls.showLog(this) ? View.VISIBLE : View.GONE);
+            overlay.setVisibility(!clean && (!drawing || failed || TouchControls.showLog(this)) ? View.VISIBLE : View.GONE);
             String[] lines = text.split("\n");
             StringBuilder s = new StringBuilder();
             for (int i = Math.max(from > 0 ? 1 : 0, lines.length - 8); i < lines.length; i++) s.append(lines[i]).append('\n');
