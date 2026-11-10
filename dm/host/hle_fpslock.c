@@ -284,12 +284,15 @@ static int holds(int t) {
     for (int r = 0; r < nrow && !ok; r++) ok = row_holds(rows[r], t);
     return ok;
 }
-// Which caps this main's limiters hold, as a bit per rate (bit 0: 15, 1: 20, 2: 30, 3: 40, 4: 45, 5: 60); 0 = none, the game keeps its own frame rate
+// Which caps this main's limiters hold, as a bit per rate (bit 0: 15, 1: 20, 2: 30, 3: 40, 4: 45, 5: 60); 0 = none, the game keeps its own frame rate.
+// A frame step holds 30 and 60 (dm_fps_target_set writes them into its state page while the game runs): without them here the Android panel took a frame-step game
+// (Mario Kart World, Ocarina of Time) for one that picks its own frame rate and offered no cap, so a cap saved before (the game's own: its slow motion) could not be changed
 static const int k_rates[] = {15, 20, 30, 40, 45, 60};
 int dm_fps_lock_rates(void) {
     pthread_once(&g_found, lock_find);
     int m = 0;
     for (int i = 0; i < 6; i++) if (holds(k_rates[i])) m |= 1 << i;   // a floor's maximum is read each time: the panel asks again while the game runs
+    if (dm_fps_state) m |= 1 << 2 | 1 << 5;
     return m;
 }
 // sead's dynamic interval controller (a floor row's object: Donkey Kong Bananza main+0x204a18) at a 60 cap, on a device whose GPU clocks up only under steady load (the

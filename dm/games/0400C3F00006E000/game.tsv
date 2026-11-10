@@ -50,6 +50,16 @@ sys_resource	0x4000000
 shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Mario Kart World shaders
 
+# ---- Frame rate ----
+# The framework picks each frame's interval (1 or 2 vsyncs, which the game steps by) from the frame's CPU time alone, so frames that wait on the GPU kept interval 1 and played in
+# slow motion (an Adreno 740 at about 45 fps: about 75 % of real time). The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on
+# any build that keeps it: 1.8.0 and v0), at most 3 on 1.8.0, so frames held 3 vsyncs (20 fps) keep real time too; the game's own 30 fps mode stays its own (README, Frame rate)
+fps_target	60
+# Late frames are shown as soon as they are ready, not held at 30 fps: a race's frames take 1 to 2 vsyncs on a phone, and holding them 2 vsyncs halved a start line's 51-54 fps
+# to 30 (Adreno 740, Turnip); the step pays each late frame back (up to 3 vsyncs), so game time stays real time (README, Frame rate). The 30 fps cap holds every frame 2 vsyncs
+# for even motion; DM_FPS_HOLD=on brings the holds back at 60
+fps_hold	off
+
 # ---- Graphics ----
 # Large block-compressed textures from the game's files kept without their finest level on the Vulkan replay (Android; README, Memory): ported from plumber-racer-2 (MIT,
 # copyright seedds), where it made a race fit an iPhone 18 Pro. Textures the game copies from stay whole (its terrain arrays are filled by copies: the road went purple without it)

@@ -115,7 +115,12 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0;
     }
-    s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
+    // The debt is paid back one vsync a frame while the hold can still rise to the frames' cost. When it cannot (k at kmax: fps_hold off, where each frame is shown as soon as it
+    // is ready, or a cap's longest hold), frames that take longer than the hold leave more debt than one vsync a frame repays: at hold 1, frames of 2.5 vsyncs (24 fps) stepped
+    // 2 for 2.5 shown, the debt reached FSTEP_DEBT_MAX and the rest was dropped, so game time fell to 0.8 of real time. There the whole debt is paid, up to FSTEP_MAX a step
+    int extra = s->debt >= 1 && s->k < FSTEP_MAX;
+    if (extra && s->k >= kmax) { int d = (int)s->debt; extra = d < FSTEP_MAX - s->k ? d : FSTEP_MAX - s->k; }
+    s->step = s->k + extra;
     s->paid += s->step > s->k;
     return s->step;
 }

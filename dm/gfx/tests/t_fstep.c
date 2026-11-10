@@ -90,6 +90,14 @@ int main(void) {
         run(&m, 300, 3.5, 2, 2, 0);
         check(m.s.k == 2, "  frames longer than the hold at the 30 cap: hold stays 2 (the 30 Hz link holds only even counts)");
     }
+    {   // fps_hold off at the 60 cap (kmin = kmax = 1): each frame shown as soon as it is ready, so late frames are paid back by steps, up to FSTEP_MAX at once
+        sim m = {0}; run(&m, 120, 0.5, 1, 1, 0); run(&m, 600, 2.5, 1, 1, 0);   // 41.7 ms frames: 24 fps
+        snprintf(b, sizeof b, "hold fixed at 1, 2.5-vsync frames (24 fps): game time %.1f = real time %.1f (debt %.2f, dropped %.1f)", m.game, m.real, m.s.debt, m.s.dropped);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.dropped == 0 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
+        sim n = {0}; run(&n, 120, 0.5, 1, 1, 0); run(&n, 600, 1.4, 1, 1, 0);   // 23 ms frames: 43 fps
+        snprintf(b, sizeof b, "  1.4-vsync frames (43 fps): game time %.1f = real time %.1f (debt %.2f)", n.game, n.real, n.s.debt);
+        check(n.s.k == 1 && n.s.dropped == 0 && n.s.debt < 2 && n.real - n.game - n.s.debt > -1.01 && n.real - n.game - n.s.debt < 1.01, b);
+    }
     {   sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 1, 0.5, 2, 3, 0);
         check(m.s.k == 2, "movie flag (kmin 2): hold 2 at once");
         run(&m, 120, 0.5, 2, 3, 0); run(&m, 1, 0.5, 1, 3, 0);

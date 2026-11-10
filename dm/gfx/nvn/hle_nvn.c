@@ -1900,6 +1900,7 @@ static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for gra
 __attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main
 __attribute__((weak)) void dm_ue_cvar_tick(void) {}   // hle_uecvar.c: Unreal's texture streaming pool (profile ue_texture_pool)
 __attribute__((weak)) int dm_movie_playing(void) { return 0; }   // hle_movie.c: a movie's pictures are being handed out; graphics unit tests have no movie decoder
+__attribute__((weak)) int mtl_gpu_clock_held(void) { return 0; }   // vka_dev.c: the Vulkan replay's GPU clock floor holds the clock at its highest; Metal sets no floor
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
 // then took 17-26 ms a frame and dropped a frame in most windows; a steady 30 instead also lets the device cool. DM_THERMAL_CAP=0 turns it off; the Mac reports no thermal state
@@ -2064,7 +2065,8 @@ static void fstep_tick(const win_t *o, int c) {
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(); g_fs.shown_slack = hz > 60 && hz % 60 && mtl_link_active() ? 60.0 / hz : 0;
-    int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, k0 ? k0 : kmin, kmin, probe0) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
+    // same gates as the CPU's, and none while the GPU clock is held at its highest (Android's floor, vka_dev.c): the hold cannot have slowed it then
+    int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, k0 ? k0 : kmin, kmin, probe0) && dm_thermal_now() <= 1 && !dm_low_power_now() && !mtl_gpu_clock_held();
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
     // Lateness is then what the screen shows: the on-screen interval of the frame 8 presents back against its hold (pres_expect_ms), late by a quarter or dropped

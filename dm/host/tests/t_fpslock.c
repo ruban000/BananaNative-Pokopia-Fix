@@ -11,6 +11,7 @@ module_t *g_mod = test_modules;
 int g_nmod;
 static int writes;
 void dm_guest_write_prepare(void *p, size_t n) { (void)p; assert(n == 4 || n == 8); writes++; }
+static uint8_t fs_state[0x40];   // case 20's frame step state page (+0: the target fps as a float)
 
 // adrp / add of a module offset into register r, at word i of the text (module offsets: the text at 0)
 static void cvar(const char *name, uint64_t off) { strcpy(g_mod[0].ue_cvar[g_mod[0].n_ue_cvar].name, name); g_mod[0].ue_cvar[g_mod[0].n_ue_cvar++].off = off; }
@@ -79,6 +80,9 @@ static void check(int which) {
         uint8_t *app = object + 0x100, *fw = object + 0x200, *ctl = object + 0x400;
         *(uintptr_t *)(base + 0x26cc208) = (uintptr_t)app; *(uintptr_t *)app = (uintptr_t)fw; *(uintptr_t *)(fw + 0x218) = which == 19 ? 0 : (uintptr_t)ctl;   // 19: the controller made later
         sync = (int32_t *)ctl; sync[0] = 1; sync[1] = 3;
+    } else if (which == 20) {   // a main with a frame step (its state page, loader.c) and no engine limiter: Mario Kart World 1.8.0
+        strcpy(g_mod[0].build_id, "d00e4f399e411d0613aa8d26b1c02fef");
+        float t = 60; memcpy(fs_state, &t, sizeof t); dm_fps_state = fs_state;
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -149,6 +153,12 @@ static void check(int which) {
         dm_fps_target_set(15, "test"); dm_fps_lock_tick(); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 0);   // set while running (DM_CTL): still never above the maximum
         dm_fps_target_set(30, "test"); dm_fps_lock_tick(); assert(sync[0] == 2 && writes == 1);   // another cap still applies
         dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 2);
+    } else if (which == 20) {
+        float t;
+        assert(writes == 0 && dm_fps_lock_rates() == (4 | 32));   // the panel offers 30 and 60
+        dm_fps_target_set(30, "test"); memcpy(&t, fs_state, sizeof t); assert(t == 30);
+        dm_fps_target_set(15, "test"); memcpy(&t, fs_state, sizeof t); assert(t == 30);   // the stubs know no other rate: the page keeps the last
+        dm_fps_target_set(60, "test"); memcpy(&t, fs_state, sizeof t); assert(t == 60);
     }
     else assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
     munmap(base, len);
@@ -156,10 +166,10 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 21; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, caps set while running, build gates and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, caps set while running, a frame step's caps, build gates and overrides passed");
 }

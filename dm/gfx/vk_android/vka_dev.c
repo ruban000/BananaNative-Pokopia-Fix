@@ -818,6 +818,15 @@ static void floor_set_(int s, int tail, int again) {   // again: send it even if
 // end failed, and the floor could drop with a counted submission still on the GPU
 static int floor_mode(void) { return V.perf_hint || g_kg_n ? VKA_ENV("DM_VK_GPU_FLOOR_AUTO", 0) : -1; }
 static int floor_top(void) { int s = VKA_ENV("DM_VK_GPU_FLOOR", 100); return s < 0 ? 0 : s > 100 ? 100 : s; }
+// Whether the queue's GPU clock is held at its highest (hle_nvn.c fstep_tick): the queue hint or the KGSL rule given 100 % and taken, the floor fixed (not DM_VK_GPU_FLOOR_AUTO;
+// not ADPF, which only reports). A longer hold cannot have lowered such a clock, so the frame step's probes for a GPU slowed by the hold (an iPhone's governor clocks down to
+// the hold) only make frames late: on an Adreno 740 with Turnip and the KGSL rule at 100, Mario Kart World's GPU time at hold 2 was 3-6 times a menu's at hold 1, a probe
+// back to 60 fps every 1-8 s, and each failed after three late frames
+int mtl_gpu_clock_held(void) {
+    int pct, res;
+    vka_floor_state(&pct, &res);
+    return (V.perf_hint || g_kg_n) && floor_mode() == 0 && pct >= 100 && res == 0;
+}
 // The floor without VK_QCOM_queue_perf_hint and without the KGSL constraint above (a driver that is not on KGSL, or DM_VK_GPU_FLOOR_KGSL=0): the ADPF session (vka_perf.c) reports each frame's span (recording start to the GPU end of
 // its last submission) with its GPU time against the shortest period, so the system raises the clocks the frame's work runs on when the frame takes longer than the period
 // the game could run at. Before 2026-11-05 there was no floor at all there: on Turnip DKB stayed at 20 fps with 33-36 ms of GPU time a frame, as the system driver did with

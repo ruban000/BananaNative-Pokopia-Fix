@@ -60,7 +60,7 @@ DM_FONT_DIR	path	Folder of the shared-font stand-ins (`standard.ttf`, `nintendo_
 DM_FORCE_STRICT	diagnostic	`=1` makes the loader fail on forced-hook entries no module references, instead of only noting them (for checking a mistyped list)
 DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing aim for; otherwise it follows the game's present interval (60, or 30 when the game asks for 30)
 DM_FPS_DECOUPLE	switch	`0` turns off the frame-rate decoupling (default 1): the game then advances its world by 60 / its present interval per frame, as on the console, so it runs slow when frames come late (Donkey Kong Bananza, main build e25c90c1)
-DM_FPS_HOLD	player	`on` / `off` overrides the profile's `fps_hold`: whether late frames may raise the hold above the frame cap's vsyncs (on by default)
+DM_FPS_HOLD	player	`on` / `off` overrides the profile's `fps_hold`: whether late frames may raise the hold above the frame cap's vsyncs (on by default; `off`: each frame is shown as soon as it is ready and the step pays back the late part, up to 3 vsyncs)
 DM_FPS_LIMIT	player	`=<fps>` (Android, live, default 0 = none) the most frames a second a game whose speed follows its measured frame rate may run at; the launcher sets it from the frame limit in the in-game panel
 DM_FPS_PATIENCE	switch	`=<seconds>` (default 3; 0 = the game's own) how long the game's frame-rate controller waits on late frames before it steps to a slower rate, long enough for the GPU to clock up
 DM_FPS_PIN	switch	`0` lets the game's frame-rate controller switch between rates again where the GPU or the frame limit already paces the game (default 1: held at its fastest rate, which avoids a hitch about once a second)
