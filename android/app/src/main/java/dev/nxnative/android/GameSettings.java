@@ -34,7 +34,7 @@ final class GameSettings {
         if (prof != null && prof.vegetationDetail) {
             Ui.Setting vegetation = new Ui.Setting(a, "🌿", "Full vegetation", null)
                     .toggle(a, Prefs.fullVegetation(a, id), (button, on) -> Prefs.fullVegetation(a, id, on));
-            vegetation.value("Turn off to hide some grass and foliage and reduce GPU work. Applies at the next start.");
+            vegetation.value("Turn off to hide selected grass and foliage. Applies at the next start. Change it live under Picture in the in-game panel.");
             Ui.add(box, vegetation.view, 0);
         }
         if (!Prefs.limited(id) && Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing (the host's frame limiter holds a limited game)

@@ -428,7 +428,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // mode that give that size (graphics_scale rows), as its profile says (Profile.resolutionEnv); nothing for a game with neither
         Profile prof = Profile.of(id);
         if (prof != null) env.addAll(prof.resolutionEnv(Prefs.gameWindow(this, id)));
-        if (prof != null && prof.vegetationDetail && !Prefs.fullVegetation(this, id)) env.add("DM_VK_VEGETATION=0");
+        if (prof != null && prof.vegetationDetail) env.add(vegetationEnv(Prefs.fullVegetation(this, id)));
         Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
         GameUpscaler.env(this, id, env);   // the Upscaler (Game settings, the in-game panel): the game's own upscaler and the present's scaling
         if (Prefs.drsGame(id)) { int[] drs = Prefs.DRS[Prefs.drs(this, id)]; env.add("DM_DRS=" + drs[0] + "," + drs[1]); }   // dynamic resolution range (Prefs.DRS)
@@ -635,11 +635,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             env.addAll(user);
             for (String k : Readiness.unknownSwitches(user, KNOWN_SWITCHES)) unknownNotes.add(Readiness.unknownLine(k, switchFrom(k, files, id), KNOWN_SWITCHES));
             boolean stretch = false;
+            runFullVegetation = true;
             String testCrash = null;
             int picSize = PictureFit.SIZE_MAX;
             String ctl = null;
             for (String kv : env) {   // the last line wins, as for the host
                 if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
+                if (kv.startsWith("DM_VK_VEGETATION=")) runFullVegetation = envOn(kv.substring("DM_VK_VEGETATION=".length()));
                 if (kv.startsWith("DM_VK_STRETCH=")) stretch = envOn(kv.substring(14));
                 if (kv.startsWith("DM_VK_PICTURE_SIZE=")) picSize = PictureFit.size((int) envNum(kv.substring(19)));
                 if (kv.startsWith("DM_CTL=")) ctl = kv.substring(7).trim();
@@ -695,6 +697,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static boolean hostRunning;
     /** The run's DM_VK_STRETCH (Game settings › Display, the in-game panel) and DM_VK_PICTURE_SIZE, as the host has them now, for a screen that attaches to the running game */
     private static boolean runStretch;
+    private static boolean runFullVegetation;
     private static int runPictureSize = PictureFit.SIZE_MAX;
     /** The run's live control file (DM_CTL), null when an env line turned it off: the in-game panel's changes then apply at the next start */
     private static String runCtl;
@@ -705,6 +708,22 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     /** Whether the running game takes live switches (DM_CTL): the in-game panel says "applies at the next start" otherwise */
     boolean live() { return hostRunning && runCtl != null; }
     boolean runStretch() { return runStretch; }
+    boolean runFullVegetation() { return runFullVegetation; }
+
+    private static String vegetationEnv(boolean full) { return "DM_VK_VEGETATION=" + (full ? 1 : 0); }
+
+    void fullVegetation(boolean full) {
+        Prefs.fullVegetation(this, titleId(), full);
+        if (!live()) return;
+        try (java.io.FileWriter w = new java.io.FileWriter(runCtl, true)) {
+            w.write("env " + vegetationEnv(full) + "\n");
+        } catch (IOException e) {
+            Native.note("[RED] vegetation: could not send the setting (" + e.getMessage() + ")");
+            Toast.makeText(this, "Vegetation setting applies at the next start", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        runFullVegetation = full;
+    }
     int runPictureSize() { return runPictureSize; }
 
     /**

@@ -588,6 +588,14 @@ final class SidePanel extends FrameLayout {
         note(live ? "Fit keeps the game's shape, Stretch fills the screen; below 100 % the picture is smaller, with black around it. Applies now, kept for this game."
                 : "Applies at the next start (this run takes no live changes: DM_CTL is off).");
         rows.position(box);
+        Profile profile = Profile.of(game());
+        if (ga != null && profile != null && profile.vegetationDetail) {
+            Ui.Setting vegetation = new Ui.Setting(act, "🌿", "Full vegetation", null)
+                    .toggle(act, live ? ga.runFullVegetation() : Prefs.fullVegetation(act, game()), (button, full) -> ga.fullVegetation(full));
+            vegetation.value(live ? "Hide selected grass and foliage when off. Applies in game."
+                    : "Hide selected grass and foliage when off. Applies at the next start.");
+            Ui.add(box, vegetation.view, 0);
+        }
     }
 
     /** The panel itself: its size (width, row height) and its text size, for every game, applied at once */

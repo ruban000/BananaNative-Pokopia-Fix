@@ -22,6 +22,7 @@
 #include "../nvn/nvn_dirty.h"
 #include "vka_place.h"
 #include "vka_gmem.h"
+#include "vka_mapdelta.h"
 #include "../../host/dm.h"
 #include <errno.h>
 #include <stddef.h>
@@ -132,6 +133,31 @@ typedef struct { uintptr_t lo, hi; int prot; } prun;
 enum { MAXRUN = 64, MAXRUN_ = MAXRUN, PBLK_SHIFT = 18 };
 static _Atomic uint64_t g_pgen = 1;
 static _Atomic(_Atomic uint64_t *) g_pblk; static uintptr_t g_pg_lo, g_pg_hi;   // the guest block's generation per 256 KiB block (allocated at the first read)
+static _Atomic(_Atomic uint32_t *) g_delta_pages;
+static unsigned g_delta_shift;
+static _Atomic uint64_t g_delta_epoch;
+typedef struct { _Atomic uint32_t *page; size_t count; } prot_change;
+
+static prot_change prot_begin(uintptr_t a, size_t n) {
+    _Atomic uint32_t *pages = atomic_load_explicit(&g_delta_pages, memory_order_acquire);
+    if (!pages || !n || a >= g_pg_hi || n <= (a < g_pg_lo ? g_pg_lo - a : 0)) return (prot_change){0};
+    uintptr_t lo = a < g_pg_lo ? g_pg_lo : a;
+    uintptr_t hi = n < g_pg_hi - a ? a + n : g_pg_hi;
+    size_t first = (lo - g_pg_lo) >> g_delta_shift, last = (hi - 1 - g_pg_lo) >> g_delta_shift;
+    prot_change c = {pages + first, last - first + 1};
+    atomic_fetch_add(&g_delta_epoch, 1);
+    for (size_t i = 0; i < c.count; i++) vkmd_begin(c.page + i);
+    return c;
+}
+
+static void prot_finish(prot_change c, unsigned value) {
+    if (c.count) atomic_fetch_add(&g_delta_epoch, 1);
+    for (size_t i = 0; i < c.count; i++) vkmd_end(c.page + i, value);
+}
+
+static unsigned prot_value(long result, int prot) {
+    return result == -1 || (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) ? VKMD_UNKNOWN : VKMD_PROT + (unsigned)prot;
+}
 // Snapshot reads begun and ended (+1 each: odd while one runs)
 static _Atomic uint64_t g_snap_reads;
 static void prot_mark(uintptr_t a, size_t n) {   // async-signal-safe (the dirty tracker unprotects in its fault handler): atomics only
@@ -143,6 +169,12 @@ static void prot_mark(uintptr_t a, size_t n) {   // async-signal-safe (the dirty
         _Atomic uint64_t *e = &b[(x - g_pg_lo) >> PBLK_SHIFT]; uint64_t o = atomic_load_explicit(e, memory_order_relaxed);
         while (o < g && !atomic_compare_exchange_weak_explicit(e, &o, g, memory_order_release, memory_order_relaxed)) {}
     }
+}
+static void prot_changed(prot_change c, uintptr_t a, size_t n, unsigned value) {
+    // The tracker may have been installed during the syscall. Its earlier state is unknown.
+    if (!c.count) { c = prot_begin(a, n); value = VKMD_UNKNOWN; }
+    prot_mark(a, n);
+    prot_finish(c, value);
 }
 // The swap's own memory calls (under g_swmu): the system calls without the mark. A failed one (a protection not put back, a range not mapped) sets g_sw_fail, and the swap
 // marks its range at its end
@@ -210,23 +242,43 @@ static void swap_nomark_begin(void) { g_sw_reads = atomic_load(&g_snap_reads); g
 // (it may hold the swap's passing read-only state): one began or ended meanwhile (the count moved), or one runs now (odd: it began before the swap and is still reading)
 static void swap_nomark_end(uintptr_t lo, uintptr_t hi, int exact) {
     uint64_t r = atomic_load(&g_snap_reads);
-    if (!exact || g_sw_fail || r != g_sw_reads || (r & 1)) prot_mark(lo, hi - lo);
+    if (!exact || g_sw_fail || r != g_sw_reads || (r & 1))
+        prot_changed(prot_begin(lo, hi - lo), lo, hi - lo, VKMD_UNKNOWN);
 }
 // The memory calls of this library: the system call, then the mark (after it, so a snapshot read meanwhile is older than the mark)
 // (A failed MAP_FIXED mmap or MREMAP_FIXED mremap may have unmapped its target already: marked too)
 void *mmap(void *a, size_t n, int prot, int fl, int fd, off_t off) {
+    int fixed = fl & (MAP_FIXED | MAP_FIXED_NOREPLACE);
+    prot_change c = fixed ? prot_begin((uintptr_t)a, n) : (prot_change){0};
     long r = syscall(__NR_mmap, a, n, prot, fl, fd, off);
-    if (r == -1) { if (fl & MAP_FIXED) prot_mark((uintptr_t)a, n); return MAP_FAILED; }
-    prot_mark((uintptr_t)r, n); return (void *)r;
+    if (fixed) prot_changed(c, (uintptr_t)a, n, r == (long)a && (fl & MAP_ANONYMOUS) ? prot_value(r, prot) : VKMD_UNKNOWN);
+    if (r == -1) return MAP_FAILED;
+    if (!fixed || r != (long)a) prot_changed((prot_change){0}, (uintptr_t)r, n, VKMD_UNKNOWN);
+    return (void *)r;
 }
 void *mmap64(void *a, size_t n, int prot, int fl, int fd, off64_t off) { return mmap(a, n, prot, fl, fd, (off_t)off); }
-int munmap(void *a, size_t n) { long r = syscall(__NR_munmap, a, n); prot_mark((uintptr_t)a, n); return (int)r; }
-int mprotect(void *a, size_t n, int prot) { long r = syscall(__NR_mprotect, a, n, prot); prot_mark((uintptr_t)a, n); return (int)r; }
+int munmap(void *a, size_t n) {
+    prot_change c = prot_begin((uintptr_t)a, n);
+    long r = syscall(__NR_munmap, a, n);
+    prot_changed(c, (uintptr_t)a, n, r ? VKMD_UNKNOWN : VKMD_UNMAPPED);
+    return (int)r;
+}
+int mprotect(void *a, size_t n, int prot) {
+    prot_change c = prot_begin((uintptr_t)a, n);
+    long r = syscall(__NR_mprotect, a, n, prot);
+    prot_changed(c, (uintptr_t)a, n, prot_value(r, prot));
+    return (int)r;
+}
 void *mremap(void *a, size_t n, size_t nn, int fl, ...) {
     void *to = NULL; if (fl & MREMAP_FIXED) { va_list ap; va_start(ap, fl); to = va_arg(ap, void *); va_end(ap); }
-    long r = syscall(__NR_mremap, a, n, nn, fl, to); prot_mark((uintptr_t)a, n);
-    if (r == -1) { if (to) prot_mark((uintptr_t)to, nn); return MAP_FAILED; }
-    prot_mark((uintptr_t)r, nn); return (void *)r;
+    size_t source_size = to || n > nn ? n : nn;  // an in-place expansion can also change the following pages
+    prot_change src = prot_begin((uintptr_t)a, source_size), dst = prot_begin((uintptr_t)to, nn);
+    long r = syscall(__NR_mremap, a, n, nn, fl, to);
+    prot_changed(src, (uintptr_t)a, source_size, VKMD_UNKNOWN);
+    if (to) prot_changed(dst, (uintptr_t)to, nn, VKMD_UNKNOWN);
+    if (r == -1) return MAP_FAILED;
+    if ((void *)r != a && (void *)r != to) prot_changed((prot_change){0}, (uintptr_t)r, nn, VKMD_UNKNOWN);
+    return (void *)r;
 }
 static int prot_runs_text(uintptr_t lo, uintptr_t hi, prun *out, int max);
 static uint64_t g_maps_lines;   // lines of /proc/self/maps read (placement phases, below)
@@ -246,6 +298,14 @@ static int snap_read(void) {   // the guest block's runs from the text; caller h
         g_pg_lo = (uintptr_t)gb & ~(((uintptr_t)1 << PBLK_SHIFT) - 1); g_pg_hi = (uintptr_t)gb + gs;
         _Atomic uint64_t *b = calloc(((g_pg_hi - g_pg_lo) >> PBLK_SHIFT) + 1, sizeof *b); if (!b) return 0;
         atomic_store_explicit(&g_pblk, b, memory_order_release);
+        if (VKA_ENV("DM_VK_MAPS_DELTA", 0)) {
+            long pg = sysconf(_SC_PAGESIZE);
+            if (pg > 0 && pg <= (1 << PBLK_SHIFT) && !(pg & (pg - 1))) {
+                g_delta_shift = __builtin_ctzl((unsigned long)pg);
+                size_t count = ((g_pg_hi - g_pg_lo - 1) >> g_delta_shift) + 1;
+                atomic_store_explicit(&g_delta_pages, calloc(count, sizeof(_Atomic uint32_t)), memory_order_release);
+            }
+        }
     }
     atomic_fetch_add(&g_snap_reads, 1);
     uint64_t g0 = atomic_load_explicit(&g_pgen, memory_order_acquire);
@@ -289,41 +349,83 @@ static int snap_runs(uintptr_t lo, uintptr_t hi, prun *out, int max) {   // [lo,
     if (at < hi) { if (n == max) return 0; out[n++] = (prun){at, hi, -1}; }
     return n;
 }
+// Untouched pages use the snapshot. A tracked syscall supplies an exact value for the
+// pages it changed; uncertain pages use a snapshot only if it is newer than their mark.
+static int snap_delta_runs(uintptr_t lo, uintptr_t hi, prun *out, int max, uint64_t epoch) {
+    _Atomic uint32_t *pages = atomic_load_explicit(&g_delta_pages, memory_order_acquire);
+    if (!pages || !g_snap.ok || lo < g_pg_lo || hi > g_pg_hi || in_swap(lo, hi)) return 0;
+    _Atomic uint64_t *blocks = atomic_load_explicit(&g_pblk, memory_order_acquire);
+    uintptr_t mask = ((uintptr_t)1 << g_delta_shift) - 1;
+    int i = 0, z = g_snap.n, n = 0;
+    while (i < z) { int m = (i + z) / 2; if (g_snap.r[m].hi <= lo) i = m + 1; else z = m; }
+    for (uintptr_t at = lo; at < hi;) {
+        uint32_t v = atomic_load(&pages[(at - g_pg_lo) >> g_delta_shift]);
+        if (v >= VKMD_BUSY) return 0;
+        uintptr_t end = (at | mask) + 1;
+        if (end > hi) end = hi;
+        int prot;
+        if (v >= VKMD_UNMAPPED) prot = (int)v - VKMD_PROT;
+        else {
+            if (v == VKMD_UNKNOWN && atomic_load(&blocks[(at - g_pg_lo) >> PBLK_SHIFT]) >= g_snap.gen) return 0;
+            while (i < g_snap.n && g_snap.r[i].hi <= at) i++;
+            prot = i < g_snap.n && g_snap.r[i].lo <= at ? g_snap.r[i].prot : -1;
+        }
+        if (n && out[n - 1].prot == prot) out[n - 1].hi = end;
+        else { if (n == max) return 0; out[n++] = (prun){at, end, prot}; }
+        at = end;
+    }
+    return atomic_load(&g_delta_epoch) == epoch && !in_swap(lo, hi) ? n : 0;
+}
 static int prot_runs(uintptr_t lo, uintptr_t hi, prun *out, int max) {
     if (!VKA_ENV("DM_VK_MAPS_CACHE", 1)) return prot_runs_text(lo, hi, out, max);
     pthread_mutex_lock(&g_snapmu);
-    static uint64_t nuse, nread, nhit; static int nfail;
+    static uint64_t nuse, nread, nhit, ndelta, nfallback; static int nfail;
     if (g_snap.off) { pthread_mutex_unlock(&g_snapmu); return prot_runs_text(lo, hi, out, max); }
-    int hit = 1;
-    if (!snap_valid(lo, hi)) {
+    uint64_t epoch = atomic_load(&g_delta_epoch);
+    int valid = snap_valid(lo, hi);
+    int delta = atomic_load(&g_delta_pages) != NULL;
+    int n = delta ? snap_delta_runs(lo, hi, out, max, epoch) : (valid ? snap_runs(lo, hi, out, max) : 0);
+    int hit = n != 0;
+    if (!hit) {
         int rd = snap_read();
         if (rd) nfail = 0;
         else if (++nfail >= 8) { g_snap.off = 1; VRED("placed memory: the protections snapshot could not be read 8 times in a row: read from the text from now on"); }   // (else every answer reads the text twice)
-        if (!rd || !snap_valid(lo, hi)) { pthread_mutex_unlock(&g_snapmu); return prot_runs_text(lo, hi, out, max); }
-        nread++; hit = 0;
+        if (rd) {
+            nread++;
+            epoch = atomic_load(&g_delta_epoch);
+            delta = atomic_load(&g_delta_pages) != NULL;
+            n = delta ? snap_delta_runs(lo, hi, out, max, epoch) : (snap_valid(lo, hi) ? snap_runs(lo, hi, out, max) : 0);
+        }
+        if (!n) { nfallback++; pthread_mutex_unlock(&g_snapmu); return prot_runs_text(lo, hi, out, max); }
     }
-    int n = snap_runs(lo, hi, out, max); nuse++;
+    nuse++;
+    int used_delta = hit && delta && !valid;
+    if (used_delta) ndelta++;
     // The check against the text, on hits only (a fresh read cannot be stale): the first 16, then every 64th. A difference is looked at up to 3 more times, 50 us apart:
     // another thread's call can be in the text before its mark (nvn_dirty's mprotect, then prot_mark); a later look finds it marked (snap_valid fails), which is no fault
-    if (hit && (++nhit <= 16 || !(nhit & 63))) {
+    if (hit && (++nhit <= 16 || !(nhit & 63) || (used_delta && (ndelta <= 16 || !(ndelta & 63))))) {
         prun o2[MAXRUN_]; int n2 = 0, d = 0, differs = 0;
+        int changed = 0;
         for (int pass = 0; pass < 4; pass++) {
             if (pass) { struct timespec ts = {0, 50000}; nanosleep(&ts, NULL); }
             n2 = prot_runs_text(lo, hi, o2, MAXRUN_);
             d = 0; while (d < n && d < n2 && out[d].lo == o2[d].lo && out[d].hi == o2[d].hi && out[d].prot == o2[d].prot) d++;   // the first run that differs (by field: prun has padding)
             differs = n2 && (d < n || d < n2);
-            if (!differs || !snap_valid(lo, hi)) break;
+            changed = delta ? atomic_load(&g_delta_epoch) != epoch || in_swap(lo, hi) : !snap_valid(lo, hi);
+            if (!differs || changed) break;
         }
-        if (differs && !snap_valid(lo, hi)) { memcpy(out, o2, (size_t)n2 * sizeof *out); n = n2; }   // changed meanwhile: the text's answer
-        else if (differs) {
+        if (differs && !changed) {
+            if (delta) atomic_store(&g_delta_pages, NULL);
             g_snap.off = 1;
-            VRED("placed memory: the protections snapshot of %#lx-%#lx (%d runs) differs from /proc/self/maps (%d runs) from run %d on: snapshot %#lx-%#lx prot %d, text %#lx-%#lx prot %d; read from the text from now on",
+            VRED("placed memory: the protections %s of %#lx-%#lx (%d runs) differs from /proc/self/maps (%d runs) from run %d on: cached %#lx-%#lx prot %d, text %#lx-%#lx prot %d; read from the text from now on",
+                 delta ? "page tracking" : "snapshot",
                  (unsigned long)lo, (unsigned long)hi, n, n2, d, d < n ? (unsigned long)out[d].lo : 0ul, d < n ? (unsigned long)out[d].hi : 0ul, d < n ? out[d].prot : -2,
                  d < n2 ? (unsigned long)o2[d].lo : 0ul, d < n2 ? (unsigned long)o2[d].hi : 0ul, d < n2 ? o2[d].prot : -2);
-            memcpy(out, o2, (size_t)n2 * sizeof *out); n = n2;
         }
+        if (differs) { memcpy(out, o2, (size_t)n2 * sizeof *out); n = n2; }
     }
-    if (nuse == 64 || !(nuse & 4095)) VLOG("placed memory: protections from the snapshot, %llu reads of the text for %llu answers (%llu hits)", (unsigned long long)nread, (unsigned long long)nuse, (unsigned long long)nhit);
+    if (nuse == 64 || !(nuse & 4095)) VLOG("placed memory: protections from the snapshot, %llu reads of the text for %llu answers (%llu hits, %llu from page tracking after a block changed, %llu direct fallbacks)",
+        (unsigned long long)nread, (unsigned long long)nuse, (unsigned long long)nhit, (unsigned long long)ndelta, (unsigned long long)nfallback);
     pthread_mutex_unlock(&g_snapmu);
     return n;
 }

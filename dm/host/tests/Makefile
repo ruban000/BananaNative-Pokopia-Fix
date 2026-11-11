@@ -399,7 +399,7 @@ $(B)/t_android_livemap: t_android_livemap.c $(VKA)/vka_livemap.h | $(B)
 $(B)/t_android_texown: t_android_texown.c $(VKA)/vka_texown.h ../../gfx/nvn/nvn_hmap.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_texown.c
 # The memory maps budget: the dirty tracker's block size by share of vm.max_map_count, compaction's picks, the lines of /proc/self/maps (vka_mapbudget.h; vka_mem.c maps_tick)
-$(B)/t_android_mapbudget: t_android_mapbudget.c $(VKA)/vka_mapbudget.h | $(B)
+$(B)/t_android_mapbudget: t_android_mapbudget.c $(VKA)/vka_mapbudget.h $(VKA)/vka_mapdelta.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_mapbudget.c
 # The background pipeline compiles' gate: slots by MemAvailable and the maps' headroom, the frame's compiles before prewarm's and the optimizer's (vka_psogate.h; vka_pso.c gate_enter)
 $(B)/t_android_psogate: t_android_psogate.c $(VKA)/vka_psogate.h | $(B)

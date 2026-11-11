@@ -361,6 +361,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` answers it. On Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output, as `GetVibrationDeviceInfo` reports the device.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it.
 
+### Whether a Switch 2 vibration device is mounted
+
+- **Symptom:** playing the ocarina triggers `[RED] sf: the game connects to service hid itself` and an abort with result `0xe15`.
+- **Cause:** `hid::IsOunceVibrationDeviceMounted` opens the hid service through its SDK detail function. The game uses the answer to choose its vibration pattern.
+- **Fix:** the forced HID hook reports the Switch 2 actuator as absent. The game selects its standard vibration pattern, which uses the existing haptics path. `t_hid` checks that routed standard motors report only standard vibration capability.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) (update `v131072`).
+
 ### Vibration handles before a controller is reported
 
 - **Symptom:** `DM_RUMBLE_LOG=1` shows the game's startup handle request answered with none, then every vibration value sent to handle 0 and reaching no output for the whole session, although a controller with haptics (a DualSense on the Mac) is connected. A game that rumbles would stay silent.

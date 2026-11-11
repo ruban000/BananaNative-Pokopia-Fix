@@ -3,12 +3,31 @@
 // The tracker under the policy over a long session is dm/gfx/tests/t_dirty_maps.c
 #include <stdio.h>
 #include "../../gfx/vk_android/vka_mapbudget.h"
+#include "../../gfx/vk_android/vka_mapdelta.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 #define KIB 1024ul
 
 int main(void) {
+    _Atomic uint32_t page = VKMD_UNTOUCHED;
+    vkmd_begin(&page);
+    CHECK(atomic_load(&page) == VKMD_BUSY, "a pending change makes the page unavailable");
+    vkmd_end(&page, VKMD_PROT);
+    CHECK(atomic_load(&page) == VKMD_PROT, "PROT_NONE is a mapped page");
+    vkmd_begin(&page);
+    vkmd_begin(&page);
+    vkmd_end(&page, VKMD_PROT + 3);
+    CHECK(atomic_load(&page) >= VKMD_BUSY, "the other writer is still in flight");
+    vkmd_end(&page, VKMD_UNMAPPED);
+    CHECK(atomic_load(&page) == VKMD_UNKNOWN, "overlapping writes leave no known protection in either completion order");
+    vkmd_begin(&page);
+    vkmd_end(&page, VKMD_UNMAPPED);
+    CHECK(atomic_load(&page) == VKMD_UNMAPPED, "an uncontended unmap repairs an unknown page");
+    vkmd_begin(&page);
+    vkmd_end(&page, VKMD_UNKNOWN);
+    CHECK(atomic_load(&page) == VKMD_UNKNOWN, "a failed syscall must be re-read");
+
     const long mx = 65530; const size_t base = 64 * KIB;
     // Block size by share of the limit
     CHECK(vkmb_block(0, mx, base) == 0, "nothing asked at 0");
