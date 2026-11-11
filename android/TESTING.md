@@ -201,6 +201,8 @@ a shell "printf 'DM_WATCH_STALL=25\n' > $F"                          # restore e
 
 The capture takes about 16 s inside the frame (each step waits for the GPU and writes the pool bytes); the game then carries on. `[RED] DM_NVN_CAPTURE` lines say what was not captured. Registered textures whose storage is in no live pool (133 in the tunnel: their pools were finalized while they stayed registered) are written without storage; their images' content is captured by serial. A capture only replays on a build with the same record layout (`nvn_obj.h`) and, for each program, a shader library with the same binding records; otherwise the replayer stops with a `[RED] nxreplay:` line that says to capture again.
 
+A warmed scene can also be selected interactively: `android/tools/nxctl.sh framecapture <path>` arms the next complete frame at a present boundary. The path must stay in the game dump's work folder. Only one capture per process is supported; restart before requesting another. The log's `DM_NVN_CAPTURE` completion line still reports success or missing data. `env DM_NVN_CAPTURE=...` after startup does not arm it.
+
 ### Replaying it
 
 `dm/tools/android_replay.py` builds the replayer (CMake with the NDK, into the work folder's `replay-agent/build`; `--build <dir>` for another), pushes it and runs it:

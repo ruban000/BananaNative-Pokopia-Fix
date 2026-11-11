@@ -2264,6 +2264,17 @@ static void fstep_tick(const win_t *o, int c) {
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(); g_fs.shown_slack = hz > 60 && hz % 60 && mtl_link_active() ? 60.0 / hz : 0;
     int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, k0 ? k0 : kmin, kmin, probe0) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
+#if PLAT_ANDROID
+    int vka_gpu_floor_fixed_max(void);
+    if (gslow && vka_gpu_floor_fixed_max()) {
+        gslow = 0;
+        static int noted;
+        if (!noted) {
+            LOG("[nvn] frame step: GPU slowdown probes suppressed under the fixed maximum KGSL clock floor");
+            noted = 1;
+        }
+    }
+#endif
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
     // Lateness is then what the screen shows: the on-screen interval of the frame 8 presents back against its hold (pres_expect_ms), late by a quarter or dropped

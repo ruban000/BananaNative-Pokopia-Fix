@@ -155,7 +155,10 @@ uint32_t *vka_shlib_spirv(const vka_shlib *L, const dmsh_vk_module *m, size_t *n
         if (ZSTD_isError(r) || r != m->size) { fail(err, errn, "zstd: %s (%zu of %u bytes)", ZSTD_isError(r) ? ZSTD_getErrorName(r) : "short frame", ZSTD_isError(r) ? 0 : r, m->size); free(w); return NULL; }
     }
     if (w[0] != 0x07230203u) { fail(err, errn, "not SPIR-V (first word %#x)", w[0]); free(w); return NULL; }
-    size_t nb = m->size; w = spv_override(w, &nb);
-    if (nbytes) *nbytes = nb;
+    size_t bytes = m->size; w = spv_override(w, &bytes);
+#if defined(__ANDROID__)
+    void vka_mesh_flat(uint32_t *, size_t *); vka_mesh_flat(w, &bytes);
+#endif
+    if (nbytes) *nbytes = bytes;
     return w;
 }

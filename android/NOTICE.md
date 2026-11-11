@@ -86,5 +86,7 @@ Custom GPU drivers are never in this repository or in an APK either. The launche
 taps it, from the public GitHub release pages of [MrPurple666/purple-turnip](https://github.com/MrPurple666/purple-turnip),
 [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers), [whitebelyash/freedreno_turnip-CI](https://github.com/whitebelyash/freedreno_turnip-CI),
 [Weab-chan/freedreno_turnip-CI](https://github.com/Weab-chan/freedreno_turnip-CI), [crueter/GameHub-8Elite-Drivers](https://github.com/crueter/GameHub-8Elite-Drivers)
-and [StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers);
-thanks to their authors. Each download keeps its own licence: Mesa's Turnip driver is MIT-licensed, Qualcomm's Adreno driver binaries are proprietary.
+[StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers),
+[The412Banner/Banners-Turnip](https://github.com/The412Banner/Banners-Turnip) and [WinNative-Emu/Drivers](https://github.com/WinNative-Emu/Drivers);
+thanks to their authors. Each download keeps its own licence: Mesa's Turnip driver is MIT-licensed, Max's mesh emulation patches in these experimental Turnip builds are
+published under GPL-3.0, and Qualcomm's Adreno driver binaries are proprietary. No driver code is incorporated into Banana Native by listing a download source.

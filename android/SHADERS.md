@@ -2,6 +2,40 @@
 
 The Android port runs the game's shaders as SPIR-V on Vulkan 1.3 (first device: Adreno 840, [PORTING.md](PORTING.md)). They are translated offline, as on Apple platforms: the same translator makes the SPIR-V, and the Metal half of the chain (SPIRV-Cross, the MSL rewrites, the Metal compiler) is left out. This page has the build, what was kept of the Apple chain, the descriptor ABI the Vulkan replay (`dm/gfx/vk_android`) binds against, the library format, the results on Donkey Kong Bananza and the open problems.
 
+## Experimental compute task/mesh cache
+
+On the Mac, with Python's `zstandard` package, `glslangValidator` and SPIRV-Tools, build the optional sidecars against the exact Vulkan library in the game's pack:
+
+```sh
+python3 dm/gfx/tools/vk_android_mesh.py cache "$LIBRARY" "$CACHE" --jobs 6
+```
+
+The tool checks cached entries against the native library and the sidecar generation, rebuilding only task/mesh entries that need it. It leaves `dmsh_vk.lib` and the ordinary Vulkan translation chain untouched. Copy the `.bnmesh` files and the generation's `schedule-*.spv` to the phone and set `DM_VK_MESH_CACHE` to that folder in the game's environment. `manifest.json` identifies the generation and its bounded task shaders. Without `spirv-opt` or the optional scheduler module the exact CPU-counted path still works; re-run in a fresh cache folder to derive bounds after adding `spirv-opt`.
+
+See [compute mesh execution](../docs/reference/rendering.md#experimental-compute-execution-of-task-and-mesh-programs-on-android) and [GPU scheduling](../docs/reference/rendering.md#compute-mesh-draws-serialize-on-count-readback) for tested limits. Keep the cache with the game's dump and use the matching test APK. Use a copy of the save.
+
+The checked indirect preparation diagnostic uses one optional module, built on the Mac without rebaking the cache.
+
+```sh
+glslangValidator -V --target-env vulkan1.3 dm/gfx/tools/vk_mesh_indirect.comp -o "$CACHE/indirect-v1.spv"
+spirv-val --target-env vulkan1.3 "$CACHE/indirect-v1.spv"
+```
+
+Copy the module next to the existing sidecars and set `DM_VK_MESH_INDIRECT_GPU=8192` in the test profile. The ordinary counted path is available with the switch unset or the module absent.
+
+The GPU-only task diagnostic needs two small modules. Build them on the Mac
+and copy them next to the existing sidecars before setting `DM_VK_MESH_INDIRECT_BOUNDED=1`.
+
+```sh
+for stage in prepare schedule; do
+  glslangValidator -V --target-env vulkan1.3 "dm/gfx/tools/vk_mesh_bounded_${stage}.comp" -o "$CACHE/bounded-${stage}-v1.spv"
+  spirv-val --target-env vulkan1.3 "$CACHE/bounded-${stage}-v1.spv"
+done
+```
+
+For an ICD that exposes native mesh/task,
+`python3 dm/gfx/tools/vk_mesh_native_probe.py "$LIBRARY" "$PROBE_LIBRARY"` creates a separate test library with the same defined predicate and floating-point rules. Select it with `DM_VK_SHLIB`, clear `DM_VK_MESH_CACHE`, and use a separate `DM_VK_PCACHE`. The source library and the standard pack stay in place. This is an A/B diagnostic for a native path, not an updated pack library.
+
 ## Status (2026-11-02)
 
 - **Works:** `DM_GAME=<id> python3 dm/gfx/tools/vk_android_build.py --target vulkan <package dir> <output cache dir>` translates a game's shaders to SPIR-V and writes one library (`v-<DMSH_VK_CHAIN>/dmsh_vk.lib`, zstd modules) with the descriptor ABI of `dm/gfx/nvn/dmsh_abi_vk.h`. `--check <lib>` reads it back as the replay would and runs spirv-val on every module.

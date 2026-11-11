@@ -33,3 +33,6 @@ __attribute__((visibility("default"))) int nxhost_overlay_state(void);
 // (DM_VK_DRIVER, read at the first call in the process: set it before). Its own instance, no device; callable before nxhost_main. 0 = facts written, 1 = an "error=" line
 // says why the facts stop there, -1 = no buffer
 __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n);
+
+// Compatible compute sidecars and their requirements; physical GPU facts remain unchanged.
+__attribute__((visibility("default"))) int nxhost_vk_mesh_cache_report(const char *library, const char *cache, const char *game, char *buf, int n);

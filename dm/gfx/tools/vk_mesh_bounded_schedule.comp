@@ -1,0 +1,47 @@
+#version 450
+
+// The certified per-task emit bound makes the complete map fit. Each mesh
+// dispatch uses its own consecutive slice and reuses the same output arena.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Prepared { uint w[8]; } prep;
+layout(set = 0, binding = 1, std430) readonly buffer Tasks { uint w[]; } task;
+layout(set = 0, binding = 2, std430) writeonly buffer Map { uint w[]; } map;
+layout(set = 0, binding = 3, std430) readonly buffer Control { uint w[8]; } ctl;
+
+void main() {
+    uint total = 0u;
+    uint chunks = ctl.w[5];
+    uint task_limit = ctl.w[7];
+    uint tasks = prep.w[3];
+    bool valid = tasks <= ctl.w[6];
+    for (uint t = 0u; valid && t < tasks; ++t) {
+        uint h = t * ctl.w[1];
+        uint n = task.w[h];
+        if (n > task_limit || task.w[h + 1u] != 1u || task.w[h + 2u] != 1u) {
+            valid = false;
+            break;
+        }
+        for (uint x = 0u; x < n; ++x) {
+            uint p = 8u * chunks + 4u * (total + x);
+            map.w[p] = t;
+            map.w[p + 1u] = x;
+            map.w[p + 2u] = 0u;
+            map.w[p + 3u] = 0u;
+        }
+        total += n;
+    }
+    if (!valid) total = 0u;
+    for (uint c = 0u; c < chunks; ++c) {
+        uint n = min(total, ctl.w[4]);
+        uint p = 8u * c;
+        map.w[p] = n;
+        map.w[p + 1u] = 1u;
+        map.w[p + 2u] = 1u;
+        map.w[p + 3u] = valid ? 0u : 1u;
+        map.w[p + 4u] = n * ctl.w[3];
+        map.w[p + 5u] = 1u;
+        map.w[p + 6u] = 0u;
+        map.w[p + 7u] = 0u;
+        total -= n;
+    }
+}

@@ -4,6 +4,7 @@
 #   nxctl.sh env DM_VK_DRAW=0       a switch, applied at the next frame boundary ("env KEY=" clears it)
 #   nxctl.sh capture 30             one log line per frame for the next 30 frames
 #   nxctl.sh screenshot [file.png]  the next game frame as a PNG; pulled to file.png (default ./ctl-shot-<frame>.png)
+#   nxctl.sh framecapture <path>    the next complete NVN frame, once per process; game data: use the dump's work folder
 #   nxctl.sh stats                  averages of the last 60 frames, the switches set live
 #   nxctl.sh dump                   any other DM_CTL line as it is (key presses "A~0.2", "dump", ...)
 #   nxctl.sh log [n]                the last n (40) lines of the run's log, nothing sent
@@ -33,7 +34,7 @@ t=0; got=0
 while [ "$t" -lt $((WAIT * 4 + want / 6)) ]; do
     sleep 0.25; t=$((t + 1))
     out=$($A shell "tail -n +$((n0 + 1)) '$LOG'" | tr -d '\r' | grep -E '\[vk\] ctl:|DM_CTL|\[RED\]|new swapchain' || true)
-    got=$(printf '%s' "$out" | grep -c 'ctl: \(env .* applied\|capture done\|stats at\|screenshot of frame\|screenshot:\)\|DM_CTL: press\|DM_CTL: env' || true)
+    got=$(printf '%s' "$out" | grep -c 'ctl: \(env .* applied\|capture done\|stats at\|screenshot of frame\|screenshot:\|framecapture:\)\|DM_CTL: press\|DM_CTL: env' || true)
     [ "$got" -ge 1 ] && { [ "$1" != capture ] || printf '%s' "$out" | grep -q 'capture done'; } && break
 done
 printf '%s\n' "${out:-(no answer in the log yet: nxctl.sh log)}"

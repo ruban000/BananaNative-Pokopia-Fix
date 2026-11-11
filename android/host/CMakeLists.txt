@@ -89,8 +89,12 @@ function(nxhost_add tgt game)
   # every build (a seed file added after CMake configured would not be seen by a DEPENDS list); game.py writes the header only when it changes
   set(SEED_H ${GEN}/${game}/vk_prewarm_seed.h)
   add_custom_target(${tgt}_seed COMMAND ${Python3_EXECUTABLE} ${ROOT}/dm/games/game.py seed ${game} ${SEED_H} BYPRODUCTS ${SEED_H} COMMENT "prewarm seed ${game}")
+  set(MESH_H ${GEN}/${game}/vk_mesh_cache_gen.h)
+  add_custom_target(${tgt}_mesh_cache_header
+    COMMAND ${Python3_EXECUTABLE} ${GFX}/tools/vk_android_mesh.py header ${MESH_H}
+    BYPRODUCTS ${MESH_H} COMMENT "experimental compute mesh cache contract")
   add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H} ${SEED_H})
-  add_dependencies(${tgt} ${tgt}_seed)
+  add_dependencies(${tgt} ${tgt}_seed ${tgt}_mesh_cache_header)
   target_include_directories(${tgt} PRIVATE ${GEN}/${game} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/dav1d/include ${TP}/stb_vorbis ${HOST})
   # DM_NUP_ZSTD: compressed files of a NUP container are decompressed with zstddec (dm/host/nup_image.h)
   target_compile_definitions(${tgt} PRIVATE _GNU_SOURCE DM_NUP_ZSTD $<$<BOOL:${NX_LSFG}>:NX_LSFG>)

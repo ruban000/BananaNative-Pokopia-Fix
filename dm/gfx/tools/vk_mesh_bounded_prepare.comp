@@ -1,0 +1,46 @@
+#version 450
+
+// Only a task module with a certified active workgroup domain uses this
+// preparer. Workgroup IDs are unsigned and the guest sequence can wrap.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) writeonly buffer Tasks { uint w[]; } tasks;
+layout(set = 0, binding = 1, std430) readonly buffer Record { uint w[]; } record;
+layout(set = 0, binding = 2, std430) writeonly buffer Args { uint w[8]; } args;
+layout(set = 0, binding = 3, std430) buffer Control { uint w[]; } ctl;
+shared uint active_count;
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    if (lane == 0u) {
+        uint second_ctl = ctl.w[3];
+        uint count = record.w[ctl.w[4]];
+        uint first = record.w[ctl.w[4] + 1u];
+        uint domain = ctl.w[7];
+        uint end = first + count;
+        uint head = first < domain ? min(count, domain - first) : 0u;
+        uint tail = end < first ? min(end, domain) : 0u;
+        active_count = head + tail;
+
+        args.w[0] = head;
+        args.w[1] = 1u;
+        args.w[2] = 1u;
+        args.w[3] = active_count;
+        args.w[4] = tail;
+        args.w[5] = 1u;
+        args.w[6] = 1u;
+        args.w[7] = 0u;
+
+        ctl.w[4] = first;
+        ctl.w[6] = active_count;
+        ctl.w[second_ctl + 5u] = head;
+        ctl.w[second_ctl + 6u] = active_count;
+    }
+    barrier();
+    for (uint i = lane; i < active_count; i += gl_WorkGroupSize.x) {
+        uint base = i * ctl.w[1];
+        tasks.w[base] = 0u;
+        tasks.w[base + 1u] = 1u;
+        tasks.w[base + 2u] = 1u;
+        tasks.w[base + 3u] = 0u;
+    }
+}

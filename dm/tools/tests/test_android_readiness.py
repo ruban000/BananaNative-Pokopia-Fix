@@ -107,6 +107,21 @@ class ReadinessJvm(unittest.TestCase):
                 self.assertIn('[readiness] profile: ', r.stdout)
                 self.assertNotIn('[FAIL]', r.stdout, 'a required row fails on the tested phone, where the games run: a false failure')
 
+    def test_oot_without_mesh_stages(self):
+        reqs = gradle_rows(REPO / 'dm/games/0400486024DEC000/readiness.tsv')
+        have = FIXTURE.read_text(encoding='utf-8')
+        for missing, failures in ((['ext.VK_EXT_mesh_shader', 'feature.meshShader', 'feature.taskShader'], ['Mesh shaders', 'Task shaders']),
+                                  (['feature.meshShader'], ['Mesh shaders']),
+                                  (['feature.taskShader'], ['Task shaders'])):
+            with self.subTest(missing=missing):
+                facts = Path(self.tmp.name) / 'without-mesh.txt'
+                facts.write_text('\n'.join(line for line in have.splitlines() if line.split('=', 1)[0] not in missing), encoding='utf-8')
+                r = self.java(facts, reqs)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn('[readiness] profile: FAIL;', r.stdout)
+                for title in failures:
+                    self.assertIn('[FAIL] ' + title + ':', r.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

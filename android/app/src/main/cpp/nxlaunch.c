@@ -394,6 +394,16 @@ JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_readiness(JNIEnv *env
     return s;
 }
 
+// A file-only check; it never selects a driver or modifies the game's environment.
+#pragma weak nxhost_vk_mesh_cache_report
+JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_meshCache(JNIEnv *env, jclass cls, jstring library, jstring cache, jstring game) {
+    (void)cls;
+    if (!nxhost_vk_mesh_cache_report) return (*env)->NewStringUTF(env,"mesh.compute.selected=1\nmesh.compute.cache=0\nmesh.compute.error=This host cannot verify compute sidecars\n");
+    char *lp=jstr(env,library), *cp=jstr(env,cache), *gp=jstr(env,game); char buf[4096]={0};
+    nxhost_vk_mesh_cache_report(lp,cp,gp,buf,sizeof buf); free(lp); free(cp); free(gp);
+    return (*env)->NewStringUTF(env,buf);
+}
+
 // ---- The graphics selftest (SelftestActivity, in a process of its own): no host start, only the log and nxhost_vk_selftest ----
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_openLog(JNIEnv *env, jclass cls, jstring log) {
     (void)cls; char *lp = jstr(env, log); int r = log_open(lp); free(lp); return r;

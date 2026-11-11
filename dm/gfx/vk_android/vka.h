@@ -13,6 +13,8 @@
 #include "vka_fmtlist.h"
 #include "vka_soft.h"
 
+enum { VKA_SUB_SLOTS_MAX = 16 };
+
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
 #define VRED(...) LOG("[RED] vk: " __VA_ARGS__)
 #define VRED_ONCE(...) do { static _Atomic int once_; if (!atomic_exchange(&once_, 1)) VRED(__VA_ARGS__); } while (0)
@@ -75,13 +77,14 @@ void vka_floor_stats(char *b, size_t n);
 void vka_floor_commit(int counted);   // DM_VK_GPU_FLOOR_AUTO=2: a submission counted by vka_floor_tail_add handed to the queue / done
 void vka_floor_done(int counted);
 void vka_gpu_floor(void);               // mtl_sub_begin: DM_VK_GPU_FLOOR's GPU clock floor on the queue (vka_dev.c)
+int vka_gpu_floor_fixed_max(void);
 void vka_ctl_sub(void);                 // mtl_sub_begin: live switches queued since the last frame are applied
 void vka_ctl_frame(uint64_t f);         // mtl_set_frame: per-frame counters for "capture" and "stats"
 void vka_exec_counts(uint64_t *ops, uint64_t *subs, uint64_t *rec_ns);   // vka_exec.c: clears / copies, submissions, recording time so far
 
 // ---------- Device (vka_dev.c) ----------
 typedef struct {
-    VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; uint32_t qf;
+    VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q, present_q; uint32_t qf;
     VkPhysicalDeviceProperties props; VkPhysicalDeviceMemoryProperties memp;
     int placed, placed_range, unmap_reserve, fd_alias, bda, uab, display_timing, has_android_surface;
     int mem_budget;                                 // VK_EXT_memory_budget: the texture cache's limit reads the image heap's budget and usage (vka_tex.c, vka_texlimit.h)
@@ -107,7 +110,7 @@ typedef struct {
     VkDeviceSize placed_align, max_alloc;
     uint32_t guest_type, local_type, upload_type;   // guest RAM (DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED, or the nearest), images, upload arenas
     VkSemaphore tl;                                 // the timeline: value n = submission n has completed
-    pthread_mutex_t qmu;                            // the queue is shared by the submit and present threads
+    pthread_mutex_t qmu, present_qmu;                // the replay queue and, when requested, a second queue for vkQueuePresentKHR
     int sparse_res;                                 // sparse residency images can be made (vka_sparse.c): binding on the queue, 2D residency, standard block shape, strict non-resident reads
     uint64_t tl_queued;                             // the highest timeline value a vkQueueSubmit so far signals (under qmu): what a later submission on the queue may wait for
     int tl_host;                                    // the GPU signals no timeline: submissions get fences and the host signals their values (vka_dev.c "Host-signalled timelines")
@@ -140,6 +143,7 @@ void vka_gate_cpu_wait(uint64_t fence);
 int vka_gate_banned(const volatile uint32_t *w);
 void vka_gate_stats(uint64_t *n_word, uint64_t *n_cpu, uint64_t *n_time, uint64_t *wait_ns);   // cumulative: opened by their word, by a CPU wait, by their time; time armed
 void vka_device_lost(const char *what);   // a call returned VK_ERROR_DEVICE_LOST: the GPU hang is declared now (vka_dev.c)
+void vka_device_stalled(const char *what);
 VkResult vka_host_signal(VkSemaphore s, uint64_t v);   // the host's own signal of a timeline value (a failed submission's), in step with host-signalled timelines (vka_dev.c)
 
 // The fence ledger: fence n is "done" once the GPU passed it and its CPU-side effects (events, counters) have run
@@ -164,6 +168,7 @@ int vka_hung(void);
 int vka_queue_idle(void);                           // vkQueueWaitIdle bounded by the hang time (0 = not idle: hung or timed out)                                 // 1 = a GPU hang was declared (vka_dev.c): nothing more is submitted, waits return at once
 void vka_fence_post(uint64_t fence, void *ops, int n, void (*run)(void *ops, int n));   // effects run by the completion thread when fence completes
 uint64_t vka_done(void);
+void vka_page_index_retire(uint64_t fence);
 void vka_fence_cpu(uint64_t fence, void *ops, int n, void (*run)(void *ops, int n));   // no GPU behind it (no device, a failed submit): the effects run now and fence is done
 int vka_wait_done(uint64_t fence, uint64_t timeout_ns);
 int vka_worker_cpu_wait(uint64_t fence);    // vka_worker.c: a CPU thread is about to block on fence (parked queues and gates that hold it back go on once the worker is stuck)
@@ -223,6 +228,7 @@ uint64_t vks_bytes_nolock(void);
 // Guest RAM is anonymous memory; each NVN memory pool becomes placed Vulkan memory at its own address when it is made (mtl_pool_add) and anonymous again when it goes (mtl_pool_del):
 // the CPU and GPU see the same bytes. A placed range is a segment with one VkBuffer over it
 int vka_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceAddress *bda);   // 1 = [addr, addr + len) lies in one placed segment
+uint64_t vka_mem_gen(void);
 int vka_mem_release(uintptr_t lo, uintptr_t hi);    // the host gives [lo, hi) back: segments there are given back first; 0 = the host releases the range itself
 uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // bytes from addr (at most len) in the segment that holds addr, 0 = none
 void vka_mem_join_due(void);   // the replay thread at a submission's start: joins the parts of pools placed by parts that a range given to the GPU lies across (vka_mem.c)
@@ -408,6 +414,8 @@ typedef struct vka_shader {
     uint32_t inst_bind;                 // an instanced variant: the uniform binding it was made for + 1 (the prewarm list records it with the base key)
     struct vka_gslink *gslink;          // a geometry shader's modules with outputs added for a pixel shader's inputs, by vertex / pixel pair (vka_shader_gs_link_module)
     uint8_t fcomp[8];                   // a pixel shader: the components of each colour output its module can write (vka_spv_fout_comps), for the write mask; all 0xf when not read
+    struct vka_mesh_data *mesh; int emulated;   // optional compute mesh cache / generated vertex stage
+    uint32_t mesh_task_domain;          // audited exclusive upper limit on task IDs with guest effects
     uint64_t chash;                     // its library entry's hash (vka_shlib_entry_hash), for the pipeline cache's stamp (vka_pso.c); 0 = not in the library
 } vka_shader;
 // An instanced variant's key (vka_draw.c's instanced runs): its base shader's key XOR this. It is no key of the shader library, and the variant depends on the uniform
@@ -511,7 +519,10 @@ void vka_clear_outside(const vka_pclear *c);         // the clear on the image, 
 // the next draw's pass (loadOp CLEAR), or is done outside when anything else comes first (vka_rp_end). 0 = not taken: the caller ends the pass and clears outside
 int vka_rp_clear(const p_set_rt *rt, int has_rt, const vka_dstate *d, const vka_pclear *c);
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di);
-void vka_dispatch(vka_dstate *d, const p_dispatch *dp);
+void vka_mesh_prepare_flush(void);   // before any ordering boundary, readback, part or submission end
+void vka_mesh_prepare_op(uint32_t op, const void *a, uint32_t size);
+void vka_mesh_prepare_stats(char *b, size_t n);
+void vka_dispatch(vka_dstate *d, const p_dispatch *dp, int check_mesh_copy);
 // Whether the game is a Switch 2 one (NVN2: its compute reads the group counts at c0 + DMSH_C0_DISPATCH_NVN2): dm_sdk_ounce() unless set (the replayer sets it from the capture)
 int vka_nvn2(void);
 void vka_set_nvn2(int on);
@@ -524,6 +535,19 @@ void vka_enc_install(void);                 // vka_dev.c: the vk table's vkCmd* 
 void vka_gbar_install(void);                // vka_dev.c, after vka_enc_install: the vk table's work commands go through it
 void vka_gbar_cb(VkCommandBuffer cb);       // the replay's command buffer (a submission's, or a part's)
 void vka_gbar_settle(VkCommandBuffer cb);   // before it ends: what is pending, recorded
+int vka_mesh_indirect_read(uint64_t addr, uint64_t mesh_key, uint32_t *count, uint32_t *first);
+int vka_mesh_indirect_cached(uint64_t addr);
+int vka_mesh_indirect_ready(uint64_t addr);
+uint64_t vka_wait_replayed_signal(const p_wait_event *wait);
+void vka_mesh_indirect_copy_batch(uint64_t addr, vka_span *copy);
+int vka_mesh_indirect_wait(const vka_span *copy);
+VkPipeline vka_mesh_indirect_pipeline(VkPipelineLayout *layout);
+VkPipeline vka_mesh_bounded_pipeline(int schedule, VkPipelineLayout *layout);
+void vka_mesh_indirect_dirty(void);
+void vka_mesh_indirect_buffer_write(uint64_t addr, uint64_t size);
+int vka_mesh_schedule_ok(void);
+void vka_mesh_schedule_check(const uint32_t *status, uint64_t task_key);
+void vka_mesh_indirect_stats(uint64_t *reads, uint64_t *waits, uint64_t *ns, uint64_t *scheduled);
 int vka_gbar_game(VkCommandBuffer cb, uint32_t bits);   // a game barrier outside a draw pass: 1 = taken, 0 = record the full barrier
 void vka_gbar_stats(char *b, size_t n, double frames);
 void vka_enc_start(VkCommandBuffer cb);     // after vkBeginCommandBuffer on the replay thread: its calls into cb are deferred (when DM_VK_ENC is on)

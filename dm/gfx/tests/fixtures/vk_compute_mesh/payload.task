@@ -1,0 +1,9 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x=32) in;
+taskPayloadSharedEXT uint payload[64];
+void main() {
+ for (uint i=gl_LocalInvocationIndex;i<64u;i+=32u) payload[i]=1000u*gl_WorkGroupID.x+i;
+ barrier();
+ EmitMeshTasksEXT(3u,1u,1u);
+}

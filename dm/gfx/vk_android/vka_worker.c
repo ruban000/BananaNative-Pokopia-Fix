@@ -223,15 +223,33 @@ static int qs_on(void) {
     return g_qs_on;
 }
 // Waits asked by the replay (vka_exec.c); only the worker's own replays are parked, at its submissions (g_qs.cur)
-int vka_wait_pass(uint32_t op, const void *a, const uint8_t *rec) {
+int vka_wait_pass(uint32_t op, const void *a, const uint8_t *rec, uint64_t *producer) {
     if (!t_worker || !g_qs.cur) return 1;
-    if (op == OP_WAIT_EVENT) { p_wait_event w; memcpy(&w, a, sizeof w); return !w.val || qs_wait_event(&g_qs, w.val, w.mode, w.value); }
+    if (op == OP_WAIT_EVENT) {
+        p_wait_event w; memcpy(&w, a, sizeof w);
+        return !w.val || qs_wait_event_ordered(&g_qs, w.val, w.mode, w.value, producer);
+    }
     return qs_wait_sync(&g_qs, rec);
 }
-void vka_event_replayed(volatile uint32_t *w, uint32_t mode, uint32_t v) {
-    if (!t_worker || !g_qs.cur || !w) return;
+uint64_t vka_wait_replayed_signal(const p_wait_event *wait) {
+    if (!t_worker || !g_qs.cur || !wait->val) return 0;
+    return qs_signal_predecessor(&g_qs, wait->val, wait->mode, wait->value, qs_ev_value(&g_qs, wait->val));
+}
+int vka_event_replayed(volatile uint32_t *w, uint32_t mode, uint32_t v, int can_yield) {
+    if (!t_worker || !g_qs.cur || !w) return 0;
     qs_event_replayed(&g_qs, w, mode, v);
     vka_qtrace(QT_SIGNAL, g_qs.cur->serial, g_qs.cur->fence, 0, mode, v, qs_ev_value(&g_qs, w), 0, w);
+    if (!can_yield || !VKA_ENV("DM_VK_EVENT_YIELD", 0)) return 0;
+    uint64_t target = qs_yield_event(&g_qs, w);
+    if (target) {
+        static int noted;
+        if (!noted || VKA_ENV("DM_VK_MESH_READBACK_TRACE", 0) == (double)vka_frame())
+            VLOG("GPU event yield: queue %llu submission %llu at event %p value %u, waking submission %llu",
+                 (unsigned long long)g_qs.cur->serial, (unsigned long long)g_qs.cur->fence,
+                 (void *)w, v, (unsigned long long)target);
+        noted = 1;
+    }
+    return target != 0;
 }
 // A CPU thread blocks on fence (vka_wait_done) until vka_worker_cpu_wait_end. A park that holds that fence back is released only once the worker is stuck: nothing left
 // to replay, no parked wait that holds, for QS_STUCK_NS; then the producer is not coming while that thread waits (the GPU would not leave it waiting for work the game has

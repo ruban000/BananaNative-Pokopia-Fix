@@ -43,6 +43,8 @@ final class DriverFetch {
         {"Weab-chan/freedreno_turnip-CI", "Weab-chan Freedreno CI"},
         {"crueter/GameHub-8Elite-Drivers", "GameHub Adreno 8xx"},
         {"StevenMXZ/Adreno-Tools-Drivers", "StevenMXZ Turnip and Qualcomm"},
+        {"The412Banner/Banners-Turnip", "Banners Turnip (experimental mesh emulation)"},
+        {"WinNative-Emu/Drivers", "WinNative Turnip"},
     };
 
     private static final long MAX_ZIP = 512L << 20;
@@ -97,7 +99,10 @@ final class DriverFetch {
             for (int j = 0; j < as.length(); j++) {
                 JSONObject a = as.getJSONObject(j);
                 String n = a.optString("name", ""), url = a.optString("browser_download_url", "");
-                if (n.toLowerCase(Locale.ROOT).endsWith(".zip") && url.startsWith("https://")) out.add(new Asset(repo, tag, n, url, a.optLong("size", 0)));
+                String lower = n.toLowerCase(Locale.ROOT);
+                // These repositories also publish glibc and Wayland ICDs; the app can load only the Android / AdrenoTools archive.
+                if (lower.endsWith(".zip") && !lower.endsWith("-linux.zip") && !lower.endsWith("-wayland.zip") && url.startsWith("https://"))
+                    out.add(new Asset(repo, tag, n, url, a.optLong("size", 0)));
             }
         }
         return out;

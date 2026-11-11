@@ -21,7 +21,7 @@ public final class LogProvider extends ContentProvider {
     static final String DIGEST = ".digest.txt";
 
     static File dir(Context c) {
-        File d = new File(c.getExternalFilesDir(null), "logs");
+        File d = new File(AppStorage.root(c), "logs");
         d.mkdirs();
         return d;
     }

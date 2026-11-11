@@ -76,7 +76,7 @@ public final class ReadinessJvmTest {
         check(bc6 != null && bc6.status == Readiness.Status.WARNING && bc6.message.startsWith("Missing: this game runs without it"), "degraded warns");
         check(l.stream().filter(c -> c.title.equals("Memory")).map(c -> c.status).collect(java.util.stream.Collectors.toList()).equals(List.of(Readiness.Status.PASS, Readiness.Status.WARNING)), "memory 11.2: required 10 passes, degraded 14 warns");
         String s = Readiness.summary("0123456789ABCDEF", f, l);
-        check(s.contains(": FAIL;") && s.contains("missing (required): Placed memory maps, Compute shared memory") && s.contains("missing (degraded): Memory, Sparse BC6H"), "summary " + s);
+        check(s.contains(": FAIL;") && s.contains("missing (required): Placed memory maps, Compute shared memory") && s.contains("warnings: Memory, Sparse BC6H"), "summary " + s);
         l = Readiness.evaluate(Readiness.merge(all, 8.0, 36), Readiness.parseReqs("required|ram_gib|10|Memory: a;degraded|ram_gib|14|Memory: b"));
         check(find(l, "Memory").status == Readiness.Status.FAIL && Readiness.of(l, Readiness.Status.WARNING).isEmpty(), "the degraded row of a failed fact is left out");
 
@@ -89,6 +89,35 @@ public final class ReadinessJvmTest {
         l = Readiness.evaluate(Readiness.merge("error=vkCreateInstance returned -9\nvk.instance=1.3.0\n", 15, 36), game);
         check(find(l, "GPU features").status == Readiness.Status.FAIL && find(l, "GPU features").message.contains("vkCreateInstance returned -9")
                 && find(l, "Vulkan 1.3 loader").status == Readiness.Status.PASS && Readiness.of(l, Readiness.Status.FAIL).size() == 1, "an error line: " + l);
+
+        // Software execution is a selected, validated path; native facts keep their meaning.
+        List<Readiness.Req> meshRows = Readiness.parseReqs("required|feature.meshShader|1|Mesh: geometry;required|feature.taskShader|1|Task: work;required|ext.VK_EXT_mesh_shader|1|Mesh extension: stages");
+        Map<String,String> cm = new java.util.LinkedHashMap<>(Readiness.merge(all,16,36));
+        cm.put("feature.meshShader","0"); cm.put("feature.taskShader","0"); cm.put("ext.VK_EXT_mesh_shader","0");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").status==Readiness.Status.FAIL,"missing native mesh still fails without a replacement");
+        cm.put("mesh.compute.selected","1");cm.put("mesh.compute.cache","1");cm.put("mesh.compute.meshEntries","500");cm.put("mesh.compute.taskEntries","20");
+        String[] cmKeys={"invocations","localX","localY","localZ","shared","record","storageDescriptors","uniformDescriptors"};
+        String[] limitKeys={"maxComputeWorkGroupInvocations","maxComputeWorkGroupSizeX","maxComputeWorkGroupSizeY","maxComputeWorkGroupSizeZ","maxComputeSharedMemorySize","maxStorageBufferRange","maxPerStageDescriptorStorageBuffers","maxPerStageDescriptorUniformBuffers"};
+        for(int i=0;i<cmKeys.length;i++){cm.put("mesh.compute."+cmKeys[i],"32");cm.put("limit."+limitKeys[i],"1024");}
+        cm.put("limit.maxBoundDescriptorSets","4");cm.put("limit.subgroupStages","0x30");cm.put("limit.subgroupOperations","0xbf");cm.put("mesh.compute.subgroupOps","25");cm.put("mesh.compute.features","0");
+        l=Readiness.evaluate(cm,meshRows);
+        check(find(l,"Mesh").status==Readiness.Status.WARNING && find(l,"Task").status==Readiness.Status.WARNING && find(l,"Mesh extension").status==Readiness.Status.WARNING,"validated compute path warns instead of falsely failing native requirements");
+        check(find(l,"Mesh").message.contains("experimental compute/vertex") && find(l,"Mesh").message.contains("500 mesh, 20 task") && find(l,"Mesh").software && cm.get("feature.meshShader").equals("0"),"software support is identified without rewriting native facts");
+        check(!Readiness.summary("FFFFFFFFFFFFFFFF",cm,l).contains("missing (degraded)"),"an available software path is not summarized as missing");
+        List<Readiness.Req> duplicateMesh = Readiness.parseReqs("required|feature.meshShader|1|Mesh: stages;required|ext.VK_EXT_mesh_shader|1|Mesh: extension");
+        check(Readiness.evaluate(cm,duplicateMesh).stream().filter(c -> c.title.equals("Mesh")).count()==1,"one software availability notice for extension and feature of the same stage");
+        cm.put("mesh.compute.cache","0");cm.put("mesh.compute.error","stale entry");cm.put("feature.meshShader","1");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").status==Readiness.Status.FAIL,"invalid selected cache fails even with native mesh available");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").message.contains("stale entry"),"cache failure is explained");
+        cm.put("mesh.compute.cache","1");cm.put("limit.maxComputeSharedMemorySize","1");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").status==Readiness.Status.FAIL,"compatible file does not bypass insufficient compute storage");
+        cm.put("limit.maxComputeSharedMemorySize","1024");cm.put("limit.subgroupOperations","1");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").status==Readiness.Status.FAIL,"required subgroup operations checked on compute");
+        cm.put("limit.subgroupOperations","0xbf");cm.remove("limit.maxComputeWorkGroupSizeX");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").status==Readiness.Status.WARNING,"an unreported compute limit is not certified");
+        cm.put("mesh.compute.selected","0");
+        check(find(Readiness.evaluate(cm,meshRows),"Mesh").status==Readiness.Status.PASS,"disabling the software path restores the native requirement");
+        check("".equals(Readiness.envValue(List.of("DM_VK_MESH_CACHE=old","DM_VK_MESH_CACHE="),"DM_VK_MESH_CACHE")),"an empty final override disables the cache");
 
         // Status and the driver's environment
         check(Readiness.status("playable") == null && Readiness.status("") == null && Readiness.status("bring-up").status == Readiness.Status.WARNING, "status");

@@ -14,7 +14,7 @@
 #include "vka_fd_alias.h"
 
 typedef struct { char *p; int n, at; } outbuf;
-static void put(outbuf *o, const char *fmt, ...) {
+static void __attribute__((format(printf, 2, 3))) put(outbuf *o, const char *fmt, ...) {
     if (o->at >= o->n - 1) return;
     va_list ap; va_start(ap, fmt);
     int w = vsnprintf(o->p + o->at, (size_t)(o->n - o->at), fmt, ap);
@@ -171,7 +171,7 @@ __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n)
         put(&o, "driver.id=%d\n", (int)pdr.driverID);
         put_str(&o, "driver.name", pdr.driverName); put_str(&o, "driver.info", pdr.driverInfo);
         put(&o, "driver.conformance=%u.%u.%u.%u\n", pdr.conformanceVersion.major, pdr.conformanceVersion.minor, pdr.conformanceVersion.subminor, pdr.conformanceVersion.patch);
-        put(&o, "limit.subgroupSize=%u\nlimit.subgroupStages=%#x\n", p11.subgroupSize, p11.subgroupSupportedStages);
+        put(&o, "limit.subgroupSize=%u\nlimit.subgroupStages=%#x\nlimit.subgroupOperations=%#x\n", p11.subgroupSize, p11.subgroupSupportedStages, p11.subgroupSupportedOperations);
         if (v13) put(&o, "limit.minSubgroupSize=%u\nlimit.maxSubgroupSize=%u\n", p13.minSubgroupSize, p13.maxSubgroupSize);
         if (mesh) put(&o, "limit.maxMeshSharedMemorySize=%u\nlimit.maxTaskSharedMemorySize=%u\n", pms.maxMeshSharedMemorySize, pms.maxTaskSharedMemorySize);
     }
@@ -181,6 +181,10 @@ __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n)
             "limit.sparseAddressSpaceMiB=%llu\n",
         L->maxComputeSharedMemorySize, L->maxImageDimension2D, L->maxImageArrayLayers, L->maxStorageBufferRange, L->maxPerStageDescriptorSampledImages,
         L->maxPerStageDescriptorStorageImages, L->maxBoundDescriptorSets, L->maxMemoryAllocationCount, (unsigned long long)(L->sparseAddressSpaceSize >> 20));
+
+    put(&o,"limit.maxComputeWorkGroupInvocations=%u\nlimit.maxComputeWorkGroupSizeX=%u\nlimit.maxComputeWorkGroupSizeY=%u\nlimit.maxComputeWorkGroupSizeZ=%u\n"
+           "limit.maxPerStageDescriptorStorageBuffers=%u\nlimit.maxPerStageDescriptorUniformBuffers=%u\n",L->maxComputeWorkGroupInvocations,
+           L->maxComputeWorkGroupSize[0],L->maxComputeWorkGroupSize[1],L->maxComputeWorkGroupSize[2],L->maxPerStageDescriptorStorageBuffers,L->maxPerStageDescriptorUniformBuffers);
 
     // Features: core 1.0 by name, then the 1.2 / 1.3 ones the replay requires or uses, and the extensions' own
     VkPhysicalDeviceMeshShaderFeaturesEXT fms = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};

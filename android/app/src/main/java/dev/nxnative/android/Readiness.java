@@ -37,11 +37,15 @@ final class Readiness {
     static final class Check {
         final String title, message, fix, fact;
         final Status status;
+        final boolean software;
 
         Check(String title, Status status, String message, String fix) { this(title, status, message, fix, null); }
 
         /** fact: the requirement's fact key (Req.fact) when the check is one, so a caller can tell what failed without matching titles */
-        Check(String title, Status status, String message, String fix, String fact) {
+        Check(String title, Status status, String message, String fix, String fact) { this(title, status, message, fix, fact, false); }
+
+        Check(String title, Status status, String message, String fix, String fact, boolean software) {
+            this.software = software;
             this.fact = fact;
             this.title = title;
             this.status = status;
@@ -119,6 +123,52 @@ final class Readiness {
         return f;
     }
 
+    /** Last override wins, including an explicit empty value disabling the path. */
+    static String envValue(List<String> env, String key) {
+        String result = null;
+        for (String line : env) {
+            int equal = line.indexOf('=');
+            if (equal > 0 && line.substring(0, equal).trim().equals(key)) result = line.substring(equal + 1).trim();
+        }
+        return result;
+    }
+
+    private static boolean meshRequirement(Req req) {
+        return compare("1", req.min) >= 0 && (req.fact.equals("ext.VK_EXT_mesh_shader") || req.fact.equals("feature.meshShader") || req.fact.equals("feature.taskShader"));
+    }
+
+    /** Checks the selected implementation, without turning its availability into a hardware feature. */
+    private static Check computeMesh(Req req, Map<String, String> f) {
+        String nativeValue = f.getOrDefault(req.fact, "not reported");
+        if (!"1".equals(f.get("mesh.compute.cache")))
+            return new Check(req.title, req.required ? Status.FAIL : Status.WARNING,
+                    "The selected compute mesh cache cannot be used: " + f.getOrDefault("mesh.compute.error", "not verified by this host") + ". Native " + label(req.fact) + " " + nativeValue + ".", null, req.fact);
+        String[][] limits = {{"invocations", "maxComputeWorkGroupInvocations"}, {"localX", "maxComputeWorkGroupSizeX"},
+                {"localY", "maxComputeWorkGroupSizeY"}, {"localZ", "maxComputeWorkGroupSizeZ"}, {"shared", "maxComputeSharedMemorySize"},
+                {"record", "maxStorageBufferRange"}, {"storageDescriptors", "maxPerStageDescriptorStorageBuffers"}, {"uniformDescriptors", "maxPerStageDescriptorUniformBuffers"}};
+        String problem = null;
+        boolean unknown = false;
+        for (String[] pair : limits) {
+            String need = f.get("mesh.compute." + pair[0]), have = f.get("limit." + pair[1]);
+            if (need == null || have == null) { problem = "The compute requirements were not fully checked"; unknown = true; break; }
+            if (compare(have, need) < 0) { problem = pair[1] + " reports " + have + ", needs " + need; break; }
+        }
+        if (problem == null && compare(f.getOrDefault("limit.maxBoundDescriptorSets", "0"), "4") < 0) problem = "Four descriptor sets are required";
+        long operations = (long)num(f.getOrDefault("mesh.compute.subgroupOps", "0"));
+        long available = (long)num(f.getOrDefault("limit.subgroupOperations", "0"));
+        if (problem == null && operations != 0 && (((long)num(f.getOrDefault("limit.subgroupStages", "0")) & 0x20) == 0 || (available & operations) != operations))
+            problem = "Required subgroup operations are unavailable in compute";
+        String[] features = {"shaderInt64", "shaderFloat64", "shaderInt16", "shaderFloat16", "storageBuffer16BitAccess", "storageBuffer8BitAccess"};
+        long mask = (long)num(f.getOrDefault("mesh.compute.features", "0"));
+        for (int bit = 0; problem == null && bit < features.length; bit++)
+            if ((mask & (1L << bit)) != 0 && !"1".equals(f.get("feature." + features[bit]))) problem = "Compute needs " + features[bit];
+        if (problem != null) return new Check(req.title, unknown || !req.required ? Status.WARNING : Status.FAIL,
+                "Selected compute mesh path: " + problem + ". Native " + label(req.fact) + " " + nativeValue + ".", "driver", req.fact);
+        return new Check(req.title, Status.WARNING,
+                "Available through experimental compute/vertex execution with a compatible shader cache (" + f.get("mesh.compute.meshEntries") + " mesh, "
+                        + f.get("mesh.compute.taskEntries") + " task). Native " + label(req.fact) + " " + nativeValue + ". Performance is not yet optimized.", null, req.fact, true);
+    }
+
     /** Checked: the host's needs, then the game's rows. A degraded row of a fact whose required row failed is left out (one message per missing thing) */
     static List<Check> evaluate(Map<String, String> facts, List<Req> game) {
         List<Check> out = new ArrayList<>();
@@ -143,6 +193,15 @@ final class Readiness {
             String key = r.fact + " " + r.min + " " + r.title;
             if (seen.contains(key)) continue;   // the same requirement twice (the host's and a profile's)
             seen.add(key);
+            if (meshRequirement(r) && "1".equals(facts.get("mesh.compute.selected"))) {
+                Check replacement = computeMesh(r, facts);
+                String implementation = "software " + r.title;
+                if (replacement.software && seen.contains(implementation)) continue;
+                if (replacement.software) seen.add(implementation);
+                out.add(replacement);
+                if (replacement.status == Status.FAIL) { failed.add(r.fact); failed.add("title " + r.title); }
+                continue;
+            }
             if ("1".equals(facts.get("memory.fdAlias")) && compare("1", r.min) >= 0 &&
                     (r.fact.equals("ext.VK_EXT_map_memory_placed") || r.fact.equals("feature.memoryMapPlaced") || r.fact.equals("ext.VK_KHR_map_memory2"))) {
                 out.add(new Check(r.title, Status.PASS, "Guest-address memory is available through a tested exported-memory alias (memory.fdAlias=1).", null));
@@ -280,7 +339,7 @@ final class Readiness {
         for (Status st : new Status[] {Status.FAIL, Status.WARNING}) {
             List<Check> m = of(l, st);
             if (m.isEmpty()) continue;
-            s.append("; ").append(st == Status.FAIL ? "missing (required): " : "missing (degraded): ");
+            s.append("; ").append(st == Status.FAIL ? "missing (required): " : "warnings: ");
             for (int i = 0; i < m.size(); i++) s.append(i == 0 ? "" : ", ").append(m.get(i).title);
         }
         return s.toString();

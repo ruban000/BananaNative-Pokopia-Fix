@@ -837,9 +837,23 @@ static int present_one(const pq_item *it) {
     void vka_qhold_add(int k, uint64_t ns); uint64_t th0 = now_ns();
     r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, g_fr[k].fence);
     uint64_t th1 = now_ns();
-    VkResult pr = r ? r : vk.vkQueuePresentKHR(V.q, &pi);
-    vka_qhold_add(0, th1 - th0); vka_qhold_add(1, now_ns() - th1);
-    pthread_mutex_unlock(&V.qmu);
+    VkResult pr = r;
+    if (V.present_q) {
+        // Keep the copy in replay queue order: the next reuse of the game's window texture
+        // relies on that order. The swapchain image crosses queues in the same family via
+        // the existing per-image binary semaphore. WSI can block without holding V.qmu.
+        pthread_mutex_unlock(&V.qmu);
+        if (!r) {
+            pthread_mutex_lock(&V.present_qmu);
+            pr = vk.vkQueuePresentKHR(V.present_q, &pi);
+            pthread_mutex_unlock(&V.present_qmu);
+        }
+    } else {
+        if (!r) pr = vk.vkQueuePresentKHR(V.q, &pi);
+        vka_qhold_add(1, now_ns() - th1);
+        pthread_mutex_unlock(&V.qmu);
+    }
+    vka_qhold_add(0, th1 - th0);
     g_fr[k].held = im;
     if (!r) vka_ctl_shot_done(g_fr[k].fence);
     if (r == VK_ERROR_DEVICE_LOST || pr == VK_ERROR_DEVICE_LOST) vka_device_lost(r ? "the present's submission" : "vkQueuePresentKHR");

@@ -215,6 +215,16 @@ static char g_cap_path[1024];
 static int g_cap_active, g_cap_done, g_cap_failed;
 static uint32_t g_cap_submit, g_cap_cur_submit;
 static uint64_t g_cap_presents;
+static _Atomic int g_cap_requested, g_cap_pending;
+static char g_cap_requested_path[1024];   // written once by the control thread, published by g_cap_pending
+int vka_capture_request(const char *path) {
+    if (!path || !*path || strlen(path) >= sizeof g_cap_requested_path) return 0;
+    int zero = 0;
+    if (!atomic_compare_exchange_strong(&g_cap_requested, &zero, 1)) return 0;
+    strlcpy(g_cap_requested_path, path, sizeof g_cap_requested_path);
+    atomic_store_explicit(&g_cap_pending, 1, memory_order_release);
+    return 1;
+}
 static cap_writer g_cap_w;
 static uint64_t g_cap_gone, g_cap_nostore, g_cap_ns, g_cap_unmapped, g_cap_segs, g_cap_tex_bytes, g_cap_tex_n, g_cap_tex_skip;
 typedef struct { uint64_t lo, size; uint32_t kind, pending; uint64_t *hash; } cap_region;
@@ -587,8 +597,16 @@ void nvn_cap_submit(int n, const uint64_t *h) {
 
 // Hook: nvnQueuePresentTexture, before the present is queued
 void nvn_cap_present(const tex_t *t, const int crop[4]) {
-    if (!nvn_cap_enabled()) return;
     g_cap_presents++;
+    if (atomic_exchange_explicit(&g_cap_pending, 0, memory_order_acquire)) {
+        if (g_cap_active || g_cap_done) CRED("framecapture refused: this process has already started its one capture; restart to capture another frame");
+        else {
+            strlcpy(g_cap_path, g_cap_requested_path, sizeof g_cap_path);
+            g_cap_frame = (int)g_cap_presents + 1; g_cap_at_s = 0;
+            CLOG("framecapture: capturing frame %d (the next one) into %s", g_cap_frame, g_cap_path);
+        }
+    }
+    if (!nvn_cap_enabled()) return;
     if (!g_cap_frame) {   // @seconds: the next frame is the one
         if ((now_ns() - g_t0_ns) / 1e9 >= g_cap_at_s) { g_cap_frame = (int)g_cap_presents + 1; CLOG("%.1f s: capturing frame %d (the next one)", (now_ns() - g_t0_ns) / 1e9, g_cap_frame); }
         return;

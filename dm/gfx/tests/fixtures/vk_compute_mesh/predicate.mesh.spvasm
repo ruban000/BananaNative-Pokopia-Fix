@@ -1,0 +1,67 @@
+; A bypassed predicate spill must not poison an accepting visibility predicate.
+OpCapability Shader
+OpCapability MeshShadingEXT
+OpExtension "SPV_EXT_mesh_shader"
+OpMemoryModel Logical GLSL450
+OpEntryPoint MeshEXT %main "main" %lane %vertices %indices %attributes
+OpExecutionMode %main LocalSize 32 1 1
+OpExecutionMode %main OutputVertices 32
+OpExecutionMode %main OutputPrimitivesEXT 32
+OpExecutionMode %main OutputPoints
+OpDecorate %lane BuiltIn LocalInvocationIndex
+OpMemberDecorate %Vertex 0 BuiltIn Position
+OpDecorate %Vertex Block
+OpDecorate %indices BuiltIn PrimitivePointIndicesEXT
+OpDecorate %attributes Location 0
+OpDecorate %attributes PerPrimitiveEXT
+%void = OpTypeVoid
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%vec4 = OpTypeVector %float 4
+%u0 = OpConstant %uint 0
+%u32 = OpConstant %uint 32
+%f0 = OpConstant %float 0
+%f1 = OpConstant %float 1
+%true = OpConstantTrue %bool
+%Vertex = OpTypeStruct %vec4
+%VertexArray = OpTypeArray %Vertex %u32
+%IndexArray = OpTypeArray %uint %u32
+%AttrArray = OpTypeArray %vec4 %u32
+%InputUint = OpTypePointer Input %uint
+%OutputVertices = OpTypePointer Output %VertexArray
+%OutputIndices = OpTypePointer Output %IndexArray
+%OutputAttributes = OpTypePointer Output %AttrArray
+%OutputVec4 = OpTypePointer Output %vec4
+%OutputUint = OpTypePointer Output %uint
+%FunctionBool = OpTypePointer Function %bool
+%fn = OpTypeFunction %void
+%lane = OpVariable %InputUint Input
+%vertices = OpVariable %OutputVertices Output
+%indices = OpVariable %OutputIndices Output
+%attributes = OpVariable %OutputAttributes Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%partial = OpVariable %FunctionBool Function
+%i = OpLoad %uint %lane
+%first = OpIEqual %bool %i %u0
+OpSelectionMerge %join None
+OpBranchConditional %first %write %join
+%write = OpLabel
+OpStore %partial %true
+OpBranch %join
+%join = OpLabel
+%p = OpLoad %bool %partial
+%accepted = OpLogicalOr %bool %p %true
+%flag = OpSelect %float %accepted %f1 %f0
+OpSetMeshOutputsEXT %u32 %u32
+%pos = OpCompositeConstruct %vec4 %f0 %f0 %f0 %f1
+%attr = OpCompositeConstruct %vec4 %flag %flag %flag %flag
+%vp = OpAccessChain %OutputVec4 %vertices %i %u0
+OpStore %vp %pos
+%ip = OpAccessChain %OutputUint %indices %i
+OpStore %ip %i
+%ap = OpAccessChain %OutputVec4 %attributes %i
+OpStore %ap %attr
+OpReturn
+OpFunctionEnd

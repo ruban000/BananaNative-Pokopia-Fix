@@ -222,6 +222,10 @@ static void pace_cost(uint64_t f, double nf, uint64_t draws, double rec_ms) {
                  "encoder calls ms (count): %s; %s", (unsigned long long)f, rec_ms, dms, pms, bms, sms, jms, ims, bms - sms - jms, cms, (ce - ce0) / 1e6 / nf, (cu - cu0) / 1e6 / nf, (cs - cs0) / 1e6 / nf,
                  rec_ms - dms - pms - bms - cms, (qn - qn0) / nf, (ql - ql0) / 1e6 / nf, (qc - qc0) / 1e6 / nf,
                  (qh[0] - qh0[0] + qh[1] - qh0[1]) / 1e6 / nf, (qh[0] - qh0[0]) / 1e6 / nf, (qh[1] - qh0[1]) / 1e6 / nf, (qh[2] - qh0[2]) / 1e6 / nf, rs, es, ep[0] ? ep : "none", dp[0] ? dp : "no draws timed");
+    static uint64_t mi0, mw0, mt0, ms0; uint64_t mi, mw, mt, ms; vka_mesh_indirect_stats(&mi, &mw, &mt, &ms);
+    if (nf && (mi > mi0 || ms > ms0)) VLOG("compute mesh per frame: %.1f indirect records, %.1f readback waits (%.1f ms), %.1f GPU-scheduled task draws",
+                                         (mi - mi0) / nf, (mw - mw0) / nf, (mt - mt0) / 1e6 / nf, (ms - ms0) / nf);
+    mi0 = mi; mw0 = mw; mt0 = mt; ms0 = ms;
     rtid = rt; etid = et; if (rok) r0 = r1; if (eok) e0 = e1; b0 = bg; p0 = pr; c0 = cm; sl0 = sl; jn0 = jn; ji0 = ji; ce0 = ce; cu0 = cu; cs0 = cs; ql0 = ql; qc0 = qc; qn0 = qn; for (int i = 0; i < 4; i++) qh0[i] = qh[i];
 }
 static void pace_tick(double period_s) {

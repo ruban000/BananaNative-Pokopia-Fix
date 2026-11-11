@@ -234,6 +234,16 @@ def header(g):
         if len(r) != 1 or not re.fullmatch(r'[0-9a-f]{16}', r[0]): sys.exit(f'{g.id}: subgroup_one_lane takes one shader key of 16 lowercase hex digits: {r}')
         sol.append(f'0x{r[0]}ull')
     if len(sol) > 16: sys.exit(f'{g.id}: subgroup_one_lane: at most 16 keys')
+    task_domains = []
+    task_keys = set()
+    for r in g.values('mesh_task_domain'):
+        if (len(r) != 3 or not re.fullmatch(r'[0-9a-f]{16}', r[0]) or
+                not re.fullmatch(r'[0-9a-f]{64}', r[1]) or not re.fullmatch(r'[0-9]{1,5}', r[2]) or
+                not 0 < int(r[2]) <= 65536 or r[0] in task_keys):
+            sys.exit(f'{g.id}: mesh_task_domain takes <task key> <sidecar SHA-256> <exclusive workgroup ID limit>: {r}')
+        task_keys.add(r[0])
+        digest = ''.join(f'\\x{b:02x}' for b in bytes.fromhex(r[1]))
+        task_domains.append(f'{{0x{r[0]}ull, "{digest}", {int(r[2])}}}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -289,6 +299,7 @@ def header(g):
          '#define DM_GAME_MESH_VEGETATION_CUT {' + (', '.join(f'0x{k}ull' for k in vegetation) or '0') + '}',
          f'#define DM_GAME_NMESH_VEGETATION_CUT {len(vegetation)}',
          '#define DM_GAME_MESH_PREPASS_CUT {' + (', '.join(mpc) or '{0, 0}') + '}', f'#define DM_GAME_NMESH_PREPASS_CUT {len(mpc)}',
+         '#define DM_GAME_MESH_TASK_DOMAIN {' + (', '.join(task_domains) or '{0, "", 0}') + '}', f'#define DM_GAME_NMESH_TASK_DOMAIN {len(task_domains)}',
 
          '#define DM_GAME_FPS_STEPS {' + (', '.join(fst) or '{"", 0, 0, 0, 0, {0}}') + '}', f'#define DM_GAME_NFPS_STEPS {len(fst)}',
          f'#define DM_GAME_DRS_CTL {{{", ".join(drs) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NDRS_CTL {len(drs)}',

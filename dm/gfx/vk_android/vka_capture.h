@@ -10,6 +10,9 @@
 
 #define VCAP_IFACE 101   // header key iface: what vcap_iface hashes (the Mac's cap_iface is 2)
 
+// DM_CTL "framecapture <path>": queue this process's one full-frame capture for the next present boundary, after the player has reached the scene.
+int vka_capture_request(const char *path);
+
 // One-off GPU work outside the submissions (texture contents in and out): a command buffer of its own, submitted on the queue and waited for
 VkCommandBuffer vcap_cb_begin(void);
 int vcap_cb_run(VkCommandBuffer cb);   // 1 = done

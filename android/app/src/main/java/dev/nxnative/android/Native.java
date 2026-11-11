@@ -110,9 +110,12 @@ final class Native {
      *  the frame limit holds (0 = none; a game that steps in whole vsyncs holds 60, 30 or 20: 45 and 40 run at 30); "-1 0 0" without a cap in the host. rates 0: the game picks its own frame rate */
     static native String fpsCapStatus();
 
-    /** The readiness check's Vulkan facts ("key=value" lines, nxhost_vk_readiness) on the driver env names (DM_VK_DRIVER / DM_VK_HOOKDIR; the other keys are not set);
+    /** The readiness check's Vulkan facts ("key=value" lines, nxhost_vk_readiness) with the game environment overrides (including the driver pick);
      *  null when this host has no such entry point. Before start: the driver is opened once per process, and the host's replay gets the same one */
     static native String readiness(String[] env);
+
+    /** Compatible task/mesh sidecars for one pack, independently of the GPU feature report. */
+    static native String meshCache(String library, String cache, String titleId);
 
     /** Sends stdout / stderr to logPath (and logcat), without starting the host: for the selftest. 0 = done. */
     static native int openLog(String logPath);

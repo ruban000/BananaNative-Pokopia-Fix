@@ -28,6 +28,7 @@ static struct { uint64_t fence, signal; int final; } g_commit[64]; static int g_
 static uint32_t g_effects[256]; static int g_neffects;                   // signals' values in the order they are posted with a signal
 static uint32_t g_pend[64][16]; static uint64_t g_pend_f[64]; static int g_pend_n[64], g_npend;   // effects of unsignalled commits (vka_exec.c carry)
 static int g_timeouts;
+static int g_yield_signals;
 static const uint8_t *g_xret[QS_NRET]; static int g_nxret;
 static uint32_t g_cur_eff[16]; static int g_ncur_eff;
 
@@ -37,7 +38,8 @@ static int t_exec(const uint8_t *p, int depth, qs_cont *out) {
         switch (h.op) {
         case T_END: return 0;
         case T_WORK: { uint32_t id; memcpy(&id, a, 4); g_order[g_norder++] = id; break; }
-        case T_SIGNAL: { struct { volatile uint32_t *w; uint32_t m, v; } e; memcpy(&e, a, sizeof e); g_cur_eff[g_ncur_eff++] = e.v; qs_event_replayed(&sc, e.w, e.m, e.v); break; }
+        case T_SIGNAL: { struct { volatile uint32_t *w; uint32_t m, v; } e; memcpy(&e, a, sizeof e); g_cur_eff[g_ncur_eff++] = e.v; qs_event_replayed(&sc, e.w, e.m, e.v);
+            if (g_yield_signals && qs_yield_event(&sc, e.w)) { out->p = p + h.size; out->nret = g_nxret; memcpy(out->ret, g_xret, sizeof(g_xret[0]) * (size_t)g_nxret); return 1; } break; }
         case T_WAIT: { struct { volatile uint32_t *w; uint32_t m, v; } e; memcpy(&e, a, sizeof e);
             if (!qs_wait_event(&sc, e.w, e.m, e.v)) { out->p = p + h.size; out->nret = g_nxret; memcpy(out->ret, g_xret, sizeof(g_xret[0]) * (size_t)g_nxret); return 1; } break; }
         case T_WSYNC: if (!qs_wait_sync(&sc, p)) { out->p = p + h.size; out->nret = g_nxret; memcpy(out->ret, g_xret, sizeof(g_xret[0]) * (size_t)g_nxret); return 1; } break;
@@ -83,6 +85,7 @@ static void reset(void) {
     qs_ev_free(&sc); memset(&sc, 0, sizeof sc);
     sc.run = t_run; sc.done = t_done; sc.now = t_now; sc.timeout = t_timeout; sc.park_ns = 200000000;
     g_done = g_now = g_want = 0; g_norder = g_ncommit = g_neffects = g_npend = g_timeouts = g_ncur_eff = 0;
+    g_yield_signals = 0;
 }
 static uint64_t g_fence;
 static void submit(uint64_t serial, int n, const list_t *const *l, qs_wsnap *ws, int nws) {
@@ -386,8 +389,67 @@ static void test_pass_sources(void) {
     CHECK(sc.n_park == 1 && sc.n_release == 1 && sc.n_pass_old + sc.n_pass_queued + sc.n_pass_mem == n0, "a park and its release are not a wait held at once");
     reset();
 }
+static void test_ordered_readback(void) {
+    reset();
+    volatile uint32_t event = 0, host = 7;
+    qs_sub producer = {.fence = 2, .frame = 3};
+    qs_sub consumer = {.fence = 1, .frame = 3};
+    uint64_t fence = 0;
+
+    sc.cur = &producer;
+    qs_event_replayed(&sc, &event, 0, 7);
+    CHECK(qs_wait_event_ordered(&sc, &event, 0, 7, &fence) && !fence,
+          "a signal from the current submission cannot authorize a read across its wait");
+    sc.cur = &consumer;
+    CHECK(qs_signal_predecessor(&sc, &event, 0, 7, qs_ev_value(&sc, &event)) == 2,
+          "look-ahead sees the same-frame producer already replayed even with a later fence number");
+    CHECK(qs_wait_event_ordered(&sc, &event, 0, 7, &fence) && fence == 2,
+          "the actual wait confirms the same producer");
+    CHECK(qs_wait_event_ordered(&sc, &host, 0, 7, &fence) && !fence,
+          "a wait satisfied only by memory cannot authorize reuse");
+    consumer.frame++;
+    CHECK(qs_wait_event_ordered(&sc, &event, 0, 7, &fence) && !fence,
+          "an earlier frame's signal cannot authorize reuse");
+    consumer.frame--;
+
+    g_done = producer.fence;
+    event = 7;
+    CHECK(qs_wait_event_ordered(&sc, &event, 0, 7, &fence) && fence == 2,
+          "a completed producer with its value in memory still precedes the wait");
+    event = 8;
+    CHECK(qs_wait_event_ordered(&sc, &event, 1, 7, &fence) && !fence,
+          "a changed memory value cannot confirm the proof even if the predicate holds");
+    CHECK(!qs_wait_event_ordered(&sc, &event, 0, 7, &fence) && !fence,
+          "a parked wait cannot authorize reuse");
+    sc.force = 1;
+    CHECK(qs_wait_event_ordered(&sc, &event, 0, 7, &fence) && !fence,
+          "a forced wait cannot authorize reuse");
+    reset();
+}
+static void test_early_signal_yield(void) {
+    volatile uint32_t start = 0, finish = 0;
+    list_t compute = {0}, graphics = {0};
+    ev(&compute, T_WAIT, &start, 0, 1); work(&compute, 2);
+    ev(&compute, T_WAIT, &finish, 0, 2); work(&compute, 4); end(&compute);
+    work(&graphics, 1); ev(&graphics, T_SIGNAL, &start, 0, 1);
+    work(&graphics, 3); ev(&graphics, T_SIGNAL, &finish, 0, 2); end(&graphics);
+
+    reset(); g_fence = 0; g_yield_signals = 1;
+    submit_fr(5, 3, &compute); submit_fr(1, 3, &graphics);
+    static const uint32_t early[] = {1, 2, 3, 4};
+    CHECK(order_is(early, 4), "the early signal lets compute run to its next wait before the graphics suffix");
+    CHECK(!qs_parked(&sc) && sc.lo == 2 && sc.sig == 2, "both queues complete through the original timeline");
+    CHECK(sc.n_park == 2 && sc.n_release == 2, "only the two guest waits count as parks");
+    CHECK(g_neffects == 2 && g_effects[0] == 1 && g_effects[1] == 2, "the two signal values land in order");
+
+    reset(); g_fence = 0; g_yield_signals = 1;
+    submit_fr(5, 2, &compute); submit_fr(1, 3, &graphics);
+    static const uint32_t normal[] = {1, 3, 2, 4};
+    CHECK(order_is(normal, 4) && !qs_parked(&sc), "a wait from a different frame keeps the original submission order");
+    reset();
+}
 int main(void) {
-    test_many_words(); test_pred(); test_wait_event(); test_whole(); test_queued_values(); test_backlog(); test_nested(); test_wait_sync(); test_valves(); test_pingpong(); test_gate(); test_pass_sources();
+    test_many_words(); test_pred(); test_wait_event(); test_whole(); test_queued_values(); test_backlog(); test_nested(); test_wait_sync(); test_valves(); test_pingpong(); test_gate(); test_pass_sources(); test_ordered_readback(); test_early_signal_yield();
     if (g_fail) { printf("t_android_qsched: %d FAILED\n", g_fail); return 1; }
     printf("PASS: GPU waits across NVN queues (vka_qsched.h): parks, producers, predicates, syncs, signals, valves, gates\n");
     return 0;

@@ -35,6 +35,8 @@ sys_resource	0x3000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /UI/=layout
 shader_note	Ocarina of Time shaders
+# Foliage task groups outside [0,4096) emit zero and have no guest side effects.
+mesh_task_domain	99280b7b8aae78df	d9443e5fea932c3b153396c2309c584dfcc94b581704e79292d9180a37c2c171	4096
 
 # ---- Frame rate ----
 # Android: the host's frame limiter's default is 60 fps, the game's own top rate (the launcher's Frame rate cap, 60 / 45 / 40 / 30 / 20, and DM_FPS_LIMIT override it). Until

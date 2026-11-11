@@ -6,6 +6,8 @@
 // so the next start builds from it. Layouts follow dmsh_abi_vk.h: set 0 the per-draw records of every stage (push descriptors when they fit), set 1 the pools (vka_tex.c)
 #if defined(__ANDROID__)
 #include "vka.h"
+#include "vka_mesh.h"
+#include "vk_mesh_cache_gen.h"
 #include "vka_pwlist.h"
 #include "vka_psogate.h"
 #include "vk_prewarm_seed.h"   // the profile's seed list (dm/games/<id>/vk_prewarm.bin; dm/games/game.py seed): dm_vk_prewarm_seed, dm_vk_prewarm_seed_len (0: none)
@@ -61,7 +63,7 @@ static VkShaderStageFlags stage_bit(int vks) {
     return vks >= 0 && vks < 8 ? b[vks] : 0;
 }
 enum { MAXB = 6 * DMSH_VK_STAGE_BINDINGS };   // (task and mesh shaders take the tess control and vertex ranges: dmsh_abi_vk.h)
-typedef struct { uint32_t n; struct { uint16_t binding; uint8_t desc, pad; uint16_t count; uint16_t stages; } b[MAXB]; } lkey;
+typedef struct { uint32_t n, mesh_aux; struct { uint16_t binding; uint8_t desc, pad; uint16_t count; uint16_t stages; } b[MAXB]; } lkey;
 static kmap g_layouts = {.klen = sizeof(lkey)};
 static uint64_t g_nlayouts;
 
@@ -92,6 +94,7 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
     for (int st = 0; st < VKA_NSTAGE; st++) {
         const vka_shader *s = sh[st];
         if (!s || (st == 5) != (compute != 0)) continue;
+        k.mesh_aux |= s->emulated != 0;
         for (unsigned i = 0; i < s->e->bind_count; i++) {
             const dmsh_vk_bind *b = &s->b[i];
             if (b->set != DMSH_VK_SET_DRAW || b->kind == DMSH_VK_KIND_TEX_POOL || b->kind == DMSH_VK_KIND_SAMP_POOL) continue;
@@ -118,8 +121,9 @@ static int layout_slow(vka_shader *const sh[VKA_NSTAGE], int compute, vka_layout
     free(lb);
     if (!r) {
         // set 1 the pool (bindless tables), set 2 the pool reads' bitmap when they are reported (vka_tex.c "Texture pool reads")
-        VkDescriptorSetLayout sets[3] = {L->set0, vka_bindless_layout(), vka_pfb_layout()};
-        VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = !sets[1] ? 1 : sets[2] ? 3 : 2, .pSetLayouts = sets};
+        VkDescriptorSetLayout sets[4] = {L->set0, vka_bindless_layout(), vka_pfb_layout(), k.mesh_aux ? vka_mesh_set_layout() : VK_NULL_HANDLE};
+        if (k.mesh_aux) vka_mesh_pad_layouts(sets);
+        VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = k.mesh_aux ? 4 : !sets[1] ? 1 : sets[2] ? 3 : 2, .pSetLayouts = sets};
         r = vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &L->layout);
     }
     if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("pipeline layout of %u bindings (%u descriptors): %d", k.n, ndesc, r); L->layout = VK_NULL_HANDLE; }
@@ -163,7 +167,11 @@ static void pc_open_once(void) {
     else if (e && *e) snprintf(g_pc_path, sizeof g_pc_path, "%s", e);
     else if ((t && *t) || (home && *home)) {   // a custom driver (DM_VK_DRIVER) keeps its own file, so switching drivers leaves the system driver's cache alone
         const char *dt = vka_driver_tag(), *dir = t && *t ? t : home;
-        vka_pcache_name(g_pc_path, sizeof g_pc_path, dir, dt, VKA_PCACHE_GEN);
+        // Experimental compute modules have their own chain, independent of the
+        // native library stamp. Do not accumulate their old driver binaries in
+        // the native cache (some drivers deserialize every cached shader).
+        char generation[80]; snprintf(generation, sizeof generation, "%s-cm-%s", VKA_PCACHE_GEN, VKA_MESH_CACHE_CHAIN);
+        vka_pcache_name(g_pc_path, sizeof g_pc_path, dir, dt, vka_mesh_enabled() ? generation : VKA_PCACHE_GEN);
         char old[1024], olds[1100]; vka_pcache_name(old, sizeof old, dir, dt, "");   // the generation before: never read again
         snprintf(olds, sizeof olds, "%s.lib", old);
         if (!unlink(old)) VLOG("pipeline cache %s of the generation before " VKA_PCACHE_GEN " (compiled with the game's FPCR) removed", old);
@@ -355,6 +363,7 @@ static void fout_masks(const vka_shader *fs, const vka_gkey *k, uint32_t *um, ui
 // 0 = a stage's module is missing (logged by vka_shader_module)
 static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k) {
     memset(P, 0, sizeof *P);
+    if (sh[7] && sh[7]->emulated) return 0;
     memcpy(P->sh, sh, sizeof P->sh);
     // Stages: vertex, tess control, tess evaluation, geometry, fragment; the GL depth constant on the last of the first four. A mesh pipeline (NVN2 task and mesh programs,
     // nvnCommandBufferDrawMeshTasks): task (optional), mesh, fragment, the GL depth constant on the mesh stage; it has no vertex input or input assembly state
@@ -1116,6 +1125,9 @@ static void *pw_main(void *a) {
             for (int s = 0; s < 5; s++) if (r.key[s] && vka_shader_variant_key(r.key[s])) bad = 2;   // an older list's instanced variant: dropped quietly
             for (int s = 0; s < 5 && !bad; s++) if (r.key[s] && !(sh[s] = vka_shader_by_key(r.key[s]))) bad = 1;
         }
+        // Native mesh prewarm records describe a different pipeline. Their
+        // generated-vertex and compute counterparts are made on the fallback path.
+        if (!bad && r.kind == VKA_PW_MESH && sh[7] && sh[7]->emulated) continue;
         vka_layout lay;
         if (!bad && !vka_layout_of(sh, r.kind == VKA_PW_CS, &lay)) bad = 1;
         int skip = 0;   // an instanced run's pipeline with instancing off: not made, kept in the list
@@ -1426,6 +1438,22 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, int prewarm, 
     if (!prewarm && !over && !(umask | smask)) { vka_shader *s5[5] = {cs, NULL, NULL, NULL, NULL}; pw_note(VKA_PW_CS, s5, "", 0); }   // (one not made stays out of the prewarm list)
     *made = 1;
     return p;
+}
+VkResult vka_mesh_create_pipeline(const VkComputePipelineCreateInfo *ci, uint64_t key, VkPipeline *out) {
+    pc_open(); uint64_t t0 = now_ns(); int bs = build_begin("compute mesh pipeline", key, 0);
+    VkResult r = vk.vkCreateComputePipelines(V.dev, g_pc, 1, ci, NULL, out); build_end(bs);
+    uint64_t ns = now_ns() - t0;
+    pthread_mutex_lock(&g_mu);
+    if (r) g_nfail++; else { g_ncs++; g_made++; g_frame_made++; }
+    g_create_ms += ns / 1e6; g_create_ns += ns;
+    pthread_mutex_unlock(&g_mu);
+    VLOG("compute mesh pipeline %016llx: %.1f ms, result %d", (unsigned long long)key, ns / 1e6, r);
+    // This path compiles synchronously for the current draw. A cold frame can
+    // finish many pipelines before presenting; each completion is real progress.
+    // A single stalled compile still receives no heartbeat and hits the watchdog.
+    if (!r) { void crash_watch_work(void); crash_watch_work(); }
+    if (!r && ns > 1000000000ull) vka_pso_save(2);
+    return r;
 }
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay) { int made; return cs_obtain(cs, lay, 0, &made, 0, 0); }
 VkPipeline vka_cs_pipeline_img(vka_shader *cs, const vka_layout *lay, uint64_t umask, uint64_t smask) { int made; return cs_obtain(cs, lay, 0, &made, umask, smask); }

@@ -33,6 +33,7 @@
 #include <string.h>
 
 enum { QS_NRET = 17, QS_NQ = 16, QS_NMARK = 256, QS_NDEF = 64, QS_NEV0 = 256, QS_DEFER_MAX = 32, QS_BACKLOG_MAX = 256, QS_NGW = 32, QS_GATE_LEARN = 2 };
+enum { QS_WAIT_REPLAY = 3 };
 enum { QS_WHY_PRESENT, QS_WHY_FORGET, QS_WHY_CPU_WAIT, QS_WHY_SLOTS, QS_WHY_BACKLOG, QS_WHY_TIMEOUT, QS_WHY_PROG, QS_NWHY };
 static const char *const qs_why_name[QS_NWHY] = {"present", "queue finalized", "CPU wait", "command buffers", "backlog", "park time", "program finalized"};
 
@@ -42,12 +43,13 @@ typedef struct { const uint8_t *rec; uint64_t fence; } qs_wsnap;   // a WAIT_SYN
 
 typedef struct qs_sub {
     struct qs_sub *next;
-    uint64_t serial, fence, frame, seq; int origin_ll;   // fence 0: a queue-level wait (wait_fence), no commands
+    uint64_t serial, fence, frame, seq, turn; int origin_ll;   // fence 0: a queue-level wait (wait_fence), no commands
     const uint8_t **h; int nh;                            // the command handles (owned: freed with the submission)
     qs_wsnap *ws; int nws, wsi;                           // its WAIT_SYNC snapshots in replay order (owned), the next one
     uint64_t wait_fence;                                  // nvnQueueWaitSync: the fence its queue's later work waits for
     int hi, resumed; qs_cont cont;                        // replay goes on at handle hi (at cont when resumed)
-    int wkind; volatile uint32_t *word; uint32_t mode, value; uint64_t wfence, t_park;   // the wait it is parked at: 1 event, 2 fence
+    int wkind; volatile uint32_t *word; uint32_t mode, value; uint64_t wfence, t_park;   // 1 event, 2 fence, 3 let another queue replay
+    uint64_t yield_turn;                                 // resume after the signalled queue has had one more replay turn
     int w0kind; volatile uint32_t *w0word; uint32_t w0mode, w0value; uint64_t w0fence;   // its first wait when no event signal comes before it (1 event, 2 sync; 0 none): asked before replay
     volatile uint32_t *gword; uint32_t gmode, gvalue;                                    // the wait it was gated at last (asked again when the replay reaches it: passes)
     const volatile uint32_t *aword; uint32_t amode, avalue;                              // the wait asked last (a second ask of the same wait, after its park or before the replay, is not counted again)
@@ -63,7 +65,7 @@ typedef struct qs {
     uint64_t def[QS_NDEF]; int ndef;          // fences of the commits no signal covers yet (one per commit)
     qs_ev *ev; uint32_t evcap, nev, evpeak;   // the words a replayed signal is in flight for: open addressing by word, no deletions (stale entries go at a rebuild); evpeak: the most in flight at a commit (qs_commit)
     qs_gw gw[QS_NGW]; int ngw, ngw_next;
-    int force; uint64_t seq;
+    int force; uint64_t seq, turn;
     qs_sub *cur;                              // the submission being replayed (qs_wait_* and qs_event_replayed refer to it)
     // The replay: run replays s from its start or its continuation, commits it with qs_commit's signal and returns 1 when it parked (qs_wait_* said no), 0 when done
     int (*run)(void *ctx, qs_sub *s);
@@ -188,12 +190,24 @@ static inline void qs_event_replayed(qs *sc, volatile uint32_t *w, uint32_t mode
 // A CPU thread that waits for a fence a park holds back does not pass the wait here: its producer may already be on its way (Ocarina of Time's queues 1 and 5 hand
 // each other events within one frame while the game already waits for queue 1's fence), and passing it ran the consumer before its producer (issue #98: whole frames
 // dark while walking, 2026-11-10). The worker releases the parks only when it cannot go on otherwise (vka_worker.c qs_step)
-static inline int qs_wait_event(qs *sc, volatile uint32_t *w, uint32_t mode, uint32_t value) {
+// A signal from a previous replay of this frame already precedes the current
+// segment on the Vulkan queue. Its value must also satisfy this exact wait.
+static inline uint64_t qs_signal_predecessor(qs *sc, volatile uint32_t *w, uint32_t mode, uint32_t value, uint32_t seen) {
+    if (!sc->cur || sc->force || !qs_pred(seen, mode, value)) return 0;
+    const qs_ev *e = qs_ev_find(sc, w);
+    if (!e || e->fence == sc->cur->fence || e->frame != sc->cur->frame || e->value != seen) return 0;
+    return e->fence;
+}
+
+static inline int qs_wait_event_ordered(qs *sc, volatile uint32_t *w, uint32_t mode, uint32_t value, uint64_t *producer) {
     qs_sub *s = sc->cur;
+    if (producer) *producer = 0;
     if (!s || sc->force) return 1;
     int again = s->aword == w && s->amode == mode && s->avalue == value;   // asked before (parked there, or passed as its first wait before the replay)
     s->aword = w; s->amode = mode; s->avalue = value;
-    if (qs_pred(qs_ev_value(sc, w), mode, value)) {
+    uint32_t seen = qs_ev_value(sc, w);
+    if (qs_pred(seen, mode, value)) {
+        if (producer) *producer = qs_signal_predecessor(sc, w, mode, value, seen);
         if (!again) {   // held at once: by whom (the stats line; DM_VK_QS_TRACE)
             qs_ev *e = qs_ev_find(sc, w); int queued = e && e->fence > sc->done(sc->ctx);
             int src = queued ? (e->frame < s->frame ? 2 : 1) : 3;
@@ -210,6 +224,9 @@ static inline int qs_wait_event(qs *sc, volatile uint32_t *w, uint32_t mode, uin
     }
     s->wkind = 1; s->word = w; s->mode = mode; s->value = value; s->t_park = sc->now(sc->ctx);
     return 0;
+}
+static inline int qs_wait_event(qs *sc, volatile uint32_t *w, uint32_t mode, uint32_t value) {
+    return qs_wait_event_ordered(sc, w, mode, value, NULL);
 }
 static inline int qs_fence_wait(qs *sc, uint64_t f) {
     qs_sub *s = sc->cur;
@@ -228,7 +245,29 @@ static inline int qs_wait_sync(qs *sc, const uint8_t *rec) {
 static inline int qs_released(qs *sc, const qs_sub *s) {   // the wait s is parked at holds now
     if (s->wkind == 1) return qs_pred(qs_ev_value(sc, s->word), s->mode, s->value);
     if (s->wkind == 2) return qs_whole(sc, s->wfence);
+    if (s->wkind == QS_WAIT_REPLAY)
+        for (int i = 0; i < sc->nq; i++)
+            if (sc->q[i].head && sc->q[i].head->turn == s->yield_turn) return 0;
     return 1;
+}
+// A signal at the start of a submission can unblock a different queue before
+// the current submission reaches its next wait. Finish the current prefix,
+// then let that queue make progress. A new turn includes a cut at its next wait.
+static inline uint64_t qs_yield_event(qs *sc, const volatile uint32_t *word) {
+    qs_sub *s = sc->cur;
+    if (!s || sc->force || s->hi || s->resumed) return 0;
+    const qs_ev *event = qs_ev_find(sc, word);
+    if (!event || event->fence != s->fence) return 0;
+    for (int i = 0; i < sc->nq; i++) {
+        const qs_sub *other = sc->q[i].head;
+        if (!other || other->serial == s->serial || other->frame != s->frame ||
+            other->wkind != 1 || other->word != word || !qs_pred(event->value, other->mode, other->value)) continue;
+        s->wkind = QS_WAIT_REPLAY;
+        s->yield_turn = other->turn;
+        s->t_park = sc->now(sc->ctx);
+        return other->fence;
+    }
+    return 0;
 }
 
 // ---------- Scheduling ----------
@@ -246,13 +285,18 @@ static inline int qs_room(qs *sc) { if (sc->force || sc->ndef < QS_DEFER_MAX) re
 // Replays s (nothing of its queue is parked ahead of it): 1 when it parked and became its queue's head
 static inline int qs_run_one(qs *sc, qs_queue *q, qs_sub *s) {
     sc->cur = s; s->wkind = 0;
+    s->turn = ++sc->turn;
     int parked = 0;
     if (!s->fence) parked = !qs_fence_wait(sc, s->wait_fence);   // a queue-level wait: nothing to replay
     else if (!s->hi && !s->resumed && s->w0kind && !sc->force &&
              !(s->w0kind == 1 ? qs_wait_event(sc, s->w0word, s->w0mode, s->w0value) : qs_fence_wait(sc, s->w0fence))) { parked = 1; sc->n_whole++; }   // parked whole: no cut, no commit
     else parked = sc->run(sc->ctx, s);
     sc->cur = NULL;
-    if (parked) { s->next = q->head; q->head = s; if (!q->tail) q->tail = s; q->n++; sc->n_park++; if (sc->note) sc->note(sc->ctx, 0, s); return 1; }
+    if (parked) {
+        s->next = q->head; q->head = s; if (!q->tail) q->tail = s; q->n++;
+        if (s->wkind != QS_WAIT_REPLAY) { sc->n_park++; if (sc->note) sc->note(sc->ctx, 0, s); }
+        return 1;
+    }
     qs_free(s); return 0;
 }
 // Replays q's parked head and the submissions behind it until one parks again or none is left
@@ -285,7 +329,7 @@ static inline int qs_poll(qs *sc) {
         for (int i = 0; i < sc->nq; i++) {
             qs_queue *q = &sc->q[i]; qs_sub *s = q->head; if (!s) continue;
             int ok = qs_released(sc, s);
-            if (!ok && sc->park_ns && sc->now(sc->ctx) - s->t_park > sc->park_ns) {
+            if (!ok && s->wkind != QS_WAIT_REPLAY && sc->park_ns && sc->now(sc->ctx) - s->t_park > sc->park_ns) {
                 if (!qs_room(sc)) { n++; moved = 1; continue; }
                 if (sc->timeout) sc->timeout(sc->ctx, s);
                 if (s->wkind == 1) qs_gw_note(sc, s->word, 0);
@@ -298,8 +342,8 @@ static inline int qs_poll(qs *sc) {
             }
             if (!ok) continue;
             if (s->wkind == 1) qs_gw_note(sc, s->word, !qs_ev_inflight(sc, s->word));
-            sc->n_release++; n++; moved = 1;
-            if (sc->note) sc->note(sc->ctx, 1, s);
+            n++; moved = 1;
+            if (s->wkind != QS_WAIT_REPLAY) { sc->n_release++; if (sc->note) sc->note(sc->ctx, 1, s); }
             qs_drain_queue(sc, q);
         }
     }

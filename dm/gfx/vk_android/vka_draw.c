@@ -7,11 +7,16 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "vka_skipwarn.h"
+#include "vka_mesh.h"
 #include "vka_gmem.h"
+#include "vka_page_index.h"
 #include "../nvn/nvn_mtl.h"
 #include "../../host/plat/plat.h"
 #include "vka_gml.h"
+#include "vka_statecopy.h"
+#include "vka_mesh_prepare.h"
 #include "game_profile.h"
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -22,6 +27,7 @@
 static VkCommandBuffer g_cb; static unsigned g_slot; static int g_prof, g_dyn_filter = 1, g_pass_keep = 1, g_vb_filter = 1;   // g_prof: this draw is timed (vka_draw)
 static int g_prof_all, g_prof_every;   // DM_VK_PROF: every draw timed; the pace line's sample (DM_VK_PACE_PROF): one draw in g_prof_every
 static int g_vin_skip = 1;             // DM_VK_VIN_SKIP (vin_build_kept)
+static int g_state_filter;            // DM_VK_STATE_FILTER: exact inline vertex-state comparison, experimental
 static int g_inst_on;   // DM_VK_INSTANCE (the instanced runs below)
 static int g_vattr_clear = 1;   // DM_VK_VATTR_CLEAR: a BindVertexAttribState replaces the whole attribute state, as the Metal backend does (S.nattr = b->n);
                                 // 0 = the old merge, where the attributes past its count keep the earlier binds' formats and offsets
@@ -77,16 +83,16 @@ int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
         case 5: memcpy(&d->ds, b->bytes, sizeof d->ds); break;
         }
         break; }
-    case OP_BIND_VATTR: { const p_bind_vattr *b = a; d->s_vfmt = vka_stamp();
+    case OP_BIND_VATTR: { const p_bind_vattr *b = a;
         // The bind replaces the attribute state, as the Metal backend does (S.nattr = b->n): shader inputs past its count read the zero buffer (vin_build).
         // Merging kept the attributes past the count from earlier binds, so such an input read another mesh's format and offset from this mesh's stream.
-        if (b->first >= 0 && b->first + b->n <= 16) {
-            if (g_vattr_clear) { memset(d->attr, 0, sizeof d->attr); d->nattr = 0; }
-            memcpy(&d->attr[b->first], b->st, 4 * (size_t)b->n); if (b->first + b->n > d->nattr) d->nattr = b->first + b->n;
-        }
+        if (vka_state_copy(d->attr, b->st, sizeof *d->attr, 16, b->first, b->n,
+                           g_vattr_clear, &d->nattr, g_state_filter)) d->s_vfmt = vka_stamp();
         break; }
-    case OP_BIND_VSTREAM: { const p_bind_vstream *b = a; d->s_vfmt = vka_stamp(); if (b->first >= 0 && b->first + b->n <= 16) { memcpy(&d->stream[b->first], b->st, 8 * (size_t)b->n); if (b->first + b->n > d->nstream) d->nstream = b->first + b->n; } break; }
-    case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); d->s_vbuf = vka_stamp(); if (b->first >= 0 && b->first + b->n <= 16) memcpy(&d->vbuf[b->first], b->r, sizeof *b->r * (size_t)b->n); break; }
+    case OP_BIND_VSTREAM: { const p_bind_vstream *b = a;
+        if (vka_state_copy(d->stream, b->st, sizeof *d->stream, 16, b->first, b->n, 0, &d->nstream, g_state_filter)) d->s_vfmt = vka_stamp(); break; }
+    case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp);
+        if (vka_state_copy(d->vbuf, b->r, sizeof *b->r, 16, b->first, b->n, 0, NULL, g_state_filter)) d->s_vbuf = vka_stamp(); break; }
     case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage >= 0 && b->stage < VKA_NSTAGE && b->index >= 0 && b->index < 16) { d->ubo_dirty[b->stage] |= 1u << b->index; d->b.ubo[b->stage][b->index] = (vka_range){b->addr, b->size}; } break; }
     case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage >= 0 && b->stage < VKA_NSTAGE && b->index >= 0 && b->index < 16) { d->b.ssbo[b->stage][b->index] = (vka_range){b->addr, b->size}; d->s_ssbo[b->stage] = vka_stamp(); } break; }
     case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(op, a, &t1);
@@ -132,21 +138,24 @@ static int statics(void) {
 }
 
 // ---------- Descriptor sets that do not fit a push (per submission slot) ----------
-enum { NSLOT = 8, MAXPOOLS = 64 };
-static VkDescriptorPool g_dp[NSLOT][MAXPOOLS]; static int g_ndp[NSLOT], g_cur_dp[NSLOT];
+enum { MAXPOOLS = 64 };
+static VkDescriptorPool g_dp[VKA_SUB_SLOTS_MAX][MAXPOOLS]; static int g_ndp[VKA_SUB_SLOTS_MAX], g_cur_dp[VKA_SUB_SLOTS_MAX];
+static VkDescriptorSet g_cm_set;
 void vka_dyn_invalidate(void);
 static void drv_memo_reset(void);
 static void rp_miss_reset(void);   // g_miss_n, below: a submission's draws start the render-area miss count again
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
-    g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
+    g_cb = cb; g_slot = slot; vka_dyn_invalidate();
     rp_miss_reset();
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
     drv_memo_reset();   // the last submission's scratch spans go with its fence
     g_prof_all = VKA_ENV("DM_VK_PROF", 0) != 0; g_prof = g_prof_all; g_prof_every = VKA_ENV("DM_VK_PACE_LOG", 5000) > 0 ? VKA_ENV("DM_VK_PACE_PROF", 16) : 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1); g_inst_on = VKA_ENV("DM_VK_INSTANCE", 0);   // live: from this submission
     g_vin_skip = VKA_ENV("DM_VK_VIN_SKIP", 1);
+    g_state_filter = VKA_ENV("DM_VK_STATE_FILTER", 0);
     g_vattr_clear = VKA_ENV("DM_VK_VATTR_CLEAR", 1);
     for (int i = 0; i < g_ndp[g_slot]; i++) vk.vkResetDescriptorPool(V.dev, g_dp[g_slot][i], 0);   // the slot's last submission is done (mtl_sub_begin waited for it)
     g_cur_dp[g_slot] = 0;
+    g_cm_set = VK_NULL_HANDLE;
     vka_pso_save(0);
     static int ph; VkImageView placeholder(uint8_t dim, int storage);
     if (!V.null_desc && !ph && statics()) {   // no null descriptors: the placeholders are made here, outside any pass (their first use records a clear)
@@ -1188,7 +1197,7 @@ static int ssbo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
 // its commit), so the memo is forgotten at each submission's start (vka_draw_sub_begin)
 typedef struct { VkBuffer buf; VkDeviceSize off; } c0_at;
 static struct { int valid; vka_span s; uint64_t k[3]; uint8_t b[DMSH_DRV_SIZE]; } g_dm[VKA_NSTAGE][3];   // k: what the bytes were filled from (drv_key)
-static struct { int valid; uint64_t gen; vka_span s; } g_gm;
+static struct { int valid; uint64_t gen; vka_span s; size_t bytes; } g_gm;
 static struct { int valid; uint32_t ref; vka_span s; } g_sm_ref;   // the support buffer with the alpha test's reference (stage_writes)
 static int g_drv_memo = 1, g_drv_stamp = 1; static uint64_t g_dm_hit, g_dm_miss, g_dm_stamp;
 static void drv_memo_reset(void) { for (int st = 0; st < VKA_NSTAGE; st++) for (int b = 0; b < 3; b++) g_dm[st][b].valid = 0; g_gm.valid = 0; g_sm_ref.valid = 0; g_drv_memo = VKA_ENV("DM_VK_DRV_MEMO", 1); g_drv_stamp = VKA_ENV("DM_VK_DRV_STAMP", 1); }
@@ -1227,11 +1236,68 @@ static int drv_seg(const vka_dstate *d, int st, int bank, int pool, VkDescriptor
 // Raw global memory's table (dmsh_abi.h DMSH_GMEM_MAP_*): entry 0 empty (its last 8 bytes: the sink, vka_mem_sink), then the placed chunks by address with delta = device address - guest address, unused entries at ~0,
 // and the chunks' lookup hints in word 6 (vka_gmem.h)
 // (kept while no segment comes or goes: vka_mem_gen, and DM_VK_DRV_MEMO)
-uint64_t vka_mem_gen(void);
+// Page candidates are immutable until every submission using them completes.
+// No waiting or in-place replacement when all buffers are busy: the exact
+// table search remains available. Design reference: Anka Native (MIT), page index.
+typedef struct { VkBuffer buf; VkDeviceMemory mem; void *ptr; size_t bytes; uint64_t gen, fence; int open, valid; } page_buffer;
+static page_buffer g_page[VKA_PIDX_BUFFERS];
+static uint64_t g_page_builds, g_page_hits, g_page_fallbacks;
+void vka_page_index_retire(uint64_t fence) {
+    for (int i = 0; i < VKA_PIDX_BUFFERS; i++) if (g_page[i].open) { g_page[i].open = 0; g_page[i].fence = fence; }
+    static uint64_t last;
+    uint64_t frame = vka_frame();
+    if (VKA_ENV("DM_VK_PIDX", 0) && frame / 300 != last / 300) {
+        last = frame;
+        VLOG("page index: %llu builds, %llu generation hits, %llu exact-search fallbacks (no added queue depth)",
+             (unsigned long long)g_page_builds, (unsigned long long)g_page_hits, (unsigned long long)g_page_fallbacks);
+    }
+}
+static void page_free(page_buffer *p) {
+    if (p->ptr) vk.vkUnmapMemory(V.dev, p->mem);
+    if (p->buf) vk.vkDestroyBuffer(V.dev, p->buf, NULL);
+    if (p->mem) vk.vkFreeMemory(V.dev, p->mem, NULL);
+    memset(p, 0, sizeof *p);
+}
+static int page_alloc(page_buffer *p, size_t bytes) {
+    page_free(p); // only an idle, closed buffer reaches this function
+    VkBufferCreateInfo b = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    if (vk.vkCreateBuffer(V.dev, &b, NULL, &p->buf)) return 0;
+    VkMemoryRequirements r; vk.vkGetBufferMemoryRequirements(V.dev, p->buf, &r);
+    uint32_t type = vka_mem_type(r.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
+    VkMemoryAllocateInfo a = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = r.size, .memoryTypeIndex = type};
+    if (type == UINT32_MAX || vk.vkAllocateMemory(V.dev, &a, NULL, &p->mem) || vk.vkBindBufferMemory(V.dev, p->buf, p->mem, 0) ||
+        vk.vkMapMemory(V.dev, p->mem, 0, VK_WHOLE_SIZE, 0, &p->ptr)) { page_free(p); return 0; }
+    p->bytes = bytes;
+    return 1;
+}
+static int page_index(const uint64_t *lo, const uint64_t *hi, int k, uint64_t gen, const void *table, vka_span *span, size_t *bytes) {
+    if (!VKA_ENV("DM_VK_PIDX", 0)) return 0;
+    for (int i = 0; i < VKA_PIDX_BUFFERS; i++) if (g_page[i].valid && g_page[i].gen == gen) {
+        page_buffer *p = &g_page[i]; p->open = 1; g_page_hits++;
+        *span = (vka_span){p->buf, p->ptr, 0}; *bytes = p->bytes; return 1;
+    }
+    int at = -1; uint64_t done = vka_done();
+    for (int i = 0; i < VKA_PIDX_BUFFERS; i++) if (vka_pidx_writable(g_page[i].open, g_page[i].fence, done)) { at = i; break; }
+    if (at < 0 || V.sb_range <= (VKA_PIDX_WORD + 5ull) * 4) { g_page_fallbacks++; return 0; }
+    uint64_t limit = (V.sb_range - (VKA_PIDX_WORD + 5ull) * 4) / 4;
+    if (limit > 16u * 1024u * 1024u) limit = 16u * 1024u * 1024u; // 64 MiB of indices, rest searches
+    uint32_t base, count = vka_pidx_window(lo, hi, k, (uint32_t)limit, &base);
+    if (!count) { g_page_fallbacks++; return 0; }
+    size_t n = ((size_t)VKA_PIDX_WORD + 5 + count) * 4;
+    page_buffer *p = &g_page[at]; p->valid = 0;
+    if (p->bytes < n && !page_alloc(p, n)) { g_page_fallbacks++; return 0; }
+    memcpy(p->ptr, table, (size_t)VKA_PIDX_WORD * 4);
+    uint32_t *header = (uint32_t *)p->ptr + VKA_PIDX_WORD;
+    header[0] = base; header[1] = count; header[2] = header[3] = 0;
+    vka_pidx_build(header + 4, base, count, lo, hi, k);
+    p->gen = gen; p->open = p->valid = 1; g_page_builds++;
+    *span = (vka_span){p->buf, p->ptr, 0}; *bytes = n; return 1;
+}
+
 static int gmem_map(VkDescriptorBufferInfo *bi) {
-    size_t n = (size_t)DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY;
+    size_t n = (size_t)DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY + 20;
     uint64_t gen = vka_mem_gen();
-    if (g_drv_memo && g_gm.valid && g_gm.gen == gen) { *bi = (VkDescriptorBufferInfo){g_gm.s.buf, g_gm.s.off, n}; return 1; }
+    if (g_drv_memo && g_gm.valid && g_gm.gen == gen) { *bi = (VkDescriptorBufferInfo){g_gm.s.buf, g_gm.s.off, g_gm.bytes}; return 1; }
     vka_span s; if (!vka_scratch(n, V.sb_align, &s)) return 0;
     memset(s.ptr, 0xff, n); memset(s.ptr, 0, DMSH_GMEM_MAP_ENTRY);
     { uint64_t sink = vka_mem_sink(); memcpy(s.ptr + 24, &sink, 8); }   // entry 0's last words: where an access in no pool goes (vk_android_spv.py gmem_sink)
@@ -1239,6 +1305,9 @@ static int gmem_map(VkDescriptorBufferInfo *bi) {
     int k = vka_mem_chunks(lo, hi, bda, DMSH_GMEM_MAP_ENTRIES - 1);
     for (int i = 0; i < k && i + 1 < DMSH_GMEM_MAP_ENTRIES; i++) { uint64_t e[4] = {lo[i], hi[i], bda[i] - lo[i], 0}; memcpy(s.ptr + (size_t)(i + 1) * DMSH_GMEM_MAP_ENTRY, e, sizeof e); }
     vka_gmem_hints(s.ptr, lo, hi, k);   // the 2 MiB chunks' lookup hints, none at entry 0 (the sink's words: vka_gmem.h)
+    memset(s.ptr + (size_t)VKA_PIDX_WORD * 4, 0, 20);
+    page_index(lo, hi, k, gen, s.ptr, &s, &n);
+    g_gm.bytes = n;
     g_gm.valid = 1; g_gm.gen = gen; g_gm.s = s;   // (a segment that came between the read of gen and the table: the next draw sees a new gen and builds it again)
     *bi = (VkDescriptorBufferInfo){s.buf, s.off, n}; return 1;
 }
@@ -1342,7 +1411,10 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             int storage = r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             switch (r[i].what) {
             case VKA_R_BUF: ok = storage ? ssbo_desc(r[i].addr, r[i].size, bi) : ubo_desc(r[i].addr, r[i].size, bi);
-                if (ok && storage && (r[i].flags & DMSH_VK_BF_RW)) vka_tex_gw_opaque(r[i].addr, bi->range);   // the shader may store into it
+                if (ok && storage && (r[i].flags & DMSH_VK_BF_RW)) {
+                    vka_tex_gw_opaque(r[i].addr, bi->range);
+                    vka_mesh_indirect_buffer_write(r[i].addr, bi->range);
+                }
                 if (ok && storage) sb_peek_note(sh->key, st, &r[i]);
                 if (ok && !storage) ub_peek_note(sh->key, st, &r[i]);
                 if (ok) sb_watch_use(sh->key, st, &r[i], storage, bi);
@@ -1362,8 +1434,10 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
                 if (!drv_seg(d, st, r[i].bank, pool, bi, c0)) return 0;
                 if (g_prof) g_ps[3] += cntvct() - td_;
                 break; }
-            case VKA_R_GMEM_MAP: ok = gmem_map(bi); break;
-            case VKA_R_GMEM_LOG: ok = gmem_log(bi); break;
+            case VKA_R_GMEM_MAP:
+                if (r[i].flags & DMSH_VK_BF_RW) vka_mesh_indirect_dirty();
+                ok = gmem_map(bi); break;
+            case VKA_R_GMEM_LOG: vka_mesh_indirect_dirty(); ok = gmem_log(bi); break;
             case VKA_R_SHARED_SPILL: ok = st == 5 && g_spill_range && g_spill.buf; if (ok) *bi = (VkDescriptorBufferInfo){g_spill.buf, g_spill.off, g_spill_range}; break;
             default: ok = 0; break;
             }
@@ -1376,7 +1450,10 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) {
                 int tid = r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG ? r[i].tid : 0;
                 if (tid) v = vka_tex_id_view_rec(tid, g_cb, r[i].dim, storage, &lay);
-                if (tid && v) class_note(sh, st, &r[i], tid, storage);
+                if (tid && v) {
+                    if (storage) vka_mesh_indirect_dirty();
+                    class_note(sh, st, &r[i], tid, storage);
+                }
                 if (tid) tex_peek(sh->key, st, &r[i], v, storage);
                 // A 2D texture in a 3D or cube slot: what the game leaves bound where a shader's branch does not sample (DKB's materials keep a 1x1 2D texture in their volume slot 12).
                 // It reads as unbound, zeros, as nvn_mtl.m's zero 3D / zero cube fallback does; noted once. Other mismatches are reported
@@ -1928,6 +2005,812 @@ void vka_draw_pace(char *b, size_t n, double *draw_us) {
     if (o < n) o += (size_t)snprintf(b + o, n - o, "%svertex input kept %.0f %% (DM_VK_VIN_SKIP), vertex buffers kept %.0f %%, driver segments %.0f %% by their inputs (DM_VK_DRV_STAMP) of %.0f %% bound again",
                                       o ? "; " : "", vk + vb ? 100.0 * vk / (double)(vk + vb) : 0.0, bk + bb ? 100.0 * bk / (double)(bk + bb) : 0.0, dh ? 100.0 * ds / (double)dh : 0.0, dh + dm ? 100.0 * dh / (double)(dh + dm) : 0.0);
 }
+// Compute mesh keeps exact task counts. A proven small grid can be scheduled
+// entirely on the GPU; otherwise read back counts and chunk the full output.
+static void draw_body(vka_dstate *, const p_set_rt *, int, const p_scissor *, int, const p_draw *, const p_draw_idx *);
+static vka_span g_cm_aux[4], g_cm_output; static VkDeviceSize g_cm_len[4], g_cm_capacity;
+static vka_span g_cm_wide_output;
+static int g_cm_wide_attempted;
+static vka_span g_cm_draw_indirect;
+enum { CM_PREP_MAX = 8, CM_PREP_BYTES = 128 << 20 };
+typedef struct {
+    vka_dstate d;
+    p_set_rt rt, original_rt;
+    tex_t targets[9];
+    prog_t fragment;
+    p_scissor sc;
+    int has_sc;
+    const struct vka_mesh_data *mesh;
+    uint32_t groups;
+    vka_span aux[4], args;
+    VkDeviceSize len[4];
+    VkDescriptorSet set;
+    vka_mp_access reads;
+} cm_prepared;
+static cm_prepared g_cmp[CM_PREP_MAX];
+static unsigned g_cmp_n;
+static int g_cmp_active, g_cmp_flushing;
+static vka_span g_cmp_arena;
+static uint64_t g_cmp_used, g_cmp_saved, g_cmp_windows, g_cmp_rejected, g_cmp_budget;
+static vka_mp_access g_cmp_reads, g_cmp_writes;
+static int g_cmp_why;
+static uint64_t g_cmp_guards[128];
+static void cm_draw_generated(vka_dstate *, const p_set_rt *, int, const p_scissor *, int,
+                              const struct vka_mesh_data *, uint32_t, const vka_span *);
+
+void vka_mesh_prepare_flush(void) {
+    if (!g_cmp_n || g_cmp_flushing) return;
+    vka_span aux[4]; VkDeviceSize len[4];
+    memcpy(aux, g_cm_aux, sizeof aux); memcpy(len, g_cm_len, sizeof len);
+    VkDescriptorSet set = g_cm_set;
+    int active = g_cmp_active; g_cmp_active = 0; g_cmp_flushing = 1;
+    unsigned count = g_cmp_n; g_cmp_n = 0;
+    if (count > 1) { g_cmp_saved += count - 1; g_cmp_windows++; }
+    for (unsigned i = 0; i < count; i++) {
+        cm_prepared *p = &g_cmp[i];
+        memcpy(g_cm_aux, p->aux, sizeof g_cm_aux); memcpy(g_cm_len, p->len, sizeof g_cm_len);
+        g_cm_set = p->set;
+        cm_draw_generated(&p->d, &p->rt, 1, &p->sc, p->has_sc, p->mesh, p->groups,
+                          p->args.buf ? &p->args : NULL);
+    }
+    // rt_same keys the pass by the command stream's texture-object pointers.
+    // All queued draws use one immutable target snapshot; after replay, restore
+    // the original key so the following ordinary draw can keep that same pass.
+    if (R.on && rt_same(&R.rt, R.has_rt, &g_cmp[0].rt, 1)) R.rt = g_cmp[count - 1].original_rt;
+    memcpy(g_cm_aux, aux, sizeof aux); memcpy(g_cm_len, len, sizeof len); g_cm_set = set;
+    g_cmp_active = active; g_cmp_flushing = 0;
+    // Do not reset the arena here: a readback may flush earlier draws while the
+    // current mesh output has already been reserved but not yet queued.
+}
+void vka_mesh_prepare_op(uint32_t op, const void *a, uint32_t size) {
+    if (!g_cmp_n) return;
+    if (vka_mp_state(op)) return;
+    if (op == OP_DRAW && size >= 8) {
+        p_draw tmp; const p_draw *d = draw_rec(a, size, &tmp);
+        if (d->prim == NVN_PRIM_MESH) return;
+    }
+    vka_mesh_prepare_flush();
+}
+void vka_mesh_prepare_stats(char *b, size_t n) {
+    static uint64_t saved, windows, rejected, budget;
+    snprintf(b, n, "mesh prepare: %llu additional prepared draws in %llu windows, %llu rejected draws, %llu arena flushes",
+             (unsigned long long)(g_cmp_saved - saved), (unsigned long long)(g_cmp_windows - windows),
+             (unsigned long long)(g_cmp_rejected - rejected), (unsigned long long)(g_cmp_budget - budget));
+    saved = g_cmp_saved; windows = g_cmp_windows; rejected = g_cmp_rejected; budget = g_cmp_budget;
+    for (unsigned i = 0; i < 128; i++) if (g_cmp_guards[i]) {
+        VLOG("mesh prepare guard %u: %llu refusals", i, (unsigned long long)g_cmp_guards[i]); g_cmp_guards[i] = 0;
+    }
+}
+// Attachments live in private optimal images (vka_tex.c), never in the guest
+// pool read by GMEM_MAP. Forbid linear writeback, sparse aliases and BC shadows.
+// No copies/events may cross the window. Guest buffer writes are checked below
+// against all delayed FS reads; images are not written back to guest storage here.
+static int cm_prepare_add(vka_mp_access *a, uint64_t addr, uint64_t size) {
+    int nvn_sparse_alias(uint64_t, uint64_t);
+    if (!addr || !size || size > UINT64_MAX - addr || nvn_sparse_alias(addr, addr + size)) return 0;
+    return vka_mp_add(a, addr, size);
+}
+static int cm_prepare_texture(const tex_t *t) {
+    uint64_t nvn_pool_live(const void *, unsigned *, int *);
+    // A full contiguous MapVirtual is flattened to physical storage by NVN:
+    // its VIRTUAL flag remains set, but vp is null and t->mem is canonical.
+    // Only a real page table has unresolved aliases (nvn_pool_live's sparse).
+    int sparse = 0;
+    if (!t->serial || !t->mem || !t->L.size || t->L.size > UINT64_MAX - (uint64_t)t->mem ||
+        !t->pool || !nvn_pool_live(t->pool, NULL, &sparse) || sparse) return 0;
+    return 1;
+}
+static int cm_prepare_target(const tex_t *t) {
+    if (!t) return 1;
+    vka_fmt f;
+    if (!cm_prepare_texture(t) ||
+        (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) ||
+        !vka_fmt_of(t->d.format, &f) || f.bw != 1 || f.bh != 1) return 0;
+    return 1;
+}
+static int cm_prepare_safe(vka_dstate *d, vka_shader *task, vka_shader *mesh, const p_set_rt *rt, int has_rt) {
+    vka_mp_access writes = {0}, reads = {0};
+    g_cmp_why = 1;
+    if (!has_rt || !rt || rt->n < 0 || rt->n > 8 || d->tf_on || vka_nan_on() ||
+        VKA_ENV("DM_VK_GPUPROF_SPLIT", 0) || VKA_ENV("DM_VK_MESH_INDIRECT_GPU", 0) ||
+        VKA_ENV("DM_VK_MESH_INDIRECT_BOUNDED", 0)) return 0;
+    g_cmp_why = 2;
+    if (g_cmp_n && memcmp(&g_cmp[0].original_rt, rt, sizeof *rt)) return 0; // NOLINT(bugprone-suspicious-memory-comparison): byte identity is sufficient; padding differences only refuse the optimization.
+    const tex_t *targets[9] = {0};
+    for (int i = 0; i < rt->n; i++) targets[i] = rt->color[i];
+    targets[8] = rt->depth;
+    for (int i = 0; i < 9; i++) {
+        g_cmp_why = 3;
+        if (!cm_prepare_target(targets[i])) {
+            const tex_t *t = targets[i]; int sparse = 0;
+            uint64_t nvn_pool_live(const void *, unsigned *, int *);
+            uint64_t live = nvn_pool_live(t->pool, NULL, &sparse);
+            g_cmp_why = !t->serial ? 30 : !t->mem ? 31 : !t->L.size ? 32 : !live ? 33 : sparse ? 34 : 36;
+            return 0;
+        }
+        if (g_cmp_n && targets[i] && memcmp(targets[i], &g_cmp[0].targets[i], sizeof(tex_t))) return 0; // NOLINT(bugprone-suspicious-memory-comparison): require identical snapshots, including every view/layout field.
+        // Also protect guest storage that could be uploaded into a target.
+        if (targets[i] && !cm_prepare_add(&reads, (uint64_t)targets[i]->mem, targets[i]->L.size)) return 0;
+    }
+    vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
+    sh[6] = task; sh[7] = mesh;
+    g_cmp_why = 4;
+    if (!resolve(d->bst[1], 1, &sh[1], &bad) || bad) return 0;
+    // The delayed fragment binding must not re-read a GPU-written handle or
+    // pointer on the CPU at a later instant. Static slot bindings are captured.
+    if (sh[1]) for (unsigned i = 0; i < sh[1]->e->bind_count; i++) {
+        unsigned k = sh[1]->b[i].kind;
+        if (k == DMSH_VK_KIND_TEX_UBO || k == DMSH_VK_KIND_SAMP_UBO || k == DMSH_VK_KIND_SBUF_UBO ||
+            sh[1]->b[i].skind == DMSH_VK_KIND_SAMP_UBO) return 0;
+    }
+    walk_all(d, sh);
+    for (int st = 0; st < VKA_NSTAGE; st++) if (sh[st]) {
+        g_cmp_why = 5;
+        if (g_wk.n[st] < 0 || g_wk.pool[st]) return 0;
+        for (int i = 0; i < g_wk.n[st]; i++) {
+            const vka_res *r = &g_wk.r[st][i];
+            g_cmp_why = 60 + r->what;
+            if (r->flags & DMSH_VK_BF_NOSLOT) return 0;
+            if (r->flags & (DMSH_VK_BF_RW | DMSH_VK_BF_ATOMIC)) {
+                // The generated vertex stage reads only private output records.
+                // Fragment writes are not deferred; incoming task/mesh writes
+                // must miss every earlier deferred fragment's complete read set.
+                if (st == 1 || r->what != VKA_R_BUF || !cm_prepare_add(&writes, r->addr, r->size)) return 0;
+            }
+            switch (r->what) {
+            case VKA_R_NULL: case VKA_R_C1: case VKA_R_SUPPORT: case VKA_R_DRV: break;
+            case VKA_R_BUF:
+                if (st == 1 && !cm_prepare_add(&reads, r->addr, r->size)) return 0;
+                break;
+            case VKA_R_GMEM_MAP: if (st == 1) reads.all = 1; break;
+            case VKA_R_TEX: case VKA_R_TBUF: {
+                if (!r->tid) break;
+                tex_t t; view_t view; uint8_t hv, image;
+                g_cmp_why = 7;
+                int vka_cap_treg(int, tex_t *, view_t *, uint8_t *, uint8_t *, int *);
+                if (!vka_cap_treg(r->tid, &t, &view, &hv, &image, NULL) || !cm_prepare_texture(&t)) return 0;
+                g_cmp_why = 8;
+                for (int a = 0; a < 9; a++) if (targets[a] &&
+                    !vka_mp_disjoint((uint64_t)t.mem, t.L.size, (uint64_t)targets[a]->mem, targets[a]->L.size)) return 0;
+                if (st == 1 && !cm_prepare_add(&reads, (uint64_t)t.mem, t.L.size)) return 0;
+                break;
+            }
+            default: return 0;   // storage images, raw writes, shared spill, unknown
+            }
+        }
+    }
+    g_cmp_why = 9;
+    for (unsigned i = 0; i < g_cmp_n; i++) if (!vka_mp_independent(&writes, &g_cmp[i].reads)) return 0;
+    g_cmp_reads = reads; g_cmp_writes = writes;
+    return 1;
+}
+static vka_span cm_prepare_output(VkDeviceSize bytes, vka_span fallback) {
+    if (!g_cmp_active) return fallback;
+    uint64_t offset;
+    if (g_cmp_n == CM_PREP_MAX || !vka_mp_reserve(g_cmp_used, bytes, V.sb_align, CM_PREP_BYTES, &offset)) {
+        vka_mesh_prepare_flush(); g_cmp_used = 0; g_cmp_budget++;
+    }
+    if (!vka_mp_reserve(g_cmp_used, bytes, V.sb_align, CM_PREP_BYTES, &offset) ||
+        (!g_cmp_arena.buf && !vka_static(CM_PREP_BYTES, V.sb_align, &g_cmp_arena))) {
+        vka_mesh_prepare_flush(); g_cmp_active = 0; return fallback;
+    }
+    vka_span result = g_cmp_arena;
+    result.off += offset; result.ptr += offset; g_cmp_used = offset + bytes;
+    return result;
+}
+static int cm_aux_bind_at(VkPipelineLayout layout, uint32_t index, VkPipelineBindPoint bp) {
+    int reuse = VKA_ENV("DM_VK_MESH_REUSE_SET", 0);
+    VkDescriptorSet set = reuse ? g_cm_set : VK_NULL_HANDLE;
+    if (!set) {
+        set = set_alloc(vka_mesh_set_layout()); if (!set) return 0;
+        VkDescriptorBufferInfo bi[4]; VkWriteDescriptorSet wr[4];
+        for (int i = 0; i < 4; i++) {
+            bi[i] = (VkDescriptorBufferInfo){g_cm_aux[i].buf, g_cm_aux[i].off, g_cm_len[i]};
+            wr[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i]};
+        }
+        vk.vkUpdateDescriptorSets(V.dev, 4, wr, 0, NULL);
+        if (reuse) g_cm_set = set;
+    }
+    vk.vkCmdBindDescriptorSets(g_cb, bp, layout, index, 1, &set, 0, NULL); return 1;
+}
+static int cm_aux_bind(const vka_layout *lay, VkPipelineBindPoint bp) { return cm_aux_bind_at(lay->layout, 3, bp); }
+static int cm_control(const uint32_t words[8]) {
+    // The scheduler, mesh dispatch and generated vertex draw use the same four
+    // ranges until the next control record. Never update a set already bound.
+    g_cm_set = VK_NULL_HANDLE;
+    if (!vka_scratch(32, V.sb_align, &g_cm_aux[3])) return 0;
+    memcpy(g_cm_aux[3].ptr, words, 32); g_cm_len[3] = 32; return 1;
+}
+static int cm_dispatch(vka_dstate *d, vka_shader *s, uint32_t groups, const vka_span *indirect) {
+    if (!groups && !indirect) return 1;
+    // This check also covers successive exact-overflow chunks of one command:
+    // a later chunk must not overwrite an earlier chunk's delayed FS inputs.
+    if (g_cmp_active) for (unsigned i = 0; i < g_cmp_n; i++)
+        if (!vka_mp_independent(&g_cmp_writes, &g_cmp[i].reads)) { vka_mesh_prepare_flush(); break; }
+    vka_shader *original[VKA_NSTAGE] = {0}, *compute[VKA_NSTAGE] = {0};
+    original[s->e->stage] = s; compute[5] = &s->mesh->compute;
+    walk_all(d, original);
+    int ended = R.on;
+    vka_rp_end(); int made_images = make_images(d, original, 0);
+    vka_layout lay; if (!vka_layout_of(compute, 1, &lay)) return 0;
+    VkPipeline pipe = vka_mesh_pipeline(s, &lay, !vka_depth_zero()); if (!pipe) return 0;
+    if (!ended || made_images) vka_barrier(g_cb);
+    if (!bind_sets(d, original, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, NULL) || !cm_aux_bind(&lay, VK_PIPELINE_BIND_POINT_COMPUTE)) return 0;
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    if (indirect) vk.vkCmdDispatchIndirect(g_cb, indirect->buf, indirect->off);
+    else vk.vkCmdDispatch(g_cb, groups, 1, 1);
+    if (vka_gp_active) vka_gp_note('c', s->key, 0, groups);
+    vka_barrier(g_cb);
+    vka_dyn_invalidate(); return 1;
+}
+static void cm_dump(const char *dir, const char *hex, const vka_shader *mesh, const p_draw *draw,
+                    uint64_t start, uint32_t groups, int has_task) {
+    static uint64_t serial;
+    char file[1400];
+    snprintf(file, sizeof file, "%s/%llu-%s-%llu.bin", dir, (unsigned long long)vka_frame(), hex, (unsigned long long)serial++);
+    uint64_t header[8] = {0x3154554f4853454dull, mesh->key, vka_frame(), draw->ind, start, groups, mesh->mesh->words, has_task};
+    FILE *f = fopen(file, "wb");
+    size_t bytes = (size_t)groups * mesh->mesh->words * sizeof(uint32_t);
+    int ok = f && fwrite(header, sizeof header, 1, f) == 1 && fwrite(g_cm_aux[0].ptr, 1, bytes, f) == bytes;
+    if (f) ok &= !fclose(f);
+    VLOG("mesh output dump: %s, indirect %#llx, %u groups at %llu, %u words/group: %s", hex, (unsigned long long)draw->ind, groups, (unsigned long long)start, mesh->mesh->words, ok ? file : "write failed");
+}
+static int cm_verify_schedule(uint32_t tasks, uint32_t payload, uint32_t limit, uint32_t upper, uint32_t vertices) {
+    const uint32_t *args = (const uint32_t *)g_cm_aux[2].ptr;
+    const uint32_t *headers = (const uint32_t *)g_cm_aux[1].ptr;
+    const uint32_t *map = args + 8;
+    if (args[0] > upper || args[1] != 1 || args[2] != 1 || args[3] ||
+        args[4] != args[0] * vertices || args[5] != 1 || args[6] || args[7]) return 0;
+    uint32_t total = 0;
+    for (uint32_t t = 0; t < tasks; ++t, headers += payload) {
+        if (headers[0] > limit || headers[0] > args[0] - total || headers[1] != 1 || headers[2] != 1) return 0;
+        for (uint32_t x = 0; x < headers[0]; ++x, map += 4)
+            if (map[0] != t || map[1] != x || map[2] || map[3]) return 0;
+        total += headers[0];
+    }
+    return total == args[0];
+}
+typedef struct {
+    vka_span records;
+    uint32_t count;
+} cm_task_batch;
+
+static void cm_draw_generated(vka_dstate *vertex, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc,
+                              const struct vka_mesh_data *m, uint32_t groups, const vka_span *args) {
+    if (g_cmp_active && !g_cmp_flushing) {
+        if (g_cmp_n >= CM_PREP_MAX) vka_mesh_prepare_flush();
+        assert(g_cmp_n < CM_PREP_MAX);
+        cm_prepared *p = &g_cmp[g_cmp_n++];
+        p->d = *vertex; p->rt = p->original_rt = *rt; p->has_sc = has_sc;
+        if (has_sc) p->sc = *sc;
+        for (int i = 0; i < rt->n; i++) if (rt->color[i]) {
+            if (g_cmp_n == 1) g_cmp[0].targets[i] = *rt->color[i];
+            p->rt.color[i] = &g_cmp[0].targets[i];
+        }
+        if (rt->depth) {
+            if (g_cmp_n == 1) g_cmp[0].targets[8] = *rt->depth;
+            p->rt.depth = &g_cmp[0].targets[8];
+        }
+        if (vertex->bst[1]) { p->fragment = *vertex->bst[1]; p->d.bst[1] = &p->fragment; }
+        p->mesh = m; p->groups = groups; p->args = args ? *args : (vka_span){0};
+        p->reads = g_cmp_reads;
+        memcpy(p->aux, g_cm_aux, sizeof p->aux); memcpy(p->len, g_cm_len, sizeof p->len); p->set = g_cm_set;
+        return;
+    }
+    if (args) {
+        g_cm_draw_indirect = *args;
+        g_cm_draw_indirect.off += 16;
+    }
+    p_draw draw = {.prim = m->corners == 1 ? NVN_DRAW_PRIMITIVE_POINTS : NVN_DRAW_PRIMITIVE_TRIANGLES,
+                   .count = groups * m->primitives * m->corners, .instances = 1};
+    draw_body(vertex, rt, has_rt, sc, has_sc, &draw, NULL);
+    g_cm_draw_indirect = (vka_span){0};
+}
+
+typedef enum { CM_IND_UNAVAILABLE, CM_IND_ERROR, CM_IND_EXACT, CM_IND_DISPATCHED } cm_ind_result;
+
+static cm_ind_result cm_prepare_indirect(vka_dstate *d, vka_shader *task, vka_shader *mesh, uint64_t addr,
+                                         uint32_t cap, uint32_t chunk, uint32_t payload, cm_task_batch *batch,
+                                         uint32_t *count, uint32_t *first) {
+    VkBuffer source;
+    VkDeviceSize offset;
+    if (!vka_addr(addr, 8, &source, &offset, NULL) || (offset & 3)) return CM_IND_UNAVAILABLE;
+    VkDeviceSize base = offset / V.sb_align * V.sb_align;
+    VkDeviceSize source_bytes = offset - base + 8;
+    if (source_bytes > V.props.limits.maxStorageBufferRange) return CM_IND_UNAVAILABLE;
+    VkPipelineLayout layout;
+    VkPipeline prep = vka_mesh_indirect_pipeline(&layout);
+    if (!prep) return CM_IND_UNAVAILABLE;
+
+    struct vka_mesh_data *m = mesh->mesh;
+    VkDeviceSize task_bytes = 4ull * payload;
+    cm_task_batch storage = {0};
+    if (task) {
+        VkDeviceSize budget = V.props.limits.maxStorageBufferRange;
+        if (budget > (4ull << 20)) budget = 4ull << 20;
+        if (cap > budget / task_bytes) cap = (uint32_t)(budget / task_bytes);
+        if (cap > V.props.limits.maxComputeWorkGroupCount[0]) cap = V.props.limits.maxComputeWorkGroupCount[0];
+        task_bytes *= cap;
+        if (!cap || !vka_scratch(task_bytes, V.sb_align, &storage.records)) return CM_IND_UNAVAILABLE;
+    } else if (cap > chunk) cap = chunk;
+
+    if (!vka_scratch(32, V.sb_align, &g_cm_aux[2])) return CM_IND_UNAVAILABLE;
+    uint32_t ctl[8] = {task != NULL, payload, 0, m->primitives * m->corners, (uint32_t)((offset - base) / 4), 0, 0, cap};
+    if (!cm_control(ctl)) return CM_IND_UNAVAILABLE;
+    g_cm_aux[0] = task ? storage.records : g_cm_output;
+    g_cm_len[0] = task ? task_bytes : 16;
+    g_cm_aux[1] = (vka_span){.buf = source, .off = base};
+    g_cm_len[1] = source_bytes;
+    g_cm_len[2] = 32;
+
+    int ended = R.on;
+    vka_rp_end();
+    if (!ended) vka_barrier(g_cb);
+    if (!cm_aux_bind_at(layout, 0, VK_PIPELINE_BIND_POINT_COMPUTE)) return CM_IND_UNAVAILABLE;
+    vka_span copies = {0};
+    vka_mesh_indirect_copy_batch(addr, &copies);
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, prep);
+    vk.vkCmdDispatch(g_cb, 1, 1, 1);
+
+    g_cm_aux[0] = g_cm_output;
+    g_cm_len[0] = task ? 16 : 4ull * m->words * cap;
+    g_cm_aux[1] = task ? storage.records : g_cm_output;
+    g_cm_len[1] = task ? task_bytes : 16;
+    g_cm_set = VK_NULL_HANDLE;
+    int dispatched = cm_dispatch(d, task ? task : mesh, 0, &g_cm_aux[2]);
+    if (!vka_mesh_indirect_wait(&copies)) return CM_IND_ERROR;
+
+    // Preparation writes a zero dispatch on overflow. No guest shader has
+    // run in that case, so replay can use the original unsigned arguments.
+    const uint32_t *args = (const uint32_t *)g_cm_aux[2].ptr;
+    *count = args[3];
+    *first = ((const uint32_t *)g_cm_aux[3].ptr)[4];
+    if (*count > cap) {
+        static unsigned logged[2];
+        if (logged[task != NULL] < 2) {
+            logged[task != NULL]++;
+            VLOG("compute mesh: indirect %s input %u at %u exceeds capacity %u; replaying exact arguments",
+                 task ? "task" : "mesh", *count, *first, cap);
+        }
+        return CM_IND_EXACT;
+    }
+    if (!dispatched) return CM_IND_EXACT;
+    if (*count) {
+        static int logged[2];
+        if (!logged[task != NULL]) {
+            logged[task != NULL] = 1;
+            VLOG("compute mesh: checked GPU indirect %s dispatched %u groups at %u",
+                 task ? "task" : "mesh", *count, *first);
+        }
+    }
+    if (task) *batch = (cm_task_batch){.records = storage.records, .count = *count};
+    return CM_IND_DISPATCHED;
+}
+
+static int cm_task_dispatch(vka_dstate *d, vka_shader *task, const cm_task_batch *batch, uint32_t first,
+                            uint32_t payload) {
+    g_cm_aux[1] = batch->records;
+    g_cm_len[1] = 4ull * batch->count * payload;
+    // A task may return without emitting. Its unwritten header represents an
+    // empty grid even when the allocator reused storage from a previous draw.
+    uint32_t *words = (uint32_t *)batch->records.ptr;
+    for (uint32_t i = 0; i < batch->count; i++, words += payload) {
+        words[0] = 0;
+        words[1] = words[2] = 1;
+        words[3] = 0;
+    }
+    for (uint32_t at = 0; at < batch->count;) {
+        uint32_t n = batch->count - at, max = V.props.limits.maxComputeWorkGroupCount[0];
+        if (n > max) n = max;
+        uint32_t ctl[8] = {1, payload, 0, 0, first + at, at, batch->count, 0};
+        if (!cm_control(ctl) || !cm_dispatch(d, task, n, NULL)) return 0;
+        at += n;
+    }
+    return 1;
+}
+
+static int cm_task_grid_size(const uint32_t *header, uint64_t *size) {
+    uint64_t xy = (uint64_t)header[0] * header[1];
+    if (header[2] && xy > UINT64_MAX / header[2]) return 0;
+    *size = xy * header[2];
+    return 1;
+}
+
+static int cm_render_chunks(vka_dstate *d, vka_dstate *vertex, vka_shader *mesh, const p_set_rt *rt, int has_rt,
+                            const p_scissor *sc, int has_sc, const p_draw *dw, const cm_task_batch *batch,
+                            uint32_t first, uint32_t payload, uint32_t chunk, const char *dir, const char *hex,
+                            uint64_t *groups_before) {
+    struct vka_mesh_data *m = mesh->mesh;
+    const uint32_t *headers = (const uint32_t *)batch->records.ptr;
+    uint64_t total = headers ? 0 : batch->count;
+    for (uint32_t i = 0; headers && i < batch->count; i++) {
+        uint64_t n;
+        if (!cm_task_grid_size(headers + (uint64_t)i * payload, &n) || n > UINT64_MAX - total) return 0;
+        total += n;
+    }
+    uint32_t task_id = 0;
+    uint64_t local = 0;
+    for (uint64_t at = 0; at < total;) {
+        uint32_t n = total - at > chunk ? chunk : (uint32_t)(total - at);
+        g_cm_aux[0] = cm_prepare_output(4ull * m->words * n, g_cm_output);
+        g_cm_len[0] = 4ull * m->words * n;
+        g_cm_aux[1] = headers ? batch->records : g_cm_output;
+        g_cm_len[1] = headers ? 4ull * batch->count * payload : 16;
+        if (!vka_scratch(16ull * n, V.sb_align, &g_cm_aux[2])) return 0;
+        g_cm_len[2] = 16ull * n;
+        uint32_t *map = (uint32_t *)g_cm_aux[2].ptr;
+        for (uint32_t k = 0; headers && k < n; k++, map += 4) {
+            const uint32_t *h;
+            for (;;) {
+                if (task_id >= batch->count) return 0;
+                h = headers + (uint64_t)task_id * payload;
+                uint64_t size;
+                if (!cm_task_grid_size(h, &size)) return 0;
+                if (local < size) break;
+                local = 0;
+                task_id++;
+            }
+            uint64_t xy = (uint64_t)h[0] * h[1];
+            map[0] = task_id; map[1] = local % h[0]; map[2] = local / h[0] % h[1]; map[3] = local / xy;
+            local++;
+        }
+        uint32_t ctl[8] = {headers != NULL, payload, headers ? 0 : first + (uint32_t)at, 0, first, 0, batch->count, 0};
+        if (!cm_control(ctl) || !cm_dispatch(d, mesh, n, NULL)) return 0;
+        if (dir) {
+            if (!vka_exec_flush_wait()) return 0;
+            cm_dump(dir, hex, mesh, dw, *groups_before + at, n, headers != NULL);
+        }
+        cm_draw_generated(vertex, rt, has_rt, sc, has_sc, m, n, NULL);
+        at += n;
+    }
+    if (dir) *groups_before += total;
+    return 1;
+}
+
+static int cm_render_scheduled(vka_dstate *d, vka_dstate *vertex, vka_shader *task, vka_shader *mesh,
+                               const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw,
+                               const cm_task_batch *batch, uint32_t payload, VkPipeline scheduler,
+                               VkPipelineLayout layout, uint32_t chunk, uint32_t schedule_cap, const char *dir, const char *hex,
+                               uint64_t *groups_before) {
+    struct vka_mesh_data *m = mesh->mesh;
+    uint32_t limit = task->mesh->task_limit, vertices = m->primitives * m->corners;
+    int check = batch->count > schedule_cap / limit;
+    uint32_t upper = check ? schedule_cap : batch->count * limit;
+    VkDeviceSize bytes = 32 + 16ull * upper;
+    if (!vka_scratch(bytes, V.sb_align, &g_cm_aux[2])) {
+        if (!vka_exec_flush_wait()) return 0;
+        return cm_render_chunks(d, vertex, mesh, rt, has_rt, sc, has_sc, dw, batch, 0,
+                                payload, chunk, dir, hex, groups_before);
+    }
+    g_cm_len[2] = bytes;
+    g_cm_aux[0] = cm_prepare_output(4ull * m->words * upper, upper > chunk ? g_cm_wide_output : g_cm_output);
+    g_cm_len[0] = 4ull * m->words * upper;
+    g_cm_aux[1] = batch->records;
+    g_cm_len[1] = 4ull * batch->count * payload;
+    uint32_t ctl[8] = {1, payload, 2, vertices, 0, 0, batch->count, upper};
+    vka_rp_end();
+    if (!cm_control(ctl) || !cm_aux_bind_at(layout, 0, VK_PIPELINE_BIND_POINT_COMPUTE)) return 0;
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, scheduler);
+    vk.vkCmdDispatch(g_cb, 1, 1, 1);
+    if (check) {
+        // When the complete bound cannot be reserved, inspect the scheduler's
+        // result before any mesh or fragment work. The exact path can then use
+        // the same completed task records without running the task again.
+        if (!vka_exec_flush_wait()) return 0;
+        if (((const uint32_t *)g_cm_aux[2].ptr)[3]) {
+            static int noted;
+            if (!noted) {
+                noted = 1;
+                VLOG("compute mesh: GPU schedule exceeds %u output groups; replaying the completed task records in order", upper);
+            }
+            return cm_render_chunks(d, vertex, mesh, rt, has_rt, sc, has_sc, dw, batch, 0,
+                                    payload, chunk, dir, hex, groups_before);
+        }
+    }
+    if (!cm_dispatch(d, mesh, 0, &g_cm_aux[2])) return 0;
+    vka_mesh_schedule_check((const uint32_t *)g_cm_aux[2].ptr + 3, task->key);
+    if (dir) {
+        if (!vka_exec_flush_wait()) return 0;
+        if (!cm_verify_schedule(batch->count, payload, limit, upper, vertices)) {
+            VRED("compute mesh schedule verification failed for %s", hex);
+            return 0;
+        }
+        uint32_t groups = *(const uint32_t *)g_cm_aux[2].ptr;
+        VLOG("compute mesh schedule verified for %s: %u task records, %u mesh groups, %u group bound", hex, batch->count, groups, upper);
+        cm_dump(dir, hex, mesh, dw, *groups_before, groups, 1);
+        *groups_before += groups;
+    }
+    cm_draw_generated(vertex, rt, has_rt, sc, has_sc, m, upper, &g_cm_aux[2]);
+    return 1;
+}
+
+static cm_ind_result cm_render_bounded(vka_dstate *d, vka_dstate *vertex, vka_shader *task, vka_shader *mesh,
+                                       const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc,
+                                       const p_draw *dw, uint32_t payload, const char *dir, const char *hex) {
+    enum { MAX_CHUNKS = 16 };
+    const struct vka_mesh_data *m = mesh->mesh;
+    uint32_t domain = task->mesh_task_domain, limit = task->mesh->task_limit;
+    uint32_t vertices = m->primitives * m->corners;
+    uint32_t upper = domain * limit;
+    VkDeviceSize max_range = V.props.limits.maxStorageBufferRange;
+    VkDeviceSize record = 4ull * m->words, task_bytes = 4ull * payload * domain;
+    VkDeviceSize budget = 128ull << 20;
+    if (budget > max_range) budget = max_range;
+    if (V.max_alloc && budget > V.max_alloc) budget = V.max_alloc & ~(VkDeviceSize)0xffff;
+    uint32_t chunk = (uint32_t)(budget / record);
+    if (chunk > upper) chunk = upper;
+    if (chunk > V.props.limits.maxComputeWorkGroupCount[0]) chunk = V.props.limits.maxComputeWorkGroupCount[0];
+    if (chunk > INT32_MAX / vertices) chunk = INT32_MAX / vertices;
+    if (!chunk || domain > V.props.limits.maxComputeWorkGroupCount[0] || task_bytes > max_range ||
+        (V.max_alloc && task_bytes > (V.max_alloc & ~(VkDeviceSize)0xffff))) return CM_IND_UNAVAILABLE;
+    uint32_t chunks = 1 + (upper - 1) / chunk;
+    VkDeviceSize map_bytes = 32ull * chunks + 16ull * upper;
+    if (chunks > MAX_CHUNKS || map_bytes > max_range) return CM_IND_UNAVAILABLE;
+
+    VkBuffer source;
+    VkDeviceSize offset;
+    if (!vka_addr(dw->ind, 8, &source, &offset, NULL) || (offset & 3)) return CM_IND_UNAVAILABLE;
+    VkDeviceSize base = offset / V.sb_align * V.sb_align;
+    VkDeviceSize stride = (32 + V.sb_align - 1) / V.sb_align * V.sb_align;
+    if (offset - base + 8 > max_range || stride + 32 > max_range) return CM_IND_UNAVAILABLE;
+    VkPipelineLayout prep_layout, schedule_layout;
+    VkPipeline prep = vka_mesh_bounded_pipeline(0, &prep_layout), schedule = vka_mesh_bounded_pipeline(1, &schedule_layout);
+    if (!prep || !schedule) return CM_IND_UNAVAILABLE;
+
+    // Reuse the large ranges. The barrier at the beginning of each draw also
+    // orders these writes after the previous draw's reads of the same arenas.
+    static vka_span task_storage, output;
+    static VkDeviceSize task_capacity;
+    if (!output.buf && !vka_static(budget, V.sb_align, &output)) return CM_IND_UNAVAILABLE;
+    if (task_bytes > task_capacity) {
+        if (!vka_static(task_bytes, V.sb_align, &task_storage)) return CM_IND_UNAVAILABLE;
+        task_capacity = task_bytes;
+    }
+    vka_span prepared, map, controls;
+    if (!vka_scratch(32, V.sb_align, &prepared) || !vka_scratch(map_bytes, V.sb_align, &map) ||
+        !vka_scratch(stride * (chunks + 3), V.sb_align, &controls)) return CM_IND_UNAVAILABLE;
+    uint32_t first_ctl[8] = {1, payload, 0, (uint32_t)(stride / 4), (uint32_t)((offset - base) / 4), 0, 0, domain};
+    uint32_t second_ctl[8] = {1, payload};
+    uint32_t schedule_ctl[8] = {1, payload, 0, vertices, chunk, chunks, domain, limit};
+    memcpy(controls.ptr, first_ctl, sizeof first_ctl);
+    memcpy(controls.ptr + stride, second_ctl, sizeof second_ctl);
+    memcpy(controls.ptr + 2 * stride, schedule_ctl, sizeof schedule_ctl);
+    for (uint32_t i = 0; i < chunks; ++i) {
+        uint32_t ctl[8] = {1, payload, 2 * chunks + i * chunk};
+        memcpy(controls.ptr + (i + 3) * stride, ctl, sizeof ctl);
+    }
+
+    g_cm_aux[0] = task_storage;
+    g_cm_len[0] = task_bytes;
+    g_cm_aux[1] = (vka_span){.buf = source, .off = base};
+    g_cm_len[1] = offset - base + 8;
+    g_cm_aux[2] = prepared;
+    g_cm_len[2] = 32;
+    g_cm_aux[3] = controls;
+    g_cm_len[3] = stride + 32;
+    g_cm_set = VK_NULL_HANDLE;
+    int ended = R.on;
+    vka_rp_end();
+    if (!ended) vka_barrier(g_cb);
+    if (!cm_aux_bind_at(prep_layout, 0, VK_PIPELINE_BIND_POINT_COMPUTE)) return CM_IND_UNAVAILABLE;
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, prep);
+    vk.vkCmdDispatch(g_cb, 1, 1, 1);
+
+    g_cm_aux[0] = output;
+    g_cm_len[0] = 16;
+    g_cm_aux[1] = task_storage;
+    g_cm_len[1] = task_bytes;
+    g_cm_len[3] = 32;
+    for (uint32_t i = 0; i < 2; ++i) {
+        vka_span args = prepared;
+        args.off += 16 * i;
+        g_cm_aux[3].off = controls.off + i * stride;
+        g_cm_set = VK_NULL_HANDLE;
+        if (!cm_dispatch(d, task, 0, &args)) return CM_IND_ERROR;
+    }
+    g_cm_aux[0] = prepared;
+    g_cm_len[0] = 32;
+    g_cm_aux[2] = map;
+    g_cm_len[2] = map_bytes;
+    g_cm_aux[3].off = controls.off + 2 * stride;
+    g_cm_set = VK_NULL_HANDLE;
+    if (!cm_aux_bind_at(schedule_layout, 0, VK_PIPELINE_BIND_POINT_COMPUTE)) return CM_IND_ERROR;
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, schedule);
+    vk.vkCmdDispatch(g_cb, 1, 1, 1);
+    vka_mesh_schedule_check((const uint32_t *)map.ptr + 3, task->key);
+
+    g_cm_aux[0] = output;
+    g_cm_len[0] = record * chunk;
+    uint64_t groups_before = 0;
+    for (uint32_t i = 0; i < chunks; ++i) {
+        vka_span args = map;
+        args.off += 32 * i;
+        g_cm_aux[3].off = controls.off + (i + 3) * stride;
+        g_cm_set = VK_NULL_HANDLE;
+        if (!cm_dispatch(d, mesh, 0, &args)) return CM_IND_ERROR;
+        if (dir) {
+            if (!vka_exec_flush_wait()) return CM_IND_ERROR;
+            const uint32_t *words = (const uint32_t *)map.ptr + 8 * i;
+            if (words[3] || words[0] > chunk) return CM_IND_ERROR;
+            if (words[0]) {
+                cm_dump(dir, hex, mesh, dw, groups_before, words[0], 1);
+                groups_before += words[0];
+            }
+        }
+        cm_draw_generated(vertex, rt, has_rt, sc, has_sc, m, chunk, &args);
+    }
+    static int noted;
+    if (!noted) {
+        noted = 1;
+        VLOG("compute mesh: GPU indirect task %016llx uses %u active IDs, %u mesh groups, %u ordered chunks without a count readback",
+             (unsigned long long)task->key, domain, upper, chunks);
+    }
+    return CM_IND_DISPATCHED;
+}
+
+static int cm_draw(vka_dstate *d, vka_shader *task, vka_shader *mesh, const p_set_rt *rt, int has_rt,
+                   const p_scissor *sc, int has_sc, const p_draw *dw) {
+    struct vka_mesh_data *m = mesh->mesh;
+    if (!m || (task && !task->mesh)) return 0;
+    uint32_t count = dw->count, first = dw->first;
+    int bounded = dw->ind && task && task->mesh_task_domain && !d->tf_on && vka_mesh_schedule_ok() &&
+                  VKA_ENV("DM_VK_MESH_INDIRECT_BOUNDED", 0) && VKA_ENV("DM_VK_MESH_SCHEDULE", 1) &&
+                  VKA_ENV("DM_VK_MESH_ARENA_GROUPS", 0) <= 0 &&
+                  !vka_mesh_indirect_ready(dw->ind);
+    int gpu = dw->ind && !d->tf_on ? VKA_ENV("DM_VK_MESH_INDIRECT_GPU", 0) : 0;
+    if (gpu > 0 && vka_mesh_indirect_cached(dw->ind)) gpu = 0;
+    if (!bounded && gpu <= 0) {
+        if (dw->ind && !vka_mesh_indirect_read(dw->ind, mesh->key, &count, &first)) return 0;
+        if (!count) return 1;
+    }
+
+    VkDeviceSize record = 4ull * m->words;
+    uint64_t vertices = (uint64_t)m->primitives * m->corners;
+    if (!record || !vertices || vertices > INT32_MAX) return 0;
+    uint32_t chunk = 512;
+    if (chunk > V.props.limits.maxStorageBufferRange / record) chunk = (uint32_t)(V.props.limits.maxStorageBufferRange / record);
+    if (chunk > V.props.limits.maxComputeWorkGroupCount[0]) chunk = V.props.limits.maxComputeWorkGroupCount[0];
+    if (chunk > INT32_MAX / vertices) chunk = (uint32_t)(INT32_MAX / vertices);
+    if (!chunk) return 0;
+    int arena_limit = VKA_ENV("DM_VK_MESH_ARENA_GROUPS", 0);
+    if (arena_limit > 0 && chunk > (uint32_t)arena_limit) chunk = (uint32_t)arena_limit;
+    VkDeviceSize need = record * chunk;
+    if (need > g_cm_capacity) {
+        if (!vka_static(need, V.sb_align, &g_cm_output)) return 0;
+        g_cm_capacity = need;
+    }
+
+    const char *dump = getenv("DM_VK_MESH_DUMP"), *dir = getenv("DM_VK_MESH_DUMP_DIR");
+    int target = VKA_ENV("DM_VK_MESH_DUMP_FRAME", -1);
+    char hex[17];
+    if (target >= 0 && (uint64_t)target == vka_frame() && dump && dir && *dir) {
+        snprintf(hex, sizeof hex, "%016llx", (unsigned long long)mesh->key);
+        if (!strstr(dump, hex)) dir = NULL;
+    } else dir = NULL;
+
+    vka_dstate vertex = *d;
+    memset(vertex.bst, 0, sizeof vertex.bst);
+    vertex.bst[0] = &m->program;
+    vertex.bst[1] = d->bst[1];
+    int compare = VKA_ENV("DM_VK_MESH_EQUAL", 0);
+    if (vertex.ds.df == NVN_DEPTH_FUNC_EQUAL && compare)
+        vertex.ds.df = compare == 1 ? NVN_DEPTH_FUNC_LEQUAL : NVN_DEPTH_FUNC_ALWAYS;
+
+    uint32_t payload = 4 + (task && task->mesh->payload > m->payload ? task->mesh->payload : m->payload);
+    if (bounded) {
+        cm_ind_result result = !dir || VKA_ENV("DM_VK_MESH_DUMP_GPU", 0) ?
+            cm_render_bounded(d, &vertex, task, mesh, rt, has_rt, sc, has_sc, dw, payload, dir, hex) : CM_IND_UNAVAILABLE;
+        if (result != CM_IND_UNAVAILABLE) return result == CM_IND_DISPATCHED;
+        if (gpu <= 0 && !vka_mesh_indirect_read(dw->ind, mesh->key, &count, &first)) return 0;
+        if (gpu <= 0 && !count) return 1;
+    }
+    cm_task_batch single = {0};
+    cm_ind_result indirect = CM_IND_UNAVAILABLE;
+    if (gpu > 0) {
+        indirect = cm_prepare_indirect(d, task, mesh, dw->ind, (uint32_t)gpu, chunk, payload, &single, &count, &first);
+        if (indirect == CM_IND_ERROR) return 0;
+        if (indirect == CM_IND_UNAVAILABLE && !vka_mesh_indirect_read(dw->ind, mesh->key, &count, &first)) return 0;
+        if (!count) return 1;
+    }
+    uint64_t groups_before = 0;
+    single.count = count;
+    if (!task) {
+        if (indirect == CM_IND_DISPATCHED) {
+            if (dir) cm_dump(dir, hex, mesh, dw, 0, count, 0);
+            cm_draw_generated(&vertex, rt, has_rt, sc, has_sc, m, count, &g_cm_aux[2]);
+            return 1;
+        }
+        return cm_render_chunks(d, &vertex, mesh, rt, has_rt, sc, has_sc, dw, &single, first, 4,
+                                chunk, dir, hex, &groups_before);
+    }
+
+    VkDeviceSize task_bytes = V.props.limits.maxStorageBufferRange;
+    if (V.max_alloc && task_bytes > V.max_alloc) task_bytes = V.max_alloc & ~(VkDeviceSize)0xffff;
+    uint32_t batch_cap = (uint32_t)(task_bytes / (4ull * payload));
+    if (!batch_cap) return 0;
+    VkPipelineLayout schedule_layout;
+    VkPipeline scheduler = VK_NULL_HANDLE;
+    uint32_t limit = task->mesh->task_limit, schedule_cap = chunk;
+    if (limit && (!dir || VKA_ENV("DM_VK_MESH_DUMP_GPU", 0)) &&
+        VKA_ENV("DM_VK_MESH_SCHEDULE", 1) && vka_mesh_schedule_ok()) {
+        if (count > chunk / limit && VKA_ENV("DM_VK_MESH_SCHEDULE_WIDE", 0)) {
+            VkDeviceSize wide_bytes = V.props.limits.maxStorageBufferRange;
+            if (wide_bytes > (64ull << 20)) wide_bytes = 64ull << 20;
+            uint32_t cap = (uint32_t)(wide_bytes / record);
+            if (cap > 8192) cap = 8192;
+            if (cap > V.props.limits.maxComputeWorkGroupCount[0]) cap = V.props.limits.maxComputeWorkGroupCount[0];
+            if (cap > INT32_MAX / vertices) cap = (uint32_t)(INT32_MAX / vertices);
+            if (arena_limit > 0 && cap > (uint32_t)arena_limit) cap = (uint32_t)arena_limit;
+            if (cap > chunk && !g_cm_wide_attempted) {
+                g_cm_wide_attempted = 1;
+                if (vka_static(wide_bytes, V.sb_align, &g_cm_wide_output))
+                    VLOG("compute mesh: extended output arena for GPU scheduling (%u task groups, %u output groups fit)",
+                         count, cap);
+            }
+            if (cap > schedule_cap && g_cm_wide_output.buf) schedule_cap = cap;
+        }
+        if (schedule_cap >= limit)
+            scheduler = vka_mesh_schedule_pipeline(&schedule_layout);
+    }
+    if (indirect == CM_IND_DISPATCHED) {
+        // This batch was already executed before the readback. Its records
+        // are visible to the host, including when the output bound cannot fit.
+        if (scheduler && count <= schedule_cap / limit)
+            return cm_render_scheduled(d, &vertex, task, mesh, rt, has_rt, sc, has_sc, dw, &single, payload,
+                                       scheduler, schedule_layout, chunk, schedule_cap, dir, hex, &groups_before);
+        if (scheduler) {
+            static int noted;
+            if (!noted) {
+                noted = 1;
+                VLOG("compute mesh: checked GPU indirect task bound exceeds %u output groups; expanding completed records", schedule_cap);
+            }
+        }
+        return cm_render_chunks(d, &vertex, mesh, rt, has_rt, sc, has_sc, dw, &single, first, payload,
+                                chunk, dir, hex, &groups_before);
+    }
+    if (scheduler && arena_limit <= 0 && batch_cap > schedule_cap / limit) batch_cap = schedule_cap / limit;
+    if (arena_limit > 0 && batch_cap > (uint32_t)arena_limit) batch_cap = (uint32_t)arena_limit;
+
+    uint32_t batches = 1 + (count - 1) / batch_cap;
+    cm_task_batch *parts = batches == 1 ? &single : calloc(batches, sizeof(*parts));
+    if (!parts) return 0;
+    int ok = 1;
+    // Allocate every record range before running guest task code. The mesh
+    // stage sees all task writes, with task records kept until their draws.
+    for (uint32_t i = 0, remaining = count; i < batches && ok; i++) {
+        uint32_t n = remaining > batch_cap ? batch_cap : remaining;
+        parts[i].count = n;
+        ok = vka_scratch(4ull * n * payload, V.sb_align, &parts[i].records);
+        remaining -= n;
+    }
+    if (batches > 1 && ok) {
+        static int noted;
+        if (!noted) {
+            noted = 1;
+            VLOG("compute mesh: %u task groups in %u ordered batches of up to %u (%s)",
+                 count, batches, batch_cap, scheduler ? "GPU scheduled" : "exact readback");
+        }
+    }
+    g_cm_aux[0] = g_cm_output;
+    g_cm_len[0] = g_cm_capacity;
+    if (ok) ok = vka_scratch(16, V.sb_align, &g_cm_aux[2]);
+    g_cm_len[2] = 16;
+    for (uint32_t i = 0, at = first; i < batches && ok; i++) {
+        ok = cm_task_dispatch(d, task, &parts[i], at, payload);
+        at += parts[i].count;
+    }
+    if (ok && !scheduler) ok = vka_exec_flush_wait();
+    for (uint32_t i = 0; i < batches && ok; i++) {
+        if (scheduler)
+            ok = cm_render_scheduled(d, &vertex, task, mesh, rt, has_rt, sc, has_sc, dw, &parts[i], payload,
+                                     scheduler, schedule_layout, chunk, schedule_cap, dir, hex, &groups_before);
+        else
+            ok = cm_render_chunks(d, &vertex, mesh, rt, has_rt, sc, has_sc, dw, &parts[i], first, payload,
+                                  chunk, dir, hex, &groups_before);
+    }
+    if (parts != &single) free(parts);
+    return ok;
+}
 static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di);
 // A draw, timed when it is DM_VK_PROF's (every draw) or the pace line's sample (one in DM_VK_PACE_PROF, default 16: ten counter reads in a timed draw, none in the others)
 // DM_VK_SHADER_STATS=1 (live): draws and vertices per vertex / pixel / geometry shader triple, the top ones logged every 2 s as per-second rates ("shader stats"),
@@ -1983,6 +2866,7 @@ static int bisect_drop(vka_shader *const *sh) {
 }
 
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
+    if (!dw || dw->prim != NVN_PRIM_MESH) vka_mesh_prepare_flush();
     static int tick;
     if (!g_prof_all && (g_prof_every <= 0 || ++tick < g_prof_every)) { draw_body(d, rt, has_rt, sc, has_sc, dw, di); return; }
     tick = 0; g_prof = 1; g_pt_ph = -1;
@@ -2081,7 +2965,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
     const int mesh = dw && dw->prim == NVN_PRIM_MESH;
     int eq_relax = 0;   // mesh_cut: EQUAL drawn as LEQUAL
     if (mesh) {
-        if (!V.mesh) SKIPD(VKS_MESH, "mesh draw (nvnCommandBufferDrawMeshTasks) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0): skipped");
+        if (!V.mesh && !vka_mesh_enabled()) SKIPD(VKS_MESH, "mesh draw (nvnCommandBufferDrawMeshTasks) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0): skipped");
         // The program whose task and mesh shaders run: the fragment stage's when it has a mesh shader (a program's stages are bound together), else the one bound at the
         // mesh stage bit. Task and mesh come from the same program (a program's task shader feeds its own mesh shader)
         const prog_t *mp = d->bst[7];
@@ -2099,7 +2983,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
                      dw->ind ? "indirect" : "direct", dw->count, (sh[7]->e->flags & DMSH_VK_F_MESH_PRIM) ? ", per-primitive outputs" : ""); } }
         { const char *sk = getenv("DM_VK_MESH_SKIP"); char hex[17]; snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[7]->key);
           if (sk && *sk && strstr(sk, hex)) { g_skipped++; return; } }
-        { int c = mesh_cut(d, rt, has_rt, sh[7]->key); if (c < 0) { g_skipped++; return; } eq_relax = c > 0; }   // profile mesh_prepass_cut (a workaround)
+        if (!sh[7]->emulated) { int c = mesh_cut(d, rt, has_rt, sh[7]->key); if (c < 0) { g_skipped++; return; } eq_relax = c > 0; }   // profile mesh_prepass_cut (a workaround)
         if (d->bst[6] && d->bst[6] != mp) VRED_ONCE("mesh draw: a program bound at the task stage bit apart from the mesh program; drawn with the mesh program's own task shader, if any");
         // A pixel shader with per-primitive inputs reads what its mesh shader writes per primitive (Vulkan matches only equally decorated interfaces). The other way round
         // (a mesh shader with per-primitive outputs, a pixel shader without the decoration: vk_android_build.py leaves a pixel shader also drawn with vertex shaders per
@@ -2108,20 +2992,41 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
             SKIP("mesh draw: pixel shader %016llx reads per-primitive inputs that mesh shader %016llx does not write: skipped", (unsigned long long)sh[1]->key, (unsigned long long)sh[7]->key);
         if (sh[1] && !(sh[1]->e->flags & DMSH_VK_F_MESH_PRIM) && (sh[7]->e->flags & DMSH_VK_F_MESH_PRIM))
             VRED_ONCE("mesh draw: mesh shader %016llx writes per-primitive outputs and pixel shader %016llx has no per-primitive inputs: any it reads there are undefined", (unsigned long long)sh[7]->key, (unsigned long long)sh[1]->key);
-        if (dw->first) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("mesh draw with first workgroup %d (count %d): drawn from 0 (the translated task / mesh shaders read their workgroup index with no base; open)", dw->first, dw->count); }
+        if (!sh[7]->emulated && dw->first) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("mesh draw with first workgroup %d (count %d): drawn from 0 (the translated task / mesh shaders read their workgroup index with no base; open)", dw->first, dw->count); }
         if (!dw->ind && dw->count <= 0) return;
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
+        if (!sh[7]->emulated) vka_mesh_prepare_flush();
+        if (sh[7]->emulated) {
+            g_cmp_active = VKA_ENV("DM_VK_MESH_PREPARE", 0) && cm_prepare_safe(d, sh[6], sh[7], rt, has_rt);
+            if (!g_cmp_active) { vka_mesh_prepare_flush(); if (VKA_ENV("DM_VK_MESH_PREPARE", 0)) g_cmp_rejected++; }
+            if (!g_cmp_active && VKA_ENV("DM_VK_MESH_PREPARE", 0)) {
+                g_cmp_guards[g_cmp_why]++;
+                static uint64_t seen[64]; static unsigned ns;
+                unsigned k = 0; while (k < ns && seen[k] != sh[7]->key) k++;
+                if (k == ns && ns < 64) { seen[ns++] = sh[7]->key; VLOG("mesh prepare: refused %016llx, guard %d", (unsigned long long)sh[7]->key, g_cmp_why); }
+            }
+            if (!g_cmp_n) g_cmp_used = 0;
+            if (!cm_draw(d, sh[6], sh[7], rt, has_rt, sc, has_sc, dw)) { VRED_ONCE("compute mesh draw failed; the experimental path is incomplete"); g_skipped++; }
+            g_cmp_active = 0;
+            return;
+        }
     } else {
         for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: no shader library");
         if (bad) { g_skipped++; g_skip_dev[VKS_SHADER]++; return; }   // a refused or missing shader (logged when it was made)
         if (!sh[0]) SKIP("draw with no vertex shader bound: skipped");
-        if (sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM)) SKIP("pixel shader %016llx reads per-primitive mesh outputs and is drawn with a vertex shader: skipped", (unsigned long long)sh[1]->key);
+        if (sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM) && !sh[0]->emulated) SKIP("pixel shader %016llx reads per-primitive mesh outputs and is drawn with a vertex shader: skipped", (unsigned long long)sh[1]->key);
         if (d->rast_discard && d->tf_on) SKIP("transform feedback is not on Vulkan yet (F_TF): the draw is skipped");
         if (d->tf_on) VRED_ONCE("transform feedback is not on Vulkan yet: the draw is drawn without capture");
     }
     // DM_VK_DRAW_SKIP_KEY=<pixel shader key>,... (diagnostic): the draws of those pixel shaders are not drawn (their pass still opens and clears), to see a pass's share of the picture
-    { static char sk[1024]; static int got; if (!got) { const char *e = getenv("DM_VK_DRAW_SKIP_KEY"); snprintf(sk, sizeof sk, "%s", e ? e : ""); got = 1; }
-      if (sk[0] && sh[1]) { char hex[17]; snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[1]->key); if (strstr(sk, hex)) { g_skipped++; return; } } }
+    { static char sk[1024], vs[1024]; static uint32_t seen;
+      uint32_t gen = atomic_load_explicit(&vka_env_gen, memory_order_relaxed);
+      if (seen != gen) {
+          const char *e = getenv("DM_VK_DRAW_SKIP_KEY"); snprintf(sk, sizeof sk, "%s", e ? e : "");
+          e = getenv("DM_VK_DRAW_SKIP_VERTEX"); snprintf(vs, sizeof vs, "%s", e ? e : ""); seen = gen;
+      }
+      if (sk[0] && sh[1]) { char hex[17]; snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[1]->key); if (strstr(sk, hex)) { g_skipped++; return; } }
+      if (vs[0] && !mesh && sh[0]) { char hex[17]; snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[0]->key); if (strstr(vs, hex)) { g_skipped++; return; } } }
     if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) { vka_rtlog_skip(rt, has_rt, d, "not drawn: both faces culled"); return; }
     int prim = dw ? dw->prim : di->prim, expand = 0;
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // (a mesh pipeline's: every translated mesh shader outputs triangles)
@@ -2297,6 +3202,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
         }
     } else if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_GRAPHICS, NULL)) { g_skipped++; return; }
     PT(6);
+    if (sh[0] && sh[0]->emulated && !cm_aux_bind(&lay, VK_PIPELINE_BIND_POINT_GRAPHICS)) { g_skipped++; return; }
     if (!mesh && !ijoin) {
         if (istart) {   // the run's table as an instance-rate input at INST_LOC
             VI.b[VI.nb++] = (VkVertexInputBindingDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, NULL, INST_BIND, 4, VK_VERTEX_INPUT_RATE_INSTANCE, 1};
@@ -2451,6 +3357,7 @@ static void draw_body(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_sci
                    if (mdi_n) { if (mdi_ranges(ind, mdi, mdi_n, mdi_st, 16, &b, &o, &cb, &co)) vk.vkCmdDrawIndirectCount(g_cb, b, o, cb, co, mdi_n, mdi_st); else mdi_cpu(0, ind, mdi, mdi_n, mdi_st); }
                    else { if (!vka_addr(ind, 16, &b, &o, NULL) || (o & 3)) SKIP("indirect draw arguments at %#llx are not in placed guest RAM: skipped", (unsigned long long)ind);
                           vk.vkCmdDrawIndirect(g_cb, b, o, 1, 16); } }
+        else if (g_cm_draw_indirect.buf && sh[0]->emulated) vk.vkCmdDrawIndirect(g_cb, g_cm_draw_indirect.buf, g_cm_draw_indirect.off, 1, 16);
         else vk.vkCmdDraw(g_cb, (uint32_t)dw->count, inst, (uint32_t)dw->first, binst);
     } else {
         VkBuffer ib; VkDeviceSize io; VkIndexType it = di->itype == 0 ? VK_INDEX_TYPE_UINT8 : di->itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
@@ -2847,7 +3754,24 @@ void vka_dobj_census(uint64_t frame) {
     }
     free(g_do); g_do = t; g_do_frame = frame;
 }
-void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
+// A prefetched count can survive an intervening dispatch only while all its
+// writes are described by typed storage-buffer bindings. Check before any
+// pipeline replacement can bypass bind_sets.
+static void dispatch_mesh_copy_writes(void) {
+    if (g_wk.n[5] < 0) { vka_mesh_indirect_dirty(); return; }
+    for (int i = 0; i < g_wk.n[5]; i++) {
+        const vka_res *r = &g_wk.r[5][i];
+        if (r->desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || r->desc == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER ||
+            r->what == VKA_R_GMEM_MAP || r->what == VKA_R_GMEM_LOG) {
+            vka_mesh_indirect_dirty();
+            return;
+        }
+        if (r->desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && r->what == VKA_R_BUF && (r->flags & DMSH_VK_BF_RW))
+            vka_mesh_indirect_buffer_write(r->addr, r->size ? r->size : V.sb_range);
+    }
+}
+void vka_dispatch(vka_dstate *d, const p_dispatch *dp, int check_mesh_copy) {
+    vka_mesh_prepare_flush();
     if (!g_cb || !draws_on() || !statics()) { g_skipped++; return; }
     if (!d->inited) vka_dstate_reset(d);
     vka_rp_end();
@@ -2878,6 +3802,7 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     }
     c0_at c0 = {0};
     walk_all(d, sh);
+    if (check_mesh_copy) dispatch_mesh_copy_writes();
     if (g_do_nk || g_do_all) dobj_note(sh[5]->key, g_wk.r[5], g_wk.n[5]);   // DM_VK_DISP_OBJ (g_do_nk -1: not read yet)
     p = img_retype(sh[5], &lay, p);
     {   // DM_VK_BIND_LOG=<hex key>[,…]: the binding records of those compute shaders' dispatches (the first 12 in all) (what each binding is bound to), to follow a pass's inputs and outputs

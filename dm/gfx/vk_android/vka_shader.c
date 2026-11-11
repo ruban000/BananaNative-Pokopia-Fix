@@ -11,6 +11,8 @@
 #include "../nvn/dmsh_chain_vk.h"
 #include "game_profile.h"
 #include "vka_spvpatch.h"
+#include "vka_subgroup.h"
+#include "vka_mesh.h"
 #include "plat/plat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,10 +39,15 @@ static const uint32_t g_stage_bit[8] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_ST
                                         VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_TASK_BIT_EXT, VK_SHADER_STAGE_MESH_BIT_EXT};
 static void sg_plan(unsigned sg) {
     static const char *const nm[8] = {"vertex", "tess control", "tess evaluation", "geometry", "fragment", "compute", "task", "mesh"};
-#define SG_OK(n) (sg == 64 ? ((n) == 32 || (n) == 64) : (n) == sg)
     unsigned pin = 0; int pm = VKA_ENV("DM_VK_SUBGROUP_PIN", 1); uint32_t pin_stages = pm == 1 ? V.subgroup_req_stages : V.subgroup_req_stages & (uint32_t)pm;
-    if (V.subgroup_min != V.subgroup_max && pin_stages)
-        for (unsigned c = sg; c >= 32 && !pin; c /= 2) if (SG_OK(c) && c >= V.subgroup_min && c <= V.subgroup_max) pin = c;
+    unsigned wanted = (unsigned)VKA_ENV("DM_VK_SUBGROUP_SIZE", 0);
+    if (pin_stages && (wanted || V.subgroup_min != V.subgroup_max)) {
+        pin = vka_subgroup_pin_size(sg, V.subgroup_min, V.subgroup_max, wanted);
+        if (wanted && !pin) {
+            VLOG("DM_VK_SUBGROUP_SIZE=%u is not supported by this device (%u-%u) and shader library (%u); using the automatic subgroup plan", wanted, V.subgroup_min, V.subgroup_max, sg);
+            if (V.subgroup_min != V.subgroup_max) pin = vka_subgroup_pin_size(sg, V.subgroup_min, V.subgroup_max, 0);
+        }
+    }
     // Turnip's geometry stage computes subgroup operations wrong at a pinned 64 (T30, Mesa 26.3: DKB's terrain culling GS 5d537f7630ec3671 left the cave walls black; one-lane
     // subgroups there drew them right, with every other stage pinned). Eden leaves geometry out of Turnip's subgroup stages too. DM_VK_SUBGROUP_GS (restart): 0 = the geometry
     // stage runs one-lane subgroups, 1 = as the device reports; default 0 on VK_DRIVER_ID_MESA_TURNIP, 1 on other drivers
@@ -52,11 +59,10 @@ static void sg_plan(unsigned sg) {
         uint32_t b = g_stage_bit[i]; g_sg_pin[i] = 0; g_sg_one[i] = 0;
         if (!(stages & b)) g_sg_one[i] = 1;
         else if (pin && (pin_stages & b)) g_sg_pin[i] = pin;
-        else if (!SG_OK(V.subgroup_size) || V.subgroup_min != V.subgroup_max) g_sg_one[i] = 1, one_new = 1;
+        else if (!vka_subgroup_fits(sg, V.subgroup_size) || V.subgroup_min != V.subgroup_max) g_sg_one[i] = 1, one_new = 1;
         qn += (size_t)snprintf(q + qn, sizeof q - qn, "%s%s %s", i ? ", " : "", nm[i], g_sg_one[i] ? "one lane" : g_sg_pin[i] ? (pin == 64 ? "pinned 64" : "pinned 32") : "as built");
         if (qn >= sizeof q) qn = sizeof q - 1;
     }
-#undef SG_OK
     VLOG("subgroup shaders (built for %u lanes; the device's %u, %u-%u, pinnable in %#x, pinned in %#x): %s", sg, V.subgroup_size, V.subgroup_min, V.subgroup_max, V.subgroup_req_stages, pin ? pin_stages : 0, q);
     if (one_new) VLOG("subgroup shaders: stages whose subgroup size is wrong for the library or varies unpinned run them as one-invocation subgroups");
 }
@@ -296,11 +302,11 @@ static const char *refusal(const vka_shlib *L, const dmsh_vk_entry *e) {
     if (e->stage == DMSH_VK_STAGE_GS && !V.geom) return "a geometry shader on a device without geometryShader";
     if ((e->stage == DMSH_VK_STAGE_TCS || e->stage == DMSH_VK_STAGE_TES) && !V.tess) return "a tessellation shader on a device without tessellationShader";
     // NVN2 task and mesh programs, and the pixel shaders that read their per-primitive outputs (valid only in a mesh pipeline): only with VK_EXT_mesh_shader (vka_dev.c)
-    if ((e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS || (e->flags & DMSH_VK_F_MESH_PRIM)) && !V.mesh) return "a task / mesh shader (or a pixel shader of their per-primitive outputs) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0)";
-    if (e->stage == DMSH_VK_STAGE_TS && !V.task) return "a task shader on a device with mesh shaders but without taskShader";
+    if ((e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS || (e->flags & DMSH_VK_F_MESH_PRIM)) && !V.mesh && !vka_mesh_enabled()) return "a task / mesh shader (or a pixel shader of their per-primitive outputs) on a device without VK_EXT_mesh_shader (or DM_VK_MESH=0)";
+    if (e->stage == DMSH_VK_STAGE_TS && !V.task && !vka_mesh_enabled()) return "a task shader on a device with mesh shaders but without taskShader";
     if (e->stage == DMSH_VK_STAGE_TS || e->stage == DMSH_VK_STAGE_MS) {   // the workgroup (the entry's local) within the device's limit
         uint64_t inv = (uint64_t)e->local[0] * e->local[1] * e->local[2];
-        if (!inv || inv > (e->stage == DMSH_VK_STAGE_TS ? V.task_inv : V.mesh_inv)) return "a task / mesh workgroup larger than the device's (maxTaskWorkGroupInvocations / maxMeshWorkGroupInvocations)";
+        if (!inv || inv > (vka_mesh_enabled() ? V.props.limits.maxComputeWorkGroupInvocations : e->stage == DMSH_VK_STAGE_TS ? V.task_inv : V.mesh_inv)) return "a task / mesh workgroup larger than the device's (maxTaskWorkGroupInvocations / maxMeshWorkGroupInvocations)";
     }
     const dmsh_vk_bind *b = vka_shlib_binds(L, e);
     for (unsigned i = 0; i < e->bind_count; i++) if (b[i].kind == DMSH_VK_KIND_UNKNOWN) return "a binding the build could not place";
@@ -398,6 +404,9 @@ VkShaderModule vka_shader_inst_module(vka_shader *s, uint32_t binding, uint32_t 
     return mod;
 }
 VkShaderModule vka_shader_module(vka_shader *s, int variant) {
+    // The cache replaces these stages with compute. No auxiliary path (prewarm,
+    // background optimization, validation) may resurrect their native modules.
+    if (s->emulated && s->e->stage >= DMSH_VK_STAGE_TS) return VK_NULL_HANDLE;
     if (variant < 0 || variant > DMSH_VK_MOD_SHUFFLE_LDS) return VK_NULL_HANDLE;
     if (s->mods[variant]) return s->mods[variant];
     const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, variant);
@@ -444,6 +453,7 @@ VkShaderModule vka_shader_gs_module(vka_shader *s) {
 // arrays at a lane-derived vertex) run Qualcomm's compiler out of memory; the translator now stores them into a workgroup copy written to the outputs once (docs/reference/shaders.md,
 // "Mesh plane stores into outputs exhaust Qualcomm's compiler"), which needs a library of that chain
 VkShaderModule vka_shader_spec_module(vka_shader *s, int gl) {
+    if (s->emulated && s->e->stage >= DMSH_VK_STAGE_TS) return VK_NULL_HANDLE;
     if (!VKA_ENV("DM_VK_SPEC_FOLD", 1)) return VK_NULL_HANDLE;
     gl = gl != 0;
     pthread_mutex_lock(&g_mu); VkShaderModule have = s->frz[gl]; int none = s->frz_none; pthread_mutex_unlock(&g_mu);
@@ -644,7 +654,9 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
         const dmsh_vk_module *m = why ? NULL : vka_shlib_module(L, e, DMSH_VK_MOD_BASE);
         if (!why && !m) why = "no base module";
         memset(s->fcomp, 0xf, sizeof s->fcomp);
-        if (m) s->mods[DMSH_VK_MOD_BASE] = spv_module_(L, e, m, key, &why, err, sizeof err, e->stage == DMSH_VK_STAGE_FS && VKA_ENV("DM_VK_FOUT_COMPS", 1) ? s->fcomp : NULL);
+        if (m && e->stage >= DMSH_VK_STAGE_TS && vka_mesh_enabled()) {
+            if (!vka_mesh_load(s, err, sizeof err)) why = err;
+        } else if (m) s->mods[DMSH_VK_MOD_BASE] = spv_module_(L, e, m, key, &why, err, sizeof err, e->stage == DMSH_VK_STAGE_FS && VKA_ENV("DM_VK_FOUT_COMPS", 1) ? s->fcomp : NULL);
         if (!why && e->stage == DMSH_VK_STAGE_GS && VKA_ENV("DM_VK_GS_CLAIM", 1)) {   // memory writes: made once per primitive (vka_spv_gs_claim)
             char e2[256] = ""; s->gs_fx = gs_words(s, NULL, NULL, e2, sizeof e2);
             if (s->gs_fx < 0) VRED("geometry shader %016llx: memory writes not put under a claim (%s): drawn as it is, its writes repeated by the device's runs of each primitive", (unsigned long long)key, e2);

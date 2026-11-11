@@ -164,7 +164,12 @@ public final class ReadinessActivity extends Activity {
             List<Readiness.Check> l = new ArrayList<>();
             Readiness.Check st = Readiness.status(p.status);
             if (st != null) l.add(st);
-            l.addAll(Readiness.evaluate(f, Readiness.parseReqs(p.reqs)));
+            File pack = AppStorage.pack(c, p.titleId);
+            for (Game g : added) if (g.titleId.equals(p.titleId)) { pack = Folders.packFor(c, new File(g.gameDir), p.titleId); break; }
+            Map<String, String> gameFacts = new java.util.LinkedHashMap<>(f);
+            String cacheReport = MeshReadiness.report(pack, p.titleId, MeshReadiness.environment(c, p.titleId));
+            gameFacts.putAll(Readiness.facts(cacheReport));
+            l.addAll(Readiness.evaluate(gameFacts, Readiness.parseReqs(p.reqs)));
             String own = GpuDriver.choice(c, p.titleId);
             if (own != null) {
                 // This screen probes the main screen's driver only (the driver opens once a process, vka_driver_open): a game with another driver of its own is
@@ -184,6 +189,7 @@ public final class ReadinessActivity extends Activity {
             if (fail) fails++; else if (warn) warns++;
             rep.append("-- game ").append(p.titleId).append(" --\n");
             for (Readiness.Check x : l) rep.append(x).append('\n');
+            if ("1".equals(gameFacts.get("mesh.compute.selected"))) rep.append(cacheReport);
         }
         String last = lastReports(c);
         if (!last.isEmpty()) rep.append(last);
@@ -196,7 +202,7 @@ public final class ReadinessActivity extends Activity {
         r.verdict = r.level == 2 ? "Not ready" : r.level == 1 ? "Ready, with limits" : "Ready";
         r.summary = r.level == 2 ? (fails > 0 ? fails + (fails == 1 ? " game lacks" : " games lack") + " what it needs" : "") + (fails > 0 && phoneFails > 0 ? "; " : "")
                 + (phoneFails > 0 ? phoneFails + " phone problem" + (phoneFails == 1 ? "" : "s") : "") + "."
-                : r.level == 1 ? warns + (warns == 1 ? " game runs" : " games run") + " with less here." : phoneWarns > 0 ? "Every game's needs are met; see the warnings below." : "Every game's needs are met.";
+                : r.level == 1 ? warns + (warns == 1 ? " game has warnings here." : " games have warnings here.") : phoneWarns > 0 ? "Every game's needs are met; see the warnings below." : "Every game's needs are met.";
         return r;
     }
 

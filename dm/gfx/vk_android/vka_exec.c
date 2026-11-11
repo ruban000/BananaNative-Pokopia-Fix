@@ -10,6 +10,7 @@
 #include "vka_present_rot.h"
 #include "vka_qsched.h"
 #include "vka_skipwarn.h"
+#include "vka_mesh.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,15 +19,17 @@ typedef struct { uint64_t serial; p_set_rt rt; int has_rt; p_scissor sc; int has
 static qstate S;
 enum { NQS = 8 };
 static qstate g_qs[NQS]; static int g_nqs;
-enum { NSLOT = 8 };
 enum { NCHUNK = 32 };
-static struct { VkCommandBuffer cb; uint64_t fence; VkCommandBuffer x[NCHUNK]; VkFence vf; int vf_on; } g_slot[NSLOT];   // vf: set when its commit had no timeline signal (vf_on)   // x: the command buffers a submission goes on in once it hands its first part to the queue (chunk)
-static unsigned g_slot_i;
+static struct { VkCommandBuffer cb; uint64_t fence; VkCommandBuffer x[NCHUNK]; VkFence vf; int vf_on; } g_slot[VKA_SUB_SLOTS_MAX];   // vf: set when its commit had no timeline signal (vf_on)   // x: the command buffers a submission goes on in once it hands its first part to the queue (chunk)
+static unsigned g_slot_i, g_slot_count = 8;
+static unsigned current_slot(void) { return g_slot_i ? g_slot_i - 1 : g_slot_count - 1; }
 static int g_chunk_draws = -1, g_nx; static uint64_t g_chunk_d0;   // chunk(): draws a part, parts this submission, draws at its part's start
 static VkCommandPool g_pool;
 static VkCommandBuffer g_cb;   // the submission being recorded (NULL without a device)
 VkCommandBuffer vka_rp_cb(void) { return g_cb; }
-typedef struct { int kind; uint32_t mode, v, type; uint64_t addr, q0, q1; } pop;   // kind 1 event, 2 counter report, 3 frame span, 4 report marker (DM_VK_RC_LOG), 5 counted samples-passed report, 6 occlusion queries given back unread (q0..q1: their sequence numbers)
+typedef struct { int kind; uint32_t mode, v, type; uint64_t addr, q0, q1; } pop;   // kind 1 event, 2 counter report, 3 frame span, 4 report marker, 5 counted samples-passed report, 6 occlusion queries given back unread, 7 mesh scheduler check
+static _Atomic int g_cm_schedule_fault;
+static _Atomic uint64_t g_cm_scheduled;
 static pop *g_post; static int g_npost, g_postcap;
 static uint64_t g_frame, g_stat_ops, g_stat_draws, g_stat_skipped;
 static int g_origin_ll = 1, g_queue_origin_ll = 1, g_depth_zero;
@@ -73,7 +76,7 @@ static int rc_sub_done(uint64_t s) {   // submission s has completed (its report
     if (g_rc_rec && s == g_n_sub) return 0;
     unsigned k = s % 64;
     if (g_rc_subf[k].sub == s) return g_rc_subf[k].fence <= vka_done();
-    return 1;   // 64 or more submissions old: done (mtl_sub_begin waits for a slot's fence before reusing it, and there are NSLOT)
+    return 1;   // 64 or more submissions old: done (mtl_sub_begin waits for a slot's fence before reusing it, and there are at most VKA_SUB_SLOTS_MAX)
 }
 static int g_rcl = -1; static _Atomic uint64_t g_rc_done;   // DM_VK_RC_LOG lines left (rcl_op); the latest submission whose reports post_run has written
 
@@ -125,6 +128,7 @@ void mtl_set_frame(uint64_t f) {
           vka_enc_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
           vka_floor_stats(pb, sizeof pb); if (pb[0]) VLOG("%s", pb);
           vka_rp_bar_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
+          vka_mesh_prepare_stats(pb, sizeof pb); if (pb[0]) VLOG("%s", pb);
           vka_gbar_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
           oq_stats(pb, sizeof pb, n); if (pb[0]) VLOG("%s", pb);
           { void vka_drv_memo_stats(char *b, size_t n); vka_drv_memo_stats(pb, sizeof pb); if (pb[0]) VLOG("%s", pb); } }
@@ -312,6 +316,11 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
     if (atomic_load_explicit(&g_synclog, memory_order_relaxed) > 0) for (int i = 0; i < n; i++) if (ops[i].kind == 2 && ops[i].type == NVN_COUNTER_TYPE_TIMESTAMP) {
         VLOG("sync done: %d reports written at %.2f ms (the submission's GPU work done)", n, ms_now()); break; }
     for (int i = 0, q = 0; i < n; i++) {
+        if (ops[i].kind == 7) {
+            if (*(const uint32_t *)(uintptr_t)ops[i].addr && !atomic_exchange(&g_cm_schedule_fault, 1))
+                VRED("compute mesh: task %016llx exceeded its proven grid; GPU scheduling disabled", (unsigned long long)ops[i].q0);
+            continue;
+        }
         if (ops[i].kind == 4) { atomic_store(&g_rc_done, ops[i].addr); continue; }   // DM_VK_RC_LOG: this submission's reports up to here are written
         if (ops[i].kind == 5 || ops[i].kind == 6) { oq_done(&ops[i], ticks); continue; }   // a counted samples-passed report, queries given back (Occlusion queries)
         if (ops[i].kind == 3) {   // the frame's span to here (the adaptive GPU clock floor)
@@ -336,6 +345,11 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
     }
     free(ops);
 }
+int vka_mesh_schedule_ok(void) { return !atomic_load(&g_cm_schedule_fault); }
+void vka_mesh_schedule_check(const uint32_t *status, uint64_t task_key) {
+    g_cm_scheduled++;
+    post((pop){.kind = 7, .addr = (uintptr_t)status, .q0 = task_key});
+}
 
 // ---------- GPU time ----------
 // A timestamp at the top and the bottom of each part of a submission (chunk: a submission goes to the queue in up to NCHUNK + 1 parts, two queries per part in the slot's
@@ -349,7 +363,7 @@ static struct { PFN_vkCreateQueryPool create; PFN_vkCmdResetQueryPool reset; PFN
 static VkQueryPool g_qp; static int g_ts_ok = -1; static double g_ts_ns;   // nanoseconds per tick
 enum { GRING = 64 };
 static struct { _Atomic uint64_t frame, ns, t0, t1, span; _Atomic int pending; } g_gpu[GRING];
-static uint64_t g_slot_frame[8]; static uint8_t g_slot_ts[8]; static uint32_t g_slot_parts[8]; static uint32_t g_part_seen;
+static uint64_t g_slot_frame[VKA_SUB_SLOTS_MAX]; static uint8_t g_slot_ts[VKA_SUB_SLOTS_MAX]; static uint32_t g_slot_parts[VKA_SUB_SLOTS_MAX]; static uint32_t g_part_seen;
 enum { QPS = 2 * (NCHUNK + 1) };   // queries a slot: a top and a bottom per part
 static int ts_init(void) {
     if (g_ts_ok >= 0) return g_ts_ok;
@@ -359,7 +373,7 @@ static int ts_init(void) {
     if (V.qf >= nq || !qp[V.qf].timestampValidBits || V.props.limits.timestampPeriod <= 0) { VRED("GPU time: the queue has no timestamps"); return 0; }
     qf.create = (PFN_vkCreateQueryPool)vk.vkGetDeviceProcAddr(V.dev, "vkCreateQueryPool"); qf.reset = (PFN_vkCmdResetQueryPool)vk.vkGetDeviceProcAddr(V.dev, "vkCmdResetQueryPool");
     qf.write = (PFN_vkCmdWriteTimestamp)vk.vkGetDeviceProcAddr(V.dev, "vkCmdWriteTimestamp"); qf.get = (PFN_vkGetQueryPoolResults)vk.vkGetDeviceProcAddr(V.dev, "vkGetQueryPoolResults");
-    VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * QPS};
+    VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = g_slot_count * QPS};
     if (!qf.create || !qf.reset || !qf.write || !qf.get || qf.create(V.dev, &ci, NULL, &g_qp)) { VRED("GPU time: no timestamp query pool"); return 0; }
     g_ts_ns = V.props.limits.timestampPeriod; g_ts_ok = 1;
     VLOG("GPU time: timestamps at %.2f ns a tick", g_ts_ns);
@@ -422,7 +436,7 @@ void vka_exec_hang_report(uint64_t fence) {
         VRED("GPU hang: submission %llu (frame %llu, queue serial %llu): %llu draws, %llu clears / copies, %llu skipped, recorded in %.2f ms, %s",
              (unsigned long long)g_hrec[i].fence, (unsigned long long)g_hrec[i].frame, (unsigned long long)g_hrec[i].queue, (unsigned long long)g_hrec[i].draws,
              (unsigned long long)g_hrec[i].ops, (unsigned long long)g_hrec[i].skipped, g_hrec[i].t_ns / 1e6, when); }
-    unsigned k = (g_slot_i - 1) % NSLOT;
+    unsigned k = current_slot();
     if (g_slot_ts[k]) VRED("GPU hang: the submission being recorded (frame %llu) had handed %u parts to the queue, %u of them seen finished", (unsigned long long)g_slot_frame[k],
                            g_slot_parts[k] - 1, g_part_seen);
     vka_qtrace_dump();   // the scheduler's and the submissions' last events (vka_worker.c, DM_VK_QS_TRACE)
@@ -478,13 +492,17 @@ void vka_rp_sub_begin(void) {
     { uint64_t tj0 = now_ns(); vka_mem_join_due(); g_t_join += now_ns() - tj0; }   // parts of a pool placed by parts that a range given to the GPU lies across, joined into one (vka_mem.c "Joining parts"): before anything is recorded
     g_sub_draws0 = g_stat_draws; g_sub_ops0 = g_stat_ops; g_sub_skip0 = g_stat_skipped; g_sub_t0 = now_ns(); g_n_sub++; g_rc_rec = 1;
     if (!g_pool) {
+        double requested = VKA_ENV("DM_VK_SUB_SLOTS", 8);
+        g_slot_count = requested >= 8 && requested <= VKA_SUB_SLOTS_MAX ? (unsigned)requested : 8;
         VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
-        VkCommandBuffer cbs[NSLOT];
-        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = NSLOT};
+        VkCommandBuffer cbs[VKA_SUB_SLOTS_MAX];
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = g_slot_count};
         if (vk.vkCreateCommandPool(V.dev, &pi, NULL, &g_pool) || ((ai.commandPool = g_pool), vk.vkAllocateCommandBuffers(V.dev, &ai, cbs))) { VRED("submission command buffers not made"); g_pool = VK_NULL_HANDLE; return; }
-        for (int i = 0; i < NSLOT; i++) g_slot[i].cb = cbs[i];
+        for (unsigned i = 0; i < g_slot_count; i++) g_slot[i].cb = cbs[i];
+        VLOG("submission command buffers: %u slots", g_slot_count);
     }
-    unsigned k = g_slot_i++ % NSLOT;
+    unsigned k = g_slot_i;
+    g_slot_i = (g_slot_i + 1) % g_slot_count;
     // A slot whose last commit went without a timeline signal (handed over while a lower fence was parked at a GPU wait, vka_qsched.h) waits for its own fence: its
     // timeline value comes only with a later commit, which this thread makes (waiting for it would wait forever), and is reached only once all work up to that later
     // commit is done (waiting for that tied the recording to the GPU: on the Honor Ocarina of Time's submission start took 20 ms a frame instead of 1.5, 2026-11-09)
@@ -496,7 +514,7 @@ void vka_rp_sub_begin(void) {
     } else if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
     g_t_slot += now_ns() - ts0;
     uint64_t done = vka_done();
-    for (unsigned i = 0; i < NSLOT; i++) if (g_slot_ts[i] && g_slot[i].fence <= done) gpu_slot_done(i);
+    for (unsigned i = 0; i < g_slot_count; i++) if (g_slot_ts[i] && g_slot[i].fence <= done) gpu_slot_done(i);
     g_cb = g_slot[k].cb;
     vk.vkResetCommandBuffer(g_cb, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -507,7 +525,7 @@ void vka_rp_sub_begin(void) {
         g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; g_part_seen = 0; gpu_tag_begin(g_frame);
         g_sq_n = 0; g_sq_base = (int)k * SEGQ;
         if (seg_ts() && !g_sqp) {
-            VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
+            VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = g_slot_count * SEGQ};
             if (qf.create(V.dev, &ci, NULL, &g_sqp)) { g_sqp = VK_NULL_HANDLE; g_seg = 0; VRED("segment timestamps: no query pool: one time for the whole submission"); }
             g_sq_get = qf.get; g_sq_ns = g_ts_ns;
         }
@@ -529,7 +547,7 @@ void vka_rp_sub_begin(void) {
 // 600; 0 = one part) of the part in progress, the part is ended and submitted without a signal, and the submission goes on in the slot's next command buffer. The parts run
 // in order on the one queue, and the barriers recorded in a part cover what later parts do (submission order); only the last part signals the submission's fence.
 // On the Adreno 840 phone, Donkey Kong Bananza's level recorded ~45 ms a frame before its GPU work (~30 ms) began, and the game waited for that frame's fence (@sync_ms ~64)
-typedef struct { VkCommandBuffer cb; uint32_t q; uint64_t gate; } part_arg;   // q: the part's bottom (part_submit) or top (part_begin) timestamp query, UINT32_MAX = none; gate: see g_gate_next
+typedef struct { VkCommandBuffer cb; uint32_t q; uint64_t gate; VkFence fence; _Atomic VkResult *result; } part_arg;   // q: the part's bottom (part_submit) or top (part_begin) timestamp query, UINT32_MAX = none; gate: see g_gate_next
 // A gate (vka_qsched.h "Waits for the CPU", vka_dev.c "Gates"): the replay's next submission to the queue waits for this value of the gate semaphore (0: none)
 static uint64_t g_gate_next;
 static uint64_t gate_take(void) { uint64_t g = g_gate_next; g_gate_next = 0; return g; }
@@ -537,8 +555,8 @@ static void part_submit(const void *a) {   // the part ends and goes to the queu
     part_arg pa; memcpy(&pa, a, sizeof pa); VkCommandBuffer cb = pa.cb;
     if (pa.q != UINT32_MAX) qf.write(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, pa.q);
     VkResult r = vk.vkEndCommandBuffer(cb);
-    VkSemaphore gs = vka_gate_sem(); VkPipelineStageFlags gst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    if (!r) r = vka_submit(cb, 0, pa.gate && gs ? 1 : 0, &gs, &pa.gate, &gst, VK_NULL_HANDLE);
+    if (!r) r = vka_submit_fence(cb, 0, pa.fence, pa.gate);
+    if (pa.result) atomic_store_explicit(pa.result, r, memory_order_release);
     if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("part of a submission: %d", r); vka_qtrace(QT_SUBMIT_ERR, 0, 0, 0, (uint32_t)r, 0, 0, 0, NULL); }
 }
 static void part_begin(const void *a) {
@@ -563,19 +581,21 @@ static void parts_peek(unsigned k) {
     }
 }
 static uint64_t g_cur_fence;   // (below)
-static void chunk(void) {
-    unsigned k = (g_slot_i - 1) % NSLOT;
+static int chunk_fence(VkFence fence, _Atomic VkResult *result) {
+    vka_mesh_prepare_flush(); vka_rp_end();
+    unsigned k = current_slot();
     parts_peek(k);
-    if (g_nx >= NCHUNK) return;
+    if (g_nx >= NCHUNK) return 0;
     if (!g_slot[k].x[g_nx]) {
         vka_enc_sync();   // the pool: not while the encoder thread records into one of its command buffers
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
-        if (vk.vkAllocateCommandBuffers(V.dev, &ai, &g_slot[k].x[g_nx])) { g_slot[k].x[g_nx] = VK_NULL_HANDLE; g_nx = NCHUNK; return; }
+        if (vk.vkAllocateCommandBuffers(V.dev, &ai, &g_slot[k].x[g_nx])) { g_slot[k].x[g_nx] = VK_NULL_HANDLE; g_nx = NCHUNK; return 0; }
     }
     VkCommandBuffer next = g_slot[k].x[g_nx++];
     // The part's bottom and the next part's top timestamps (the slot's queries were reset at the submission's start, in its first part)
     uint32_t part = g_slot_parts[k]; int ts = g_slot_ts[k] && part < NCHUNK + 1;
-    part_arg pe = {g_cb, ts ? k * QPS + 2 * (part - 1) + 1 : UINT32_MAX, gate_take()}, pb = {next, ts ? k * QPS + 2 * part : UINT32_MAX, 0};
+    part_arg pe = {g_cb, ts ? k * QPS + 2 * (part - 1) + 1 : UINT32_MAX, gate_take(), fence, result};
+    part_arg pb = {next, ts ? k * QPS + 2 * part : UINT32_MAX, 0};
     if (ts) g_slot_parts[k] = part + 1;
     if (VKA_ENV("DM_VK_PARTLOG", 0)) { char zb[400]; vka_rp_zstats(zb, sizeof zb);
         VLOG("part %u of the submission of frame %llu ended at %.3f s: %llu draws%s", part, (unsigned long long)g_frame, now_ns() / 1e9, (unsigned long long)(g_stat_draws - g_chunk_d0), zb); }
@@ -588,6 +608,46 @@ static void chunk(void) {
     g_cb = next; vka_gbar_cb(g_cb);
     vka_draw_cb_switch(g_cb); vka_gp_part(g_cb);
     g_chunk_d0 = g_stat_draws; g_n_chunks++;
+    return 1;
+}
+static void chunk(void) { chunk_fence(VK_NULL_HANDLE, NULL); }
+// The experimental compute mesh path needs exact GPU-produced work counts before
+// allocating output records. Finish this part without ending its NVN submission;
+// scratch memory remains owned by its original fence. Timing spans include the wait.
+int vka_exec_flush_wait(void) {
+    if (!g_cb) return 0;
+    vka_mesh_prepare_flush();
+    static VkFence fence;
+    int scoped = VKA_ENV("DM_VK_MESH_READBACK_FENCE", 1);
+    if (scoped && !fence) {
+        VkFenceCreateInfo ci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vk.vkCreateFence(V.dev, &ci, NULL, &fence)) scoped = 0;
+    }
+    vka_rp_end(); vka_gbar_settle(g_cb); vka_up_flush(); vka_up_throttle();
+    VkMemoryBarrier host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, NULL, 0, NULL);
+    if (vka_gp_active) vka_gp_mark(g_cb, __FILE_NAME__, __LINE__);
+    _Atomic VkResult submitted = VK_NOT_READY;
+    part_arg pa = {g_cb, UINT32_MAX, gate_take(), scoped ? fence : VK_NULL_HANDLE, &submitted};
+    if (!vka_enc_call(part_submit, &pa, sizeof pa)) part_submit(&pa);
+    vka_enc_sync();
+    VkResult r = atomic_load_explicit(&submitted, memory_order_acquire);
+    // The producer and the host visibility barrier are in this part. Work
+    // enqueued by the presenter after it cannot affect the readback.
+    if (!r && scoped) r = vk.vkWaitForFences(V.dev, 1, &fence, VK_TRUE, vka_hang_ns());
+    if (!r && scoped) r = vk.vkResetFences(V.dev, 1, &fence);
+    if (r || (!scoped && !vka_queue_idle())) {
+        VRED("compute mesh readback part did not complete (%d)", r);
+        if (r == VK_ERROR_DEVICE_LOST) vka_device_lost("compute mesh readback");
+        else vka_device_stalled("compute mesh readback did not complete");
+        // Never continue recording into a buffer that might still be pending.
+        g_cb = VK_NULL_HANDLE;
+        return 0;
+    }
+    pa.gate = 0; part_begin(&pa);
+    g_chunk_d0 = g_stat_draws;   // the readback started a new part
+    vka_gbar_cb(g_cb); vka_draw_cb_switch(g_cb); vka_gp_part(g_cb);
+    return !vka_hung();
 }
 // DM_VK_CHUNK_PASS=n (live; default 600, 0 = off): a pass that has had n draws in the part in progress is also ended there and the part submitted; the next draw opens it again over the
 // same targets (loadOp LOAD, after the pass end's barrier), so its contents and the draws' order are kept. A pass of 1,700 draws whose GPU work (14-18 ms) only began after
@@ -645,7 +705,9 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) { uint64_t t0 = now_ns(), f = sub_
 // The worker's commit with qs_commit's timeline value (0: no signal: its effects wait for the commit that signals past its fence)
 uint64_t vka_rp_sub_commit_sig(uint64_t reserved, uint64_t signal) { uint64_t t0 = now_ns(), f = sub_commit(reserved, 1, signal); g_t_commit += now_ns() - t0; return f; }
 static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal) {
+    vka_mesh_prepare_flush();
     uint64_t fence = reserved ? reserved : vka_fence_next(); g_cur_fence = 0;
+    vka_page_index_retire(fence);
     if (!has_sig) signal = fence;
     if (g_rc_rec) { g_rc_subf[g_n_sub % 64].sub = g_n_sub; g_rc_subf[g_n_sub % 64].fence = fence; g_rc_rec = 0; }   // (rc_sub_done)
     vka_draw_peek_commit(fence);   // DM_VK_SB_PEEK: this submission's storage buffers, read again once it has completed
@@ -666,7 +728,7 @@ static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal) {
     uint64_t tc0 = now_ns();
     vka_enc_stop();   // every call made: the command buffer is complete
     g_t_cm_enc += now_ns() - tc0;
-    unsigned k = (g_slot_i - 1) % NSLOT;
+    unsigned k = current_slot();
     if (g_slot_ts[k]) qf.write(g_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, k * QPS + 2 * (g_slot_parts[k] - 1) + 1);
     vka_gp_commit(g_cb, fence);
     VkResult r = vk.vkEndCommandBuffer(g_cb);
@@ -677,13 +739,13 @@ static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal) {
     tc0 = now_ns();
     vka_up_flush(); vka_up_throttle();   // before the submission that may use what it made
     uint64_t tc1 = now_ns(); g_t_cm_up += tc1 - tc0;
-    unsigned ks = (g_slot_i - 1) % NSLOT;
+    unsigned ks = current_slot();
     if (!signal && !g_slot[ks].vf) { VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; if (vk.vkCreateFence(V.dev, &fi, NULL, &g_slot[ks].vf)) g_slot[ks].vf = VK_NULL_HANDLE; }
     if (!r) r = vka_submit_fence(g_cb, signal, !signal ? g_slot[ks].vf : VK_NULL_HANDLE, gate_take());
     if (!r && !signal && g_slot[ks].vf) g_slot[ks].vf_on = 1;   // (no fence made: the slot waits for the timeline, as a signalled one)
     g_t_cm_sub += now_ns() - tc1;
     g_hrec[fence % NHREC].sub_ns = now_ns();
-    g_slot[(g_slot_i - 1) % NSLOT].fence = fence;
+    g_slot[current_slot()].fence = fence;
     if (vka_nan_on() || vka_texstats_on()) vka_nan_commit(fence);
     vka_scratch_retire(fence);
     if (r) {
@@ -1219,12 +1281,313 @@ int vka_mdx_args(uint64_t ind, VkBuffer *b, VkDeviceSize *o) {
     *b = g_mdx[i].buf; *o = g_mdx[i].off; return 1;
 }
 
+// The compute replacement needs the exact size before it allocates output
+// records. Read the current {count, first} and other indirect records in the
+// same NVN ordering interval with one transfer and fence. A replayed GPU
+// signal can extend that interval. Writers invalidate their affected records.
+enum { CM_IND_MAX = 64, CM_IND_WAITS = 8 };
+typedef struct {
+    struct { const uint8_t *rec; uint64_t producer; } waits[CM_IND_WAITS];
+    const uint8_t *dispatch;
+    int next, count;
+} cm_ind_order;
+static cm_ind_order g_cm_order;
+static struct { uint64_t addr; uint32_t w[2], copy_slot; } g_cm_ind[CM_IND_MAX];
+static int g_cm_ind_n;
+static uint64_t g_cm_ind_sub = ~0ull;
+static uint64_t g_cm_ind_mem;
+static const uint8_t *g_cm_ind_p;
+static _Atomic uint64_t g_cm_ind_reads, g_cm_ind_waits, g_cm_ind_ns;
+static int cm_ind_trace(void) {
+    int frame = VKA_ENV("DM_VK_MESH_READBACK_TRACE", 0);
+    return frame > 0 && (uint64_t)frame == g_frame;
+}
+// A nonzero copy_slot is the pending scratch slot plus one. Invalidation
+// can remove entries before their data arrives.
+static struct {
+    VkFence fence;
+    _Atomic VkResult submitted;
+    vka_span words;
+    int pending;
+} g_cm_ahead;
+static int cm_ind_find(uint64_t addr) {
+    for (int i = 0; i < g_cm_ind_n; i++) if (g_cm_ind[i].addr == addr) return i;
+    return g_cm_ind_n;
+}
+void vka_mesh_indirect_dirty(void) { g_cm_ind_n = 0; }
+static int cm_ind_overlaps(uint64_t ind, uint64_t addr, uint64_t size) {
+    return size && (addr <= ind ? ind - addr < size : addr - ind < sizeof(g_cm_ind[0].w));
+}
+void vka_mesh_indirect_buffer_write(uint64_t addr, uint64_t size) {
+    for (int i = 0; i < g_cm_ind_n;) {
+        if (cm_ind_overlaps(g_cm_ind[i].addr, addr, size)) g_cm_ind[i] = g_cm_ind[--g_cm_ind_n];
+        else i++;
+    }
+}
+
+static int cm_ind_continue(uint32_t op) {
+    switch (op) {
+    case OP_END: case OP_BEGIN: case OP_JUMP: case OP_CALL: case OP_BARRIER:
+    case OP_DRAW: case OP_DRAW_IDX: case OP_REPORT_COUNTER: case OP_RESET_COUNTER: case OP_RENDER_COND:
+    case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE:
+    case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
+    case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG:
+    case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: case OP_STENCIL: case OP_POLY_OFFSET: case OP_BLEND_COLOR:
+    case OP_DEPTH_CLAMP: case OP_RAST_DISCARD: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_ALPHA_REF: case OP_PUSH_CONST:
+        return 1;
+    default: return 0;
+    }
+}
+static uint64_t cm_report_addr(const void *a) {
+    uint64_t addr; memcpy(&addr, (const uint8_t *)a + 8, 8); return addr;
+}
+static void cm_ind_invalidate(uint32_t op, const void *a, const uint8_t *p) {
+    if (op == OP_WAIT_EVENT || (op == OP_DISPATCH && g_cm_order.dispatch == p)) return;  // replay checks the proof
+    if (!cm_ind_continue(op)) g_cm_ind_n = 0;
+    else if (op == OP_REPORT_COUNTER) vka_mesh_indirect_buffer_write(cm_report_addr(a), 16);
+}
+static int cm_ind_scan(const uint8_t *p, uint64_t q[CM_IND_MAX], int n, int *draws_before, cm_ind_order *order, int cross_dispatch) {
+    const uint8_t *ret[17];
+    int nret = g_nxret, nr = 0; uint64_t reports[CM_IND_MAX];
+    memcpy(ret, g_xret, sizeof(ret[0]) * (size_t)nret);
+    int max_ops = draws_before ? 16384 : 8192;
+    for (int guard = 0; p && guard < max_ops && n < CM_IND_MAX; guard++) {
+        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        if (h.size < 8) break;
+        if (h.op == OP_WAIT_EVENT && order && order->count < CM_IND_WAITS) {
+            uint64_t producer = vka_wait_replayed_signal(a);
+            if (!producer) break;
+            order->waits[order->count].rec = p;
+            order->waits[order->count++].producer = producer;
+        } else if (h.op == OP_DISPATCH && cross_dispatch && !n && !order->dispatch) {
+            order->dispatch = p;
+        } else if (!cm_ind_continue(h.op)) break;
+        if (h.op == OP_END) { if (!nret) break; p = ret[--nret]; continue; }
+        if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
+        if (h.op == OP_CALL) { if (nret >= 16) break; ret[nret++] = p + h.size; memcpy(&p, a, 8); continue; }
+        // The early scan can pass hundreds of reports. Replay invalidates
+        // their overlapping records before any consumer may use them.
+        if (h.op == OP_REPORT_COUNTER && !draws_before) { if (nr == CM_IND_MAX) break; reports[nr++] = cm_report_addr(a); }
+        if (h.op == OP_DRAW) {
+            p_draw t; const p_draw *d = draw_rec(a, h.size, &t);
+            if (d->prim == NVN_PRIM_MESH && d->ind) {
+                int allowed = 1;
+                for (int i = 0; i < nr && allowed; i++) allowed = !cm_ind_overlaps(d->ind, reports[i], 16);
+                for (int i = 0; i < n && allowed; i++) allowed = d->ind != q[i];
+                if (allowed) q[n++] = d->ind;
+            }
+        }
+        if (!n && draws_before && (h.op == OP_DRAW || h.op == OP_DRAW_IDX)) (*draws_before)++;
+        p += h.size;
+    }
+    return n;
+}
+static void cm_ind_check_epoch(void) {
+    uint64_t mem = vka_mem_gen();
+    if (g_cm_ind_sub != g_n_sub || g_cm_ind_mem != mem) {
+        g_cm_ind_sub = g_n_sub;
+        g_cm_ind_mem = mem;
+        g_cm_ind_n = 0;
+    }
+}
+static void cm_ind_publish(const vka_span *words) {
+    for (int i = 0; i < g_cm_ind_n; i++) if (g_cm_ind[i].copy_slot) {
+        uint32_t slot = g_cm_ind[i].copy_slot - 1;
+        memcpy(g_cm_ind[i].w, words->ptr + 8 * slot, sizeof(g_cm_ind[i].w));
+        g_cm_ind[i].copy_slot = 0;
+    }
+}
+static int cm_ind_finish_prefetch(void) {
+    if (!g_cm_ahead.pending) return 1;
+    VkResult r = atomic_load_explicit(&g_cm_ahead.submitted, memory_order_acquire);
+    if (r == VK_NOT_READY) {
+        vka_enc_sync();
+        r = atomic_load_explicit(&g_cm_ahead.submitted, memory_order_acquire);
+    }
+    if (!r) {
+        r = vk.vkGetFenceStatus(V.dev, g_cm_ahead.fence);
+        if (r == VK_NOT_READY) {
+            uint64_t start = now_ns();
+            g_cm_ind_waits++;
+            r = vk.vkWaitForFences(V.dev, 1, &g_cm_ahead.fence, VK_TRUE, vka_hang_ns());
+            g_cm_ind_ns += now_ns() - start;
+            if (cm_ind_trace()) VLOG("mesh readback: prefetch fence waited %.3f ms", (now_ns() - start) / 1e6);
+        } else if (!r && cm_ind_trace()) VLOG("mesh readback: prefetch fence already signalled");
+    }
+    if (!r) r = vk.vkResetFences(V.dev, 1, &g_cm_ahead.fence);
+    g_cm_ahead.pending = 0;
+    if (r) {
+        g_cm_ind_n = 0;
+        VRED("compute mesh indirect prefetch did not complete (%d)", r);
+        if (r == VK_ERROR_DEVICE_LOST) vka_device_lost("compute mesh indirect prefetch");
+        else vka_device_stalled("compute mesh indirect prefetch did not complete");
+        return 0;
+    }
+    cm_ind_publish(&g_cm_ahead.words);
+    return 1;
+}
+// Start a copy behind the dispatch that preceded a long graphics sequence.
+// Any actual writer in that sequence still invalidates the pending records.
+static void cm_ind_prefetch(const uint8_t *p) {
+    if (!g_cb || g_cm_ahead.pending || g_nx >= NCHUNK || S.d.tf_on || vka_rp_on()) return;
+    cm_ind_check_epoch();
+    if (g_cm_ind_n) return;
+    uint64_t q[CM_IND_MAX];
+    int ahead = VKA_ENV("DM_VK_MESH_READBACK_AHEAD", 0);
+    cm_ind_order order = {0};
+    int across_events = ahead >= 3 && VKA_ENV("DM_VK_MESH_READBACK_ORDERED", 0);
+    int draws = 0, n = cm_ind_scan(p, q, 0, &draws, across_events ? &order : NULL, across_events && ahead >= 4);
+    // A shared record can cover multiple draws with the same arguments.
+    int minimum = ahead > 1 ? 1 : 2;
+    if (n < minimum || draws < 64) return;
+    VkBuffer src[CM_IND_MAX]; VkDeviceSize off[CM_IND_MAX];
+    int mapped = 0;
+    for (int i = 0; i < n; i++) {
+        if (!vka_addr(q[i], 8, &src[i], &off[i], NULL) || (off[i] & 3)) q[i] = 0;
+        else mapped++;
+    }
+    if (mapped < minimum || !vka_scratch((VkDeviceSize)n * 8, 8, &g_cm_ahead.words)) return;
+    if (!g_cm_ahead.fence) {
+        VkFenceCreateInfo ci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vk.vkCreateFence(V.dev, &ci, NULL, &g_cm_ahead.fence)) return;
+    }
+    vka_barrier(g_cb);
+    for (int i = 0; i < n; i++) if (q[i]) {
+        VkBufferCopy copy = {off[i], g_cm_ahead.words.off + 8 * (VkDeviceSize)i, 8};
+        vk.vkCmdCopyBuffer(g_cb, src[i], g_cm_ahead.words.buf, 1, &copy);
+    }
+    VkMemoryBarrier host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, NULL, 0, NULL);
+    atomic_store_explicit(&g_cm_ahead.submitted, VK_NOT_READY, memory_order_relaxed);
+    if (!chunk_fence(g_cm_ahead.fence, &g_cm_ahead.submitted)) return;
+    g_cm_ahead.pending = 1;
+    g_cm_order = order;
+    if (cm_ind_trace()) VLOG("mesh readback: dispatch prefetch of %d records before %d draws, %d known events, %s intervening dispatch",
+                             mapped, draws, order.count, order.dispatch ? "one" : "no");
+    static int noted;
+    if (!noted) {
+        noted = 1;
+        VLOG("compute mesh indirect prefetch: %d records before %d intervening draws", mapped, draws);
+    }
+    for (int i = 0; i < n; i++) if (q[i]) {
+        g_cm_ind[g_cm_ind_n].addr = q[i];
+        g_cm_ind[g_cm_ind_n++].copy_slot = (uint32_t)i + 1;
+    }
+}
+int vka_mesh_indirect_cached(uint64_t addr) {
+    cm_ind_check_epoch();
+    if (g_cm_ahead.pending) return 1;   // finish the already submitted copy first
+    if (!VKA_ENV("DM_VK_MESH_READBACK_BATCH", 1)) return 0;
+    return cm_ind_find(addr) < g_cm_ind_n;
+}
+int vka_mesh_indirect_ready(uint64_t addr) {
+    if (!VKA_ENV("DM_VK_MESH_READBACK_BATCH", 1)) return 0;
+    cm_ind_check_epoch();
+    int i = cm_ind_find(addr);
+    if (i == g_cm_ind_n) return 0;
+    if (!g_cm_ind[i].copy_slot) return 1;
+    return g_cm_ahead.pending && atomic_load_explicit(&g_cm_ahead.submitted, memory_order_acquire) == VK_SUCCESS &&
+           vk.vkGetFenceStatus(V.dev, g_cm_ahead.fence) == VK_SUCCESS;
+}
+// Queue the other reads at the same position as the first prepared draw.
+// Bindings for its task/mesh stage can invalidate a pending copy before
+// the fence makes it available to a subsequent draw.
+void vka_mesh_indirect_copy_batch(uint64_t addr, vka_span *copy) {
+    if (!VKA_ENV("DM_VK_MESH_READBACK_BATCH", 1) || g_cm_ahead.pending || S.d.tf_on) return;
+    uint64_t q[CM_IND_MAX] = {addr};
+    cm_ind_order order = {0};
+    int n = cm_ind_scan(g_cm_ind_p, q, 1, NULL, VKA_ENV("DM_VK_MESH_READBACK_ORDERED", 0) ? &order : NULL, 0);
+    if (!vka_scratch(8 * (VkDeviceSize)n, 8, copy)) return;
+    g_cm_order = order;
+    for (int i = 0; i < n && g_cm_ind_n < CM_IND_MAX; i++) {
+        if (cm_ind_find(q[i]) < g_cm_ind_n) continue;
+        VkBuffer src;
+        VkDeviceSize off;
+        if (!vka_addr(q[i], 8, &src, &off, NULL) || (off & 3)) continue;
+        VkBufferCopy range = {off, copy->off + 8 * (VkDeviceSize)i, 8};
+        vk.vkCmdCopyBuffer(g_cb, src, copy->buf, 1, &range);
+        g_cm_ind[g_cm_ind_n].addr = q[i];
+        g_cm_ind[g_cm_ind_n++].copy_slot = (uint32_t)i + 1;
+    }
+}
+int vka_mesh_indirect_wait(const vka_span *copy) {
+    uint64_t start = now_ns();
+    g_cm_ind_reads++;
+    g_cm_ind_waits++;
+    int ok = vka_exec_flush_wait();
+    g_cm_ind_ns += now_ns() - start;
+    if (!ok) vka_mesh_indirect_dirty();
+    else if (copy->ptr) cm_ind_publish(copy);
+    return ok;
+}
+int vka_mesh_indirect_read(uint64_t addr, uint64_t mesh_key, uint32_t *count, uint32_t *first) {
+    cm_ind_check_epoch();
+    int trace = cm_ind_trace();
+    if (trace) VLOG("mesh readback: consumer %016llx record %#llx pending %d", (unsigned long long)mesh_key, (unsigned long long)addr, g_cm_ahead.pending);
+    if (!cm_ind_finish_prefetch()) return 0;
+    int batch = VKA_ENV("DM_VK_MESH_READBACK_BATCH", 1);
+    g_cm_ind_reads++;
+    int index = batch ? cm_ind_find(addr) : g_cm_ind_n;
+    if (index < g_cm_ind_n) {
+        *count = g_cm_ind[index].w[0]; *first = g_cm_ind[index].w[1];
+        if (trace) VLOG("mesh readback: cache hit %u at %u", *count, *first);
+        return 1;
+    }
+    uint64_t q[CM_IND_MAX] = {addr};
+    cm_ind_order order = {0};
+    int n = batch && !S.d.tf_on ? cm_ind_scan(g_cm_ind_p, q, 1, NULL,
+        VKA_ENV("DM_VK_MESH_READBACK_ORDERED", 0) ? &order : NULL, 0) : 1;
+    vka_span s; VkBuffer src[CM_IND_MAX]; VkDeviceSize off[CM_IND_MAX];
+    int mapped = vka_addr(addr, 8, &src[0], &off[0], NULL) && !(off[0] & 3);
+    uint64_t start = now_ns(); g_cm_ind_waits++;
+    if (!mapped || !vka_scratch((VkDeviceSize)n * 8, 8, &s)) {
+        uint32_t w[2];
+        int ok = vka_exec_flush_wait() && vka_cpu_read(addr, w, sizeof w);
+        g_cm_ind_ns += now_ns() - start;
+        if (ok) { *count = w[0]; *first = w[1]; }
+        return ok;
+    }
+    vka_rp_end(); vka_barrier(g_cb);
+    for (int i = 0; i < n; i++) {
+        if (i && (!vka_addr(q[i], 8, &src[i], &off[i], NULL) || (off[i] & 3))) { q[i] = 0; continue; }
+        VkBufferCopy c = {off[i], s.off + 8 * (VkDeviceSize)i, 8};
+        vk.vkCmdCopyBuffer(g_cb, src[i], s.buf, 1, &c);
+    }
+    int ok = vka_exec_flush_wait(); g_cm_ind_ns += now_ns() - start;
+    if (!ok) return 0;
+    g_cm_order = order;
+    uint32_t w[2]; memcpy(w, s.ptr, 8); *count = w[0]; *first = w[1];
+    if (trace) {
+        VLOG("mesh readback: synchronous batch %d records, %.3f ms, %d known events", n, (now_ns() - start) / 1e6, order.count);
+        for (int i = 0; i < n; ++i) if (q[i]) {
+            memcpy(w, s.ptr + 8 * i, 8);
+            VLOG("mesh readback: batch slot %d %#llx count %u first %u", i, (unsigned long long)q[i], w[0], w[1]);
+        }
+    }
+    if (batch) for (int i = 0; i < n && g_cm_ind_n < CM_IND_MAX; i++) if (q[i]) {
+        int j = cm_ind_find(q[i]);
+        g_cm_ind[j].addr = q[i]; memcpy(g_cm_ind[j].w, s.ptr + 8 * i, 8);
+        g_cm_ind[j].copy_slot = 0;
+        if (j == g_cm_ind_n) g_cm_ind_n++;
+    }
+    return 1;
+}
+void vka_mesh_indirect_stats(uint64_t *reads, uint64_t *waits, uint64_t *ns, uint64_t *scheduled) {
+    *reads = g_cm_ind_reads; *waits = g_cm_ind_waits; *ns = g_cm_ind_ns; *scheduled = g_cm_scheduled;
+}
+
 static void seg_write(const void *a) { struct { VkCommandBuffer cb; VkPipelineStageFlagBits st; uint32_t q; } w; memcpy(&w, a, sizeof w); qf.write(w.cb, w.st, g_sqp, w.q); }
 // NVN queue waits (vka_qsched.h): the replay worker answers whether a wait holds (vka_wait_pass); one that does not ends the replay of this submission here, and its continuation
 // (the record after the wait and the return points of the lists that called it) is written to g_pk for vka_rp_resume. Replays outside the worker pass every wait
-int vka_wait_pass(uint32_t op, const void *a, const uint8_t *rec);   // vka_worker.c
-void vka_event_replayed(volatile uint32_t *w, uint32_t mode, uint32_t v);
+int vka_wait_pass(uint32_t op, const void *a, const uint8_t *rec, uint64_t *producer);   // vka_worker.c
+int vka_event_replayed(volatile uint32_t *w, uint32_t mode, uint32_t v, int can_yield);
 static qs_cont *g_pk;
+static int park_after(const uint8_t *next) {
+    g_pk->p = next;
+    g_pk->nret = g_nxret;
+    memcpy(g_pk->ret, g_xret, sizeof(g_xret[0]) * (size_t)g_nxret);
+    return 1;
+}
 // A later record of an indirect-count multi-draw that its first record makes whole (vka_draw.c vka_mdi_gpu): nothing of its own to record
 static int mdi_rest(uint32_t op, const void *a, uint32_t size) {   // (a multi-draw's record is always whole: hle_nvn.c rec_draw; a plain draw's stops before ind)
     if (op == OP_DRAW) { if (size - 8 < sizeof(p_draw)) return 0; const p_draw *d = a; return d->mdi_cnt && d->mdi_i > 0 && d->prim != NVN_PRIM_MESH && vka_mdi_gpu(0, d->mdi_n, d->mdi_stride); }
@@ -1235,6 +1598,8 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
         const void *a = p + 8;
+        vka_mesh_prepare_op(h.op, a, h.size);
+        if (g_cm_ind_n) cm_ind_invalidate(h.op, a, p);
         if ((h.op == OP_DRAW || h.op == OP_DRAW_IDX) && h.size >= 8 && mdi_rest(h.op, a, h.size)) { p += h.size; continue; }
         int bar_kept = 0;   // a game barrier taken inside the open pass (vka_rp_game_barrier): no pass end, no full barrier
         switch (h.op) {   // GPU work other than a dispatch: after the barrier the dispatches before it left pending (vka_draw.c "Dispatch order"), and before a part ends at a draw
@@ -1259,14 +1624,32 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
             if (depth < 16) { g_xret[g_nxret++] = p + h.size; int pk = exec((const uint8_t *)(uintptr_t)t, depth + 1); g_nxret--; if (pk) return 1; } else VRED_ONCE("command lists nested deeper than 16");
             break; }
         case OP_SIGNAL_EVENT: { uint64_t val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); post((pop){1, m, v, 0, val});
-            vka_event_replayed((volatile uint32_t *)(uintptr_t)val, m, v); break; }
-        case OP_WAIT_EVENT: case OP_WAIT_SYNC:
-            if (g_pk && !vka_wait_pass(h.op, a, p)) {
-                if (g_nxret > QS_NRET) { VRED_ONCE("a wait inside command lists nested deeper than %d: passed", QS_NRET); break; }
-                g_pk->p = p + h.size; g_pk->nret = g_nxret; memcpy(g_pk->ret, g_xret, sizeof(g_xret[0]) * (size_t)g_nxret);
-                return 1;
+            int front = g_pk && g_cb && h.size >= 8 && !g_nxret && !g_nx &&
+                        g_stat_draws == g_sub_draws0 && g_stat_ops == g_sub_ops0 && !S.d.tf_on;
+            if (vka_event_replayed((volatile uint32_t *)(uintptr_t)val, m, v, front))
+                return park_after(p + h.size);
+            break; }
+        case OP_WAIT_EVENT: case OP_WAIT_SYNC: {
+            int at = g_cm_order.next;
+            int check = g_cm_ind_n && at < g_cm_order.count && g_cm_order.waits[at].rec == p;
+            int trace = h.op == OP_WAIT_EVENT && cm_ind_trace();
+            uint64_t producer = 0;
+            int pass = !g_pk || vka_wait_pass(h.op, a, p, check || trace ? &producer : NULL);
+            int keep = pass && check && producer == g_cm_order.waits[at].producer;
+            if (h.op == OP_WAIT_EVENT) {
+                if (keep) g_cm_order.next++;
+                else g_cm_ind_n = 0;
             }
-            break;
+            if (trace) {
+                const p_wait_event *wait = a;
+                VLOG("mesh readback: event %p value %u producer fence %llu pass %d kept %d", (void *)wait->val, wait->value,
+                     (unsigned long long)producer, pass, keep);
+            }
+            if (!pass) {
+                if (g_nxret > QS_NRET) { VRED_ONCE("a wait inside command lists nested deeper than %d: passed", QS_NRET); break; }
+                return park_after(p + h.size);
+            }
+            break; }
         case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8);
             uint32_t q = 0;
             if (g_sqp && g_cb && g_sq_n < SEGQ && (t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
@@ -1303,11 +1686,21 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
         case OP_BARRIER: if (g_cb && !bar_kept) { int32_t bits; memcpy(&bits, a, 4); if (!vka_gbar_game(g_cb, (uint32_t)bits)) vka_barrier(g_cb); } break;   // (vka_gbar.c: between dispatches, a compute-to-compute barrier at the next one)
         case OP_DRAW: if (S.rc_skip) vka_rtlog_skip(&S.rt, S.has_rt, &S.d, "skipped by a render condition");
                       if (!S.rc_skip && g_cb) { p_draw t; const p_draw *d = draw_rec(a, h.size, &t); g_stat_draws++; mdx_before_draw(p, d); uint64_t sk = 0; if (g_oq_count) vka_draw_stats(NULL, &sk, NULL, NULL);
-                          vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, d, NULL); oq_lost(sk); } else if (!S.rc_skip && g_oq_count) g_oq_lost++; break;
+                          if (d->prim == NVN_PRIM_MESH && d->ind) g_cm_ind_p = p;
+                          vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, d, NULL); g_cm_ind_p = NULL; oq_lost(sk); } else if (!S.rc_skip && g_oq_count) g_oq_lost++; break;
         case OP_DRAW_IDX: if (S.rc_skip) vka_rtlog_skip(&S.rt, S.has_rt, &S.d, "skipped by a render condition");
                           if (!S.rc_skip && g_cb) { p_draw_idx t; g_stat_draws++; mdx_before_draw(p, NULL); uint64_t sk = 0; if (g_oq_count) vka_draw_stats(NULL, &sk, NULL, NULL);
                           vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, NULL, draw_idx_rec(a, h.size, &t)); oq_lost(sk); } else if (!S.rc_skip && g_oq_count) g_oq_lost++; break;
-        case OP_DISPATCH: mdx_write(); if (!S.rc_skip && g_cb) vka_dispatch(&S.d, a); break;
+        case OP_DISPATCH: {
+            mdx_write();
+            int check_mesh_copy = g_cm_order.dispatch == p && g_cm_ind_n;
+            g_cm_order.dispatch = NULL;
+            if (!S.rc_skip && g_cb) {
+                vka_dispatch(&S.d, a, check_mesh_copy);
+                if (VKA_ENV("DM_VK_MESH_READBACK_AHEAD", 0) && vka_mesh_enabled() && VKA_ENV("DM_VK_MESH_READBACK_BATCH", 1))
+                    cm_ind_prefetch(p + h.size);
+            }
+            break; }
         case OP_DRAW_TEX: not_yet(h.op); if (!S.rc_skip && g_oq_count) { g_oq_lost++; g_oqs_skip++; } break;
         default: break;   // state: taken by vka_state_op above
         }

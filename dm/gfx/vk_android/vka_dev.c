@@ -1,4 +1,4 @@
-// The Vulkan device of the replay: instance, the one queue, the timeline that fences submissions, the completion thread that runs their CPU-side effects, and scratch memory.
+// The Vulkan device of the replay: instance, graphics queues, the timeline that fences submissions, the completion thread that runs their CPU-side effects, and scratch memory.
 // Feature and extension choices follow the probe of android/spike (results/honor-pnm-n49.md): placed memory maps, buffer device addresses, update-after-bind arrays, display timing
 #if defined(__ANDROID__)
 #include "vka.h"
@@ -39,7 +39,7 @@ static int vka_placed_probe(void) {
 }
 
 vka_fns vk;
-vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
+vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER, .present_qmu = PTHREAD_MUTEX_INITIALIZER};
 static int g_state;   // 0 not tried, 1 up, -1 failed
 static int g_fault_on;   // VK_EXT_device_fault enabled (fault_report)
 static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -133,6 +133,7 @@ static int init_once(void) {
       // Sparse residency images (vka_sparse.c) need it all: binding on the replay's queue, 2D residency, the standard block shape (NVN's 64 KB tiles) and strict non-resident reads
       // (an unbound tile reads 0, as an unmapped NVN page). The features are enabled with every other supported one (vkGetPhysicalDeviceFeatures2 below)
       V.sparse_res = pf.sparseBinding && pf.sparseResidencyImage2D && sp->residencyStandard2DBlockShape && sp->residencyNonResidentStrict && V.qf < nq && (qp[V.qf].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT); }
+    uint32_t queue_count = V.qf < nq ? qp[V.qf].queueCount : 0;
     free(qp);
     if (V.qf == UINT32_MAX) { VRED("no graphics + compute queue family"); return 0; }
 
@@ -211,11 +212,21 @@ static int init_once(void) {
     V.draw_count = f12.drawIndirectCount;
     V.bda = f12.bufferDeviceAddress; V.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound && f12.runtimeDescriptorArray;
     V.placed = placed && fmp.memoryMapPlaced; V.placed_range = placed && fmp.memoryMapRangePlaced; V.unmap_reserve = placed && fmp.memoryUnmapReserve;
-    float prio = 1.f;
-    VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = V.qf, .queueCount = 1, .pQueuePriorities = &prio};
+    const char *present_queue = getenv("DM_VK_PRESENT_QUEUE");
+    int want_present_queue = present_queue && !strcmp(present_queue, "1");
+    int second_queue = want_present_queue && queue_count >= 2 && V.has_android_surface && swap;
+    float prio[] = {1.f, 1.f};
+    VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = V.qf, .queueCount = 1 + second_queue, .pQueuePriorities = prio};
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext};
     void vka_kgsl_before(int has_ext), vka_kgsl_after(int has_hint); vka_kgsl_before(x_ph);   // the kernel contexts the device's queue gets (the KGSL floor below)
-    if ((r = vk.vkCreateDevice(V.pd, &dci, NULL, &V.dev))) { VRED("vkCreateDevice %d", r); return 0; }
+    r = vk.vkCreateDevice(V.pd, &dci, NULL, &V.dev);
+    if (r && second_queue) {
+        VLOG("separate present queue: device creation returned %d; retrying with one queue", r);
+        second_queue = 0;
+        qci.queueCount = 1;
+        r = vk.vkCreateDevice(V.pd, &dci, NULL, &V.dev);
+    }
+    if (r) { VRED("vkCreateDevice %d", r); return 0; }
 #define D(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f);
     VKA_DEVICE_FNS(D)
 #undef D
@@ -236,6 +247,10 @@ static int init_once(void) {
         VLOG("exported guest memory alias: %s (%s; DM_VK_FD_ALIAS=0: off)", V.fd_alias ? "on" : "unavailable", why);
     }
     vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
+    if (second_queue) vk.vkGetDeviceQueue(V.dev, V.qf, 1, &V.present_q);
+    if (V.present_q == V.q) V.present_q = VK_NULL_HANDLE;
+    if (want_present_queue) VLOG("separate present queue: %s (queue family %u offers %u queues)",
+        V.present_q ? "on" : "unavailable; using the replay queue", V.qf, queue_count);
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
     VLOG("GPU clock floor (VK_QCOM_queue_perf_hint): %s", V.perf_hint ? "available (DM_VK_GPU_FLOOR)" : x_ph ? "extension without the feature" : "not on this device");
     vka_kgsl_after(V.perf_hint != NULL);
@@ -484,6 +499,11 @@ int vka_queue_idle(void) {
     VkResult r = q ? vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns()) : VK_SUCCESS;
     if (r) { VRED("queue idle: fence %llu not reached in %.1f s (%d): not waited for", (unsigned long long)q, vka_hang_ns() / 1e9, r); return 0; }
     pthread_mutex_lock(&V.qmu); vk.vkQueueWaitIdle(V.q); pthread_mutex_unlock(&V.qmu);
+    if (V.present_q) {
+        pthread_mutex_lock(&V.present_qmu);
+        vk.vkQueueWaitIdle(V.present_q);
+        pthread_mutex_unlock(&V.present_qmu);
+    }
     return 1;
 }
 uint64_t vka_fence_queued(void) { return __atomic_load_n(&V.tl_queued, __ATOMIC_ACQUIRE); }
@@ -694,6 +714,9 @@ void vka_device_lost(const char *what) {
     if (vka_hung()) return;
     char w[96]; snprintf(w, sizeof w, "%s returned -4 (the device is lost)", what);
     uint64_t d = vka_done(); hang_declare(d + 1, d, 0, w);
+}
+void vka_device_stalled(const char *what) {
+    uint64_t d = vka_done(); hang_declare(d + 1, d, vka_hang_ns() / 1e9, what);
 }
 static _Atomic int g_fault_reported;
 static void *hang_exit_main(void *arg) { (void)arg; pthread_setname_np(pthread_self(), "vk-hang"); dm_host_shutdown("GPU hang"); return NULL; }
@@ -1111,6 +1134,7 @@ static _Atomic int g_tail_n;   // DM_VK_GPU_FLOOR_AUTO=2: submissions with draws
 // The queue's hint (any thread: the replay's, the completion thread's). tail: the floor is s while a counted submission is pending, else 0, decided under the queue lock, so
 // a commit and a completion racing cannot apply their floors in the wrong order (before 2026-11-03 a completion's 0 could land after the next commit's floor)
 static _Atomic int g_floor_cur = -1, g_floor_res;   // the floor last given to the queue and the driver's or kernel's answer (the pace line, vka_perf.c)
+static _Atomic int g_floor_kgsl_max;
 // The GPU clock floor for the pace line: its way ("queue hint", "KGSL", "ADPF", "off"), the % last given (-1: none yet) and that call's result (0 = taken)
 const char *vka_floor_state(int *pct, int *res) {
     int vka_floor_adpf(void);
@@ -1130,6 +1154,7 @@ static void floor_set_(int s, int tail, int again) {   // again: send it even if
         r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
     } else r = kg_apply(s);
     int was = atomic_exchange(&cur, s); atomic_store(&g_floor_cur, s); atomic_store(&g_floor_res, (int)r);
+    atomic_store(&g_floor_kgsl_max, !V.perf_hint && s == 100 && r == VK_SUCCESS);
     vka_qhold_add(2, now_ns() - th);
     pthread_mutex_unlock(&V.qmu);
     if (was < 0 || (was != s && VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1)) VLOG("GPU clock floor%s: %d %% (%s): %d", V.perf_hint ? "" : " (KGSL)", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
@@ -1141,6 +1166,11 @@ static void floor_set_(int s, int tail, int again) {   // again: send it even if
 // end failed, and the floor could drop with a counted submission still on the GPU
 static int floor_mode(void) { return V.perf_hint || g_kg_n ? VKA_ENV("DM_VK_GPU_FLOOR_AUTO", 0) : -1; }
 static int floor_top(void) { int s = VKA_ENV("DM_VK_GPU_FLOOR", 100); return s < 0 ? 0 : s > 100 ? 100 : s; }
+// A successful fixed KGSL maximum prevents the longer hold from lowering
+// the governor's clock. A longer GPU frame can still mean a heavier scene.
+int vka_gpu_floor_fixed_max(void) {
+    return atomic_load(&g_floor_kgsl_max) && VKA_ENV("DM_VK_GPU_FLOOR_AUTO", 0) == 0 && floor_top() == 100;
+}
 // The floor without VK_QCOM_queue_perf_hint and without the KGSL constraint above (a driver that is not on KGSL, or DM_VK_GPU_FLOOR_KGSL=0): the ADPF session (vka_perf.c) reports each frame's span (recording start to the GPU end of
 // its last submission) with its GPU time against the shortest period, so the system raises the clocks the frame's work runs on when the frame takes longer than the period
 // the game could run at. Before 2026-11-05 there was no floor at all there: on Turnip DKB stayed at 20 fps with 33-36 ms of GPU time a frame, as the system driver did with

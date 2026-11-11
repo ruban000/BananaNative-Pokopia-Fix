@@ -3,3 +3,10 @@
 
 # In bring-up on Android: plays on the phone; the picture is over-bright and mesh draws are missing on Turnip (the note, Open)
 status	bring-up
+
+# The library contains 500 mesh and 20 task programs. There is no compute fallback
+# on the Vulkan replay: without these features it drops foliage and other models.
+# Check reported capabilities, not the driver name (including Qualcomm drivers).
+required	ext.VK_EXT_mesh_shader	1	Mesh shaders: foliage and other models need VK_EXT_mesh_shader; this build has no fallback and would leave their geometry out
+required	feature.meshShader	1	Mesh shaders: the driver must enable the mesh stage to draw the game's mesh programs
+required	feature.taskShader	1	Task shaders: the game's task programs generate mesh workgroups and cannot run without taskShader

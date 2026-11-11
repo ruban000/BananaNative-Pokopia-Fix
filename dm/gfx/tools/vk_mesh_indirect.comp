@@ -1,0 +1,46 @@
+#version 450
+
+// Bindings 1 and 2 are the original NVN record and the prepared commands.
+// Binding 0 holds task records during preparation. Binding 3 is the usual
+// mesh control record, with the source word offset initially in word 4.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) writeonly buffer Tasks { uint w[]; } tasks;
+layout(set = 0, binding = 1, std430) readonly buffer Record { uint w[]; } record;
+layout(set = 0, binding = 2, std430) writeonly buffer Args { uint w[8]; } args;
+layout(set = 0, binding = 3, std430) buffer Control { uint w[8]; } ctl;
+shared uint dispatch_count;
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    bool task = ctl.w[0] != 0u;
+    if (lane == 0u) {
+        uint offset = ctl.w[4];
+        uint count = record.w[offset];
+        uint first = record.w[offset + 1u];
+        uint groups = count <= ctl.w[7] ? count : 0u;
+        dispatch_count = groups;
+
+        args.w[0] = groups;
+        args.w[1] = 1u;
+        args.w[2] = 1u;
+        args.w[3] = count;
+        args.w[4] = task ? 0u : groups * ctl.w[3];
+        args.w[5] = 1u;
+        args.w[6] = 0u;
+        args.w[7] = 0u;
+
+        if (!task) ctl.w[2] = first;
+        ctl.w[4] = first;
+        ctl.w[6] = groups;
+    }
+    barrier();
+    if (task) {
+        for (uint i = lane; i < dispatch_count; i += gl_WorkGroupSize.x) {
+            uint base = i * ctl.w[1];
+            tasks.w[base] = 0u;
+            tasks.w[base + 1u] = 1u;
+            tasks.w[base + 2u] = 1u;
+            tasks.w[base + 3u] = 0u;
+        }
+    }
+}

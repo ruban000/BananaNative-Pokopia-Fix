@@ -464,9 +464,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static final long READINESS_WAIT_MS = 8000;
 
     /** true: the start waits for the check (it calls start() again when the player may go on) */
-    private boolean readinessHold(String id) {
+    private boolean readinessHold(String id, File packDir) {
         if (readinessDone) return false;
-        File files = getExternalFilesDir(null);
+        File files = AppStorage.root(this);
         // the game's environment as start() will set it (the launcher's settings, then the user's lines, which win), less the paths start() sets: the check makes the
         // process's first Vulkan device, and a driver reads some variables only then (FD_DEV_FEATURES, TU_DEBUG: GitHub #40)
         List<String> genv = new ArrayList<>();
@@ -483,7 +483,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             answered[0] = true;
             readinessDecide(id, probeFacts);
         };
-        new Thread(() -> { probeFacts = Native.readiness(denv); probeDone = true; ui.post(decide); }, "nxreadiness").start();
+        new Thread(() -> { String gpu = Native.readiness(denv); probeFacts = (gpu == null ? "unchecked=this host cannot report GPU features" : gpu) + "\n" + MeshReadiness.report(packDir, id, genv); probeDone = true; ui.post(decide); }, "nxreadiness").start();
         ui.postDelayed(() -> { if (!probeDone) probeFacts = "unchecked=the GPU check did not answer in " + READINESS_WAIT_MS / 1000 + " s"; decide.run(); }, READINESS_WAIT_MS);
         return true;
     }
@@ -506,7 +506,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         rChecks = l;
         readinessLine = Readiness.summary(id, f, l);
         String report = Readiness.report(ReadinessActivity.header(this, (p != null ? p.name + " " : "") + id + " (start-up check)"), f, l);
-        try { Files.write(new File(getExternalFilesDir(null), "readiness-" + id + ".txt").toPath(), report.getBytes(StandardCharsets.UTF_8)); } catch (IOException ignored) { /* the screen's report leaves it out */ }
+        try { Files.write(new File(AppStorage.root(this), "readiness-" + id + ".txt").toPath(), report.getBytes(StandardCharsets.UTF_8)); } catch (IOException ignored) { /* the screen's report leaves it out */ }
         readinessDone = true;
         List<Readiness.Check> fails = Readiness.of(l, Readiness.Status.FAIL), warns = Readiness.of(l, Readiness.Status.WARNING);
         String gpu = "GPU: " + Readiness.gpu(f) + "\nMemory: " + f.get("ram_gib") + " GiB as Android reports it.";
@@ -525,6 +525,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             else if (placed) m.append(".\n\nWith this GPU driver (").append(drv == null ? "System" : drv.label()).append(") nothing is drawn: the screen stays black while the game runs. ")
                     .append(drv == null ? "Pick a custom driver that has placed memory maps" : "Pick System (the phone's own driver)")
                     .append(" in Settings › GPU driver, or in this game's Game settings.");
+            else if ("1".equals(f.get("mesh.compute.selected")) && !"1".equals(f.get("mesh.compute.cache")))
+                m.append(".\n\nThe selected compute mesh cache is incomplete or incompatible. Rebuild it or turn off compute mesh mode; Details shows the failed check.");
             else m.append(custom ? ".\n\nThe game may stop or draw wrongly. A custom GPU driver (Settings › GPU driver) may help." : ".\n\nThe game may stop or draw wrongly.");
             readinessDialog("Not ready for this game", m.toString(), details(fails, warns, gpu), report, placed ? "Start anyway (black screen)" : "Try anyway", true);
         } else {   // warnings only ("Ready, with limits"): no notice at the start, it stopped every start; the log has the line (readinessLine) and Settings › Readiness check the details
@@ -600,12 +602,12 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private void start() {
         String id = getIntent().getStringExtra("title_id"), name = getIntent().getStringExtra("name");
         File game = new File(getIntent().getStringExtra("game")), packDir = new File(getIntent().getStringExtra("pack"));
-        File files = getExternalFilesDir(null);
+        File files = AppStorage.root(this);
         try {
             Pack pack = Pack.read(packDir);
             String romfs = pack.romfsPath(game);   // a folder's RomFS folder, or <file>.nup:<selector>/romfs (NUP.md)
             if (romfs == null) throw new IOException(Nup.isNup(game) ? game.getName() + " has no " + pack.romfsSelector() + " with a RomFS" : "no RomFS in " + game);
-            if (readinessHold(id)) return;   // after the pack's own checks (a missing pack says so first), before the save is locked or anything is written
+            if (readinessHold(id, packDir)) return;   // after the pack's own checks (a missing pack says so first), before the save is locked or anything is written
             // A .nup used where it is (PickedNup): the host gets a descriptor of it, fd:<n>/<name>, wherever it would get the file's path (DM_ROMFS, the add-on links);
             // it stays open for this process's life, and the host duplicates it for each image it opens (nup_image.h)
             int nupFd = PickedNup.is(this, game.getPath()) ? PickedNup.detachedFd(this, game) : -1;
