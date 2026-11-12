@@ -112,7 +112,8 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
        OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: its callback writes the size (hle_svc.c)
        OBS_UE_REGION = 26,                                             // the store of Unreal's engine region size before nninitStartup reserves it: the register its upper bits name (dm/tools/ue_region.py, hle_svc.c)
        OBS_SEAD_RATE = 27,                                             // sead's frame-rate controller's sdiv of 60 by its interval: dividend, divisor and controller registers in its upper bits (dm/tools/nso_code.py sead_find, hle_fpslock.c)
-       OBS_MAX = 28 };
+       OBS_PKP_CAM_SUBMIT = 28, OBS_PKP_PROJ_BUILD = 29, OBS_PKP_PROJ_DONE = 30, // Pokopia exact-build opt-in camera observation gates (android/pkp_aspect.c)
+       OBS_MAX = 31 };
 // A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
 // effect when the gate returns (entry.S restores them from the frame), which OBS_STDALLOC_INIT and OBS_UE_REGION do
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));

@@ -68,6 +68,11 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 
 # The host's build-keyed rows: (table, the start of the row's label ('' = any), main build ('' = any), entry); the first that fits classifies a row
 HOST_BINDING = [
+    ('', '', '76a489f3bd3642fa5e18bd83d32c98ba', {'what': 'Pokopia camera aspect hooks in main v2.0.1', 'now': 'build',
+     'goal': 'game', 'purpose': 'rendering',
+     'checked': 'main 76a489f3bd3642fa5e18bd83d32c98ba (Fold 7 observation, 2026-11-11)',
+     'why': 'camera layout/offsets are specific to this exact game build',
+     'blocked': 'future game builds require exact offset and original-word validation'}),
     ('k_locks', 'Unity', '', {'what': "Unity's Application.targetFrameRate at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': 'an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile\'s'}),
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',

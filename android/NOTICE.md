@@ -94,3 +94,10 @@ taps it, from the public GitHub release pages of [MrPurple666/purple-turnip](htt
 [Weab-chan/freedreno_turnip-CI](https://github.com/Weab-chan/freedreno_turnip-CI), [crueter/GameHub-8Elite-Drivers](https://github.com/crueter/GameHub-8Elite-Drivers)
 and [StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers);
 thanks to their authors. Each download keeps its own licence: Mesa's Turnip driver is MIT-licensed, Qualcomm's Adreno driver binaries are proprietary.
+
+**The optional Pokopia world-camera correction is GPL-3.0-or-later.**
+[`dm/host/android/pkp_aspect.c`](../dm/host/android/pkp_aspect.c) adapts the camera/FOV handling in
+[`runtime/games/pkp/render/pkp_aspect.cpp`](https://github.com/Dittobyte/Recompia/blob/75dae2f2ccdada74e6b8ba12ea7de30560a84221/runtime/games/pkp/render/pkp_aspect.cpp)
+from Recompia revision `75dae2f2ccdada74e6b8ba12ea7de30560a84221`, whose file carries `SPDX-License-Identifier: GPL-3.0-or-later`.
+The Android adaptation keeps the game's original aspect field and corrects its completed projection. The GPL implementation lives under
+`dm/host/android/` so the Mac and iPhone host builds do not include it; the MIT files retain their own license.
