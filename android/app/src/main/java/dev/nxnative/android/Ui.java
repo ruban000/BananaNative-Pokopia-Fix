@@ -12,6 +12,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.SoundEffectConstants;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -44,6 +45,11 @@ final class Ui {
     static final int GAP = 12, SECTION_GAP = 24;
 
     static int dp(Context c, float v) { return Math.round(v * c.getResources().getDisplayMetrics().density); }
+
+    /** Use Android's short system click sample so it respects the device's sound-effects setting. */
+    private static void click(View view) {
+        view.playSoundEffect(SoundEffectConstants.CLICK);
+    }
     static int col(Context c, int res) { return c.getColor(res); }
 
     static GradientDrawable round(int fill, float radiusPx, int stroke, int strokePx) {
@@ -76,7 +82,7 @@ final class Ui {
                 MovingBorderDrawable border = new MovingBorderDrawable(dp(c, radiusDp), dp(c, 2));
                 view.setForeground(border);
                 border.start();
-                view.animate().scaleX(1.018f).scaleY(1.018f).setDuration(220)
+                view.animate().scaleX(1.006f).scaleY(1.006f).setDuration(220)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else {
                 Drawable current = view.getForeground();
@@ -152,7 +158,7 @@ final class Ui {
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
-            float inset = stroke * 1.5f;
+            float inset = stroke * 3.0f;
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
             if (rect.width() <= 0 || rect.height() <= 0) return;
             if (sweep == null) {
@@ -175,6 +181,7 @@ final class Ui {
             paint.setMaskFilter(null);
             paint.setStrokeWidth(stroke);
             canvas.drawPath(borderPath, paint);
+            canvas.restoreToCount(save);
         }
 
         @Override protected void onBoundsChange(android.graphics.Rect bounds) {
@@ -560,7 +567,7 @@ final class Ui {
         b.setIncludeFontPadding(false);
         b.setTextColor(col(c, textColor(k)));
         style(c, b, k, 14);
-        b.setOnClickListener(l);
+        b.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
         return b;
     }
 
@@ -591,7 +598,7 @@ final class Ui {
             addView(label, lp);
             setIcon(drawable);
             setContentDescription(s);
-            setOnClickListener(l);
+            setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
             ps5Focus(c, this, 16);
         }
 
@@ -617,7 +624,7 @@ final class Ui {
         v.setContentDescription(description);
         v.setClickable(true);
         v.setFocusable(true);
-        v.setOnClickListener(l);
+        v.setOnClickListener(x -> { click(x); if (l != null) l.onClick(x); });
         v.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 44), dp(c, 44)));
         return v;
     }
@@ -679,7 +686,7 @@ final class Ui {
             view.setMinimumHeight(dp(c, 52));
             view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 12), 0, 0)));
             focusMotion(c, view, 12);
-            view.setOnClickListener(l);
+            view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
             tile = text(c, emoji, 17, R.color.bn_text, 400);
             tile.setGravity(Gravity.CENTER);
             tile.setIncludeFontPadding(false);
