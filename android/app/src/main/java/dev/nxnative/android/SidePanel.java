@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -47,7 +48,7 @@ final class SidePanel extends FrameLayout {
     static final String[] TAB_NAMES = {"Performance", "Display", "Controls", "General"};
     private static final int TAB_PERF = 0, TAB_DISPLAY = 1, TAB_CONTROLS = 2, TAB_GENERAL = 3;
     private int tab = TAB_PERF;
-    private static final int FOCUS = 0xFFFFD54F;   // the tab bar's selected tab and the focus frame: a banana yellow, dark text on it
+    private static final int FOCUS = 0xFF9B8CFF;   // violet accent for the selected tab and controller focus
 
     // A controller: its confirm and back keys (padButtons), the held direction and its repeat
     private int confirm = KeyEvent.KEYCODE_BUTTON_B, back = KeyEvent.KEYCODE_BUTTON_A;
@@ -66,13 +67,23 @@ final class SidePanel extends FrameLayout {
     // The ids of the choices a rebuild gives the focus back to (restyle)
     private static final int ID_SIZE = 5000, ID_TEXT = 5100, ID_FIT = 5200, ID_MAP = 5300, ID_ONE = 5400, ID_RES = 5500, ID_RES_PRESET = 5590;
 
+    /** A deep navy glass-like surface for the in-game overlay. */
+    private static GradientDrawable makePanelBackground() {
+        GradientDrawable bg = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[] {0xF51A2032, 0xF50D1424, 0xF51A1830});
+        bg.setCornerRadius(0);
+        bg.setStroke(1, 0x553C4B72);
+        return bg;
+    }
+
     SidePanel(Activity a, Rows rows) {
         super(a);
         act = a;
         this.rows = rows;
         float dp = getResources().getDisplayMetrics().density;
         View scrim = new View(a);
-        scrim.setBackgroundColor(0x66000000);
+        scrim.setBackgroundColor(0x99050A18);
         scrim.setOnClickListener(v -> close());
         addView(scrim, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         box = new LinearLayout(a);
@@ -83,10 +94,33 @@ final class SidePanel extends FrameLayout {
         scroll.addView(box);
         LinearLayout sh = new LinearLayout(a);   // the tab bar fixed at the top, the tab's rows scrolling under it
         sh.setOrientation(LinearLayout.VERTICAL);
-        sh.setBackgroundColor(0xF0202124);
+        sh.setBackground(makePanelBackground());
+        LinearLayout brand = new LinearLayout(a);
+        brand.setOrientation(LinearLayout.HORIZONTAL);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        brand.setPadding(Math.round(18 * dp), Math.round(12 * dp), Math.round(12 * dp), Math.round(10 * dp));
+        TextView brandTitle = new TextView(a);
+        brandTitle.setText("BANANA NATIVE");
+        brandTitle.setTextColor(0xFFF4F5FF);
+        brandTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        brandTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        brandTitle.setLetterSpacing(0.06f);
+        brand.addView(brandTitle, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+        TextView live = new TextView(a);
+        live.setText("●  IN GAME");
+        live.setTextColor(0xFF9FE5C2);
+        live.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        live.setTypeface(Typeface.DEFAULT_BOLD);
+        live.setPadding(Math.round(9 * dp), Math.round(6 * dp), Math.round(9 * dp), Math.round(6 * dp));
+        GradientDrawable liveBg = new GradientDrawable();
+        liveBg.setColor(0x222CCB86);
+        liveBg.setCornerRadius(999 * dp);
+        live.setBackground(liveBg);
+        brand.addView(live, new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
+        sh.addView(brand, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         tabs = new LinearLayout(a);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setBackgroundColor(0xFF2D2E31);
+        tabs.setBackgroundColor(0xFF151B2B);
         sh.addView(tabs, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         sh.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         addView(sh, new LayoutParams(PanelLook.widthPx(Prefs.panelSize(a), dp, a.getResources().getDisplayMetrics().widthPixels), LayoutParams.MATCH_PARENT, Gravity.END));
@@ -233,9 +267,9 @@ final class SidePanel extends FrameLayout {
         if (now == null || !inside(now) || isInTouchMode()) return;
         float dp = getResources().getDisplayMetrics().density;
         android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
-        d.setColor(0x26FFD54F);
+        d.setColor(0x229B8CFF);
         d.setStroke(Math.round(2.5f * dp), FOCUS);
-        d.setCornerRadius(6 * dp);
+        d.setCornerRadius(10 * dp);
         now.setForeground(d);
         lit = now;
     }
@@ -262,20 +296,25 @@ final class SidePanel extends FrameLayout {
     private void tabBar() {
         tabs.removeAllViews();
         float dp = getResources().getDisplayMetrics().density;
-        int h = Math.max(Math.round(48 * dp), PanelLook.rowPx(Prefs.panelSize(act), dp)), pad = Math.round(4 * dp);
+        int h = Math.max(Math.round(58 * dp), PanelLook.rowPx(Prefs.panelSize(act), dp)), pad = Math.round(3 * dp);
         for (int i = 0; i < TAB_NAMES.length; i++) {
             int k = i;
             boolean on = i == tab;
             TextView t = new TextView(act);
-            t.setText(TAB_NAMES[i]);
+            String[] glyphs = {"⚡", "▣", "⌖", "☷"};
+            t.setText(glyphs[i] + "\n" + TAB_NAMES[i]);
             t.setGravity(Gravity.CENTER);
-            t.setMaxLines(1);
+            t.setMaxLines(2);
             t.setIncludeFontPadding(false);
-            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);   // one size for every tab, set once the bar is laid out (tabTextSize)
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);   // compact icon-and-label navigation
             t.setPadding(pad, 0, pad, 0);
             t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setTextColor(on ? 0xFF000000 : 0xFFE8EAED);
-            t.setBackgroundColor(on ? FOCUS : 0);
+            t.setTextColor(on ? 0xFFFFFFFF : 0xFFB7C0D5);
+            GradientDrawable tabBg = new GradientDrawable();
+            tabBg.setCornerRadius(14 * dp);
+            tabBg.setColor(on ? 0xFF6658D8 : 0x00151B2B);
+            t.setBackground(tabBg);
+            t.setPadding(pad, Math.round(5 * dp), pad, Math.round(5 * dp));
             t.setSelected(on);
             t.setFocusable(true);
             t.setOnClickListener(v -> showTab(k));
@@ -298,17 +337,17 @@ final class SidePanel extends FrameLayout {
      *  Auto-sizing each label on its own shrank "Performance" alone and set it lower than the others */
     private void tabTextSize() {
         if (tabs.getChildCount() <= TAB_NAMES.length) return;
-        float sp = getResources().getDisplayMetrics().scaledDensity, fit = 16;
+        float sp = getResources().getDisplayMetrics().scaledDensity, fit = 11;
         android.graphics.Paint p = new android.graphics.Paint();
         p.setTypeface(Typeface.DEFAULT_BOLD);
-        p.setTextSize(16 * sp);
+        p.setTextSize(11 * sp);
         for (int i = 0; i < TAB_NAMES.length; i++) {
             TextView t = (TextView) tabs.getChildAt(i);
             int room = t.getWidth() - t.getPaddingLeft() - t.getPaddingRight();
             float w = p.measureText(TAB_NAMES[i]);
-            if (room > 0 && w > room) fit = Math.min(fit, 16 * room / w);
+            if (room > 0 && w > room) fit = Math.min(fit, 11 * room / w);
         }
-        float size = Math.max(10, (float) Math.floor(fit * 2) / 2);
+        float size = Math.max(9, (float) Math.floor(fit * 2) / 2);
         for (int i = 0; i < TAB_NAMES.length; i++) ((TextView) tabs.getChildAt(i)).setTextSize(TypedValue.COMPLEX_UNIT_SP, size);
     }
 
