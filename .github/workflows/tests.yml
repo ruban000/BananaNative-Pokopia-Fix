@@ -4,10 +4,7 @@
 name: tests
 
 on:
-  pull_request:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  # Manual-only: the Android APK workflow is the only automatic build.
 
 permissions:
   contents: read
