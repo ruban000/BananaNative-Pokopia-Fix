@@ -695,9 +695,15 @@ public final class MainActivity extends Activity {
         }
         Ui.add(c, play, 16);
         Ui.focusCard(this, c, v -> {
-            // Keep focus on the selected cover: moving focus to the Play child stops
-            // the cover's PS5 border sweep and makes the selection look frozen.
-            play.setVisibility(View.VISIBLE);
+            // Keep focus on the selected cover so its PS5 sweep never freezes.
+            // Reveal Play with a short lift/fade, like the action row on a console hub.
+            if (play.getVisibility() != View.VISIBLE) {
+                play.setAlpha(0f);
+                play.setTranslationY(dp(8));
+                play.setVisibility(View.VISIBLE);
+                play.animate().alpha(1f).translationY(0f).setDuration(260)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            }
         });
         c.setOnFocusChangeListener((v, focused) -> {
             if (focused && play.getVisibility() != View.VISIBLE) {
