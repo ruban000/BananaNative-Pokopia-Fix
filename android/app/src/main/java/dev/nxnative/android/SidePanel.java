@@ -283,7 +283,7 @@ final class SidePanel extends FrameLayout {
                     .withEndAction(() -> { if (previous != lit) previous.setForeground(null); }).start();
             lit = null;
         }
-        if (now == null || !inside(now) || isInTouchMode()) return;
+        if (now == null || !inside(now)) return;
         float dp = getResources().getDisplayMetrics().density;
         android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
         d.setColor(0x229B8CFF);
