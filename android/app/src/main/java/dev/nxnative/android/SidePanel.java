@@ -49,6 +49,18 @@ final class SidePanel extends FrameLayout {
     private static final int TAB_PERF = 0, TAB_DISPLAY = 1, TAB_CONTROLS = 2, TAB_GENERAL = 3;
     private int tab = TAB_PERF;
     private static final int FOCUS = 0xFF9B8CFF;   // violet accent for the selected tab and controller focus
+    private static final String UI_PREFS = "banana_native_side_panel";
+    private static final String UI_ANIMATIONS = "menu_button_animations";
+    private boolean animationsEnabled() {
+        return act.getSharedPreferences(UI_PREFS, Activity.MODE_PRIVATE).getBoolean(UI_ANIMATIONS, true);
+    }
+    private void animateTap(View view) {
+        if (!animationsEnabled()) return;
+        view.animate().cancel();
+        view.setScaleX(0.96f);
+        view.setScaleY(0.96f);
+        view.animate().scaleX(1f).scaleY(1f).setDuration(150).start();
+    }
 
     // A controller: its confirm and back keys (padButtons), the held direction and its repeat
     private int confirm = KeyEvent.KEYCODE_BUTTON_B, back = KeyEvent.KEYCODE_BUTTON_A;
@@ -145,8 +157,8 @@ final class SidePanel extends FrameLayout {
         build();
         look();
         setVisibility(VISIBLE);
-        sheet.setTranslationX(sheet.getLayoutParams().width);
-        sheet.animate().translationX(0).setDuration(180).start();
+        sheet.setTranslationX(animationsEnabled() ? sheet.getLayoutParams().width : 0);
+        if (animationsEnabled()) sheet.animate().translationX(0).setDuration(220).start();
         post(() -> { if (open && !isInTouchMode()) focusFirst(); });
         removeCallbacks(tick);
         refresh();
@@ -157,7 +169,8 @@ final class SidePanel extends FrameLayout {
         open = false;
         heldDir = stickHeld = PadPanel.NONE;
         removeCallbacks(repeat);
-        sheet.animate().translationX(sheet.getLayoutParams().width).setDuration(150).withEndAction(() -> { if (!open) setVisibility(GONE); }).start();
+        if (animationsEnabled()) sheet.animate().translationX(sheet.getLayoutParams().width).setDuration(180).withEndAction(() -> { if (!open) setVisibility(GONE); }).start();
+        else setVisibility(GONE);
     }
 
     /**
@@ -317,7 +330,7 @@ final class SidePanel extends FrameLayout {
             t.setPadding(pad, Math.round(5 * dp), pad, Math.round(5 * dp));
             t.setSelected(on);
             t.setFocusable(true);
-            t.setOnClickListener(v -> showTab(k));
+            t.setOnClickListener(v -> { animateTap(v); showTab(k); });
             t.setContentDescription(TAB_NAMES[i] + " tab, " + (i + 1) + " of " + TAB_NAMES.length + (on ? ", selected" : ""));
             tabs.addView(t, new LinearLayout.LayoutParams(0, h, 1f));
         }
@@ -546,12 +559,31 @@ final class SidePanel extends FrameLayout {
         button.setPadding(Math.round(14 * dp), Math.round(10 * dp), Math.round(14 * dp), Math.round(10 * dp));
         button.setStateListAnimator(null);
         button.setElevation(0);
+        button.setOnTouchListener((v, event) -> {
+            if (!animationsEnabled()) return false;
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                v.animate().cancel();
+                v.animate().scaleX(0.975f).scaleY(0.975f).setDuration(75).start();
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                v.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
+            }
+            return false;
+        });
     }
 
-    /** General: the panel's own look, Pause, Stop and Back to the game */
+    /** General: panel appearance, animation preference, Pause, Stop and Back to the game */
     private void general() {
         note("The game runs on behind this panel; every change applies now and is kept, except those marked for the next start.");
         panelRows();
+        head("Interface");
+        android.widget.CheckBox animations = new android.widget.CheckBox(act);
+        animations.setText("Menu & button animations");
+        animations.setChecked(animationsEnabled());
+        animations.setContentDescription("Toggle menu slide and button press animations");
+        animations.setOnCheckedChangeListener((b, on) ->
+                act.getSharedPreferences(UI_PREFS, Activity.MODE_PRIVATE).edit().putBoolean(UI_ANIMATIONS, on).apply());
+        box.addView(animations);
+        note("Adds smooth panel transitions and a subtle press effect to menu buttons.");
 
         Button pause = new Button(act);   // the game suspended (clock, graphics, threads, audio) until a tap on the screen, or A / Start: GameActivity.pause
         pause.setText("Ⅱ   Pause the game");
