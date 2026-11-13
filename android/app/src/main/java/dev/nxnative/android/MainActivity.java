@@ -589,6 +589,8 @@ public final class MainActivity extends Activity {
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
+        // Keep the game tile clean until the player selects it; selection reveals its Play action.
+        play.setVisibility(View.GONE);
         play.setBackground(Ui.round(0xFFB4D94B, dp(15), 0xFFE0F58A, dp(1)));
         play.label.setTextColor(0xFFFFFFFF);
         play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFF18220F));
@@ -598,7 +600,15 @@ public final class MainActivity extends Activity {
             return c;
         }
         Ui.add(c, play, 16);
-        Ui.focusCard(this, c, v -> { if (play.isEnabled()) play.performClick(); });   // the card's confirm = the big button, whatever it has become (Play, Prepare, …)
+        Ui.focusCard(this, c, v -> {
+            play.setVisibility(View.VISIBLE);
+            play.requestFocus();
+        });
+        c.setOnFocusChangeListener((v, focused) -> {
+            if (focused && play.getVisibility() != View.VISIBLE) {
+                play.setVisibility(View.VISIBLE);
+            }
+        });
         Ui.ps5Focus(this, c, 22);
         check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
