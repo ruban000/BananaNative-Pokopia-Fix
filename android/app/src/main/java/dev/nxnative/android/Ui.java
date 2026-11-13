@@ -150,6 +150,8 @@ final class Ui {
         private final android.graphics.Paint shimmer = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.RectF bounds = new android.graphics.RectF();
         private final android.graphics.Path pill = new android.graphics.Path();
+        private final android.graphics.Matrix shimmerMatrix = new android.graphics.Matrix();
+        private android.graphics.LinearGradient sheen;
         private final float radius, stroke;
         private final android.animation.ValueAnimator animator;
         private float phase;
@@ -182,15 +184,18 @@ final class Ui {
 
             // A narrow, low-opacity diagonal band travels across the frosted surface.
             float w = bounds.width(), h = bounds.height();
-            float cx = bounds.left + (phase + 1.25f) * (w + h) * 0.5f;
-            android.graphics.LinearGradient sheen = new android.graphics.LinearGradient(
-                    cx - h * 0.55f, bounds.top, cx + h * 0.55f, bounds.bottom,
-                    new int[]{0x00FFFFFF, 0x12FFFFFF, 0x32FFFFFF, 0x12FFFFFF, 0x00FFFFFF},
-                    new float[]{0f, 0.38f, 0.5f, 0.62f, 1f},
-                    android.graphics.Shader.TileMode.CLAMP);
-            shimmer.setShader(sheen);
+            if (sheen == null) {
+                sheen = new android.graphics.LinearGradient(
+                        -h, 0, 0, h,
+                        new int[]{0x00FFFFFF, 0x12FFFFFF, 0x32FFFFFF, 0x12FFFFFF, 0x00FFFFFF},
+                        new float[]{0f, 0.38f, 0.5f, 0.62f, 1f},
+                        android.graphics.Shader.TileMode.CLAMP);
+                shimmer.setShader(sheen);
+            }
+            float travel = (phase + 1.25f) * (w + h) * 0.5f - h;
+            shimmerMatrix.setTranslate(bounds.left + travel, bounds.top);
+            sheen.setLocalMatrix(shimmerMatrix);
             canvas.drawRect(bounds, shimmer);
-            shimmer.setShader(null);
             canvas.restoreToCount(save);
 
             // Draw the border last so the shimmer never softens its clean white edge.
@@ -200,7 +205,11 @@ final class Ui {
             edge.clearShadowLayer();
         }
 
-        @Override protected void onBoundsChange(android.graphics.Rect b) { invalidateSelf(); }
+        @Override protected void onBoundsChange(android.graphics.Rect b) {
+            sheen = null; // Rebuild only when the row's measured size changes, not on every animation frame.
+            shimmer.setShader(null);
+            invalidateSelf();
+        }
         @Override public void setAlpha(int alpha) { edge.setAlpha(alpha); shimmer.setAlpha(alpha); invalidateSelf(); }
         @Override public void setColorFilter(android.graphics.ColorFilter filter) { edge.setColorFilter(filter); shimmer.setColorFilter(filter); invalidateSelf(); }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
