@@ -557,7 +557,7 @@ public final class MainActivity extends Activity {
     private View gameCard(Game g) {
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(18), dp(16), dp(16));
-        c.setBackground(Ui.round(0xFF172538, dp(22), 0xFF3C5877, dp(1)));
+        c.setBackground(Ui.round(0xFF172538, dp(22), 0, 0));
         c.setElevation(dp(2));
         LinearLayout top = Ui.row(this);
         top.setGravity(Gravity.TOP);
