@@ -42,10 +42,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK and NDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
-      - name: Install pinned Android NDK
+      - name: Install pinned Android NDK and CMake
         shell: bash
         run: |
           sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
@@ -71,7 +73,7 @@ jobs:
 
       - name: Configure Android SDK path
         run: |
-          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > android/app/local.properties
+          printf 'sdk.dir=%s\\n' "$ANDROID_SDK_ROOT" > android/app/local.properties
 
       - name: Build APK
         working-directory: android/app
