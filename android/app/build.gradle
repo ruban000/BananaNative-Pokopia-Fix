@@ -274,7 +274,7 @@ android {
             minifyEnabled false
             debuggable !nxLive       // bring-up builds: run-as and the app's files stay reachable over adb; the release is not debuggable
             // Personal nxPlay builds can use the runner's temporary debug key; a supplied stable key preserves upgrade compatibility.
-            signingConfig nxLive || (nxPlay && signStore && signAlias && signPass && new File(signStore).isFile()) ? signingConfigs.stable : signingConfigs.debug
+            signingConfig (nxLive || (nxPlay && signStore && signAlias && signPass && new File(signStore).isFile()) ? signingConfigs.stable : signingConfigs.debug)
         }
     }
     externalNativeBuild {
