@@ -146,12 +146,77 @@ public final class MainActivity extends Activity {
         else buildHome(content);
     }
 
+    /** Subtle PS5-inspired animated midnight background with slow flowing light ribbons. */
+    private static final class Ps5AmbientBackground extends android.graphics.drawable.Drawable
+            implements android.graphics.drawable.Animatable {
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path ribbon = new android.graphics.Path();
+        private final android.animation.ValueAnimator animator = android.animation.ValueAnimator.ofFloat(0f, 1f);
+        private float phase;
+
+        Ps5AmbientBackground() {
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            animator.setDuration(14000L);
+            animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            animator.setInterpolator(new android.view.animation.LinearInterpolator());
+            animator.addUpdateListener(a -> {
+                phase = (Float) a.getAnimatedValue();
+                invalidateSelf();
+            });
+        }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            float w = b.width(), h = b.height();
+            if (w <= 0 || h <= 0) return;
+            canvas.drawColor(0xFF05070B);
+
+            // Very restrained navy illumination drifting behind the interface.
+            float drift = (float)Math.sin(phase * Math.PI * 2.0) * w * 0.12f;
+            paint.setShader(new android.graphics.RadialGradient(w * 0.72f + drift, h * 0.34f,
+                    Math.max(w, h) * 0.72f, new int[]{0x182D5B91, 0x08204470, 0x0005070B},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(null);
+
+            // Faint flowing ribbons, inspired by the ambient motion of the PS5 home screen.
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            paint.setStrokeWidth(Math.max(1f, w * 0.0012f));
+            paint.setShader(new android.graphics.LinearGradient(0, h * 0.25f, w, h * 0.8f,
+                    new int[]{0x00000000, 0x143F78B5, 0x0D8BB8E8, 0x00000000},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            for (int i = 0; i < 3; i++) {
+                float y = h * (0.30f + i * 0.19f);
+                float offset = drift * (i + 1) * 0.45f;
+                ribbon.reset();
+                ribbon.moveTo(-w * 0.12f, y + h * 0.10f);
+                ribbon.cubicTo(w * 0.28f + offset, y - h * 0.22f,
+                        w * 0.58f - offset, y + h * 0.25f,
+                        w * 1.12f, y - h * 0.08f);
+                canvas.drawPath(ribbon, paint);
+            }
+            paint.setShader(null);
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+        }
+
+        @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.OPAQUE; }
+        @Override public void start() { if (!animator.isStarted()) animator.start(); }
+        @Override public void stop() { animator.cancel(); }
+        @Override public boolean isRunning() { return animator.isRunning(); }
+    }
+
     private void buildHome(LinearLayout content) {
         overlayRow = null;
         android.widget.ScrollView homeScroll = pageScroll();
-        if (homeScroll != null) homeScroll.setBackground(new android.graphics.drawable.GradientDrawable(
-                android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
-                new int[]{0xFF07111F, 0xFF0D1B2B, 0xFF050A12}));
+        if (homeScroll != null) {
+            Ps5AmbientBackground ambient = new Ps5AmbientBackground();
+            homeScroll.setBackground(ambient);
+            ambient.start();
+        }
 
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
