@@ -90,6 +90,7 @@ final class Ui {
     /** Banana Native focus: a moving white highlight travels around the focused outline. */
     static void ps5Focus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
+        v.setFocusableInTouchMode(true);
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
