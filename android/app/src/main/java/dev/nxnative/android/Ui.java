@@ -101,7 +101,113 @@ final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(0x336B4423), shape, mask);
     }
 
-    /** Shared glass focus treatment for settings rows, tabs and navigation items. */
+    /** Settings-row focus: the pill always follows the row's measured, full content bounds. */
+    static void settingFocus(Context c, View v, float radiusDp) {
+        final Drawable normalBackground = v.getBackground();
+        v.setFocusable(true);
+        v.setFocusableInTouchMode(true);
+        v.setClipChildren(false);
+        v.setClipToPadding(false);
+        v.setOnTouchListener((view, event) -> {
+            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
+            return false;
+        });
+        v.setOnFocusChangeListener((view, focused) -> {
+            Drawable current = view.getForeground();
+            if (current instanceof SettingFocusDrawable) ((SettingFocusDrawable) current).stop();
+            view.animate().cancel();
+            if (focused) {
+                GradientDrawable glass = round(0x302B394A, dp(c, radiusDp), 0x00FFFFFF, 0);
+                view.setBackground(new RippleDrawable(
+                        ColorStateList.valueOf(0x22FFFFFF), glass,
+                        round(Color.WHITE, dp(c, radiusDp), 0, 0)));
+                SettingFocusDrawable highlight = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 1.6f));
+                view.setForeground(highlight);
+                highlight.start();
+                view.animate().alpha(1f).setDuration(180)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            } else {
+                view.setBackground(normalBackground);
+                view.animate().alpha(1f).setDuration(160).start();
+                view.post(() -> {
+                    if (!view.hasFocus()) {
+                        Drawable fg = view.getForeground();
+                        if (fg instanceof SettingFocusDrawable) {
+                            ((SettingFocusDrawable) fg).stop();
+                            view.setForeground(null);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /** A crisp inset outline plus a soft diagonal sheen; one hardware-paced animator drives both. */
+    private static final class SettingFocusDrawable extends Drawable implements android.graphics.drawable.Animatable {
+        private final android.graphics.Paint edge = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint shimmer = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.RectF bounds = new android.graphics.RectF();
+        private final android.graphics.Path pill = new android.graphics.Path();
+        private final float radius, stroke;
+        private final android.animation.ValueAnimator animator;
+        private float phase;
+
+        SettingFocusDrawable(float radius, float stroke) {
+            this.radius = radius;
+            this.stroke = stroke;
+            edge.setStyle(android.graphics.Paint.Style.STROKE);
+            edge.setStrokeWidth(stroke);
+            shimmer.setStyle(android.graphics.Paint.Style.FILL);
+            animator = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
+            animator.setDuration(2400);
+            animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            animator.setInterpolator(new android.view.animation.LinearInterpolator());
+            animator.addUpdateListener(a -> {
+                phase = (Float) a.getAnimatedValue();
+                invalidateSelf();
+            });
+        }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            float inset = Math.max(stroke, 1f);
+            bounds.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
+            if (bounds.width() <= 0 || bounds.height() <= 0) return;
+            pill.reset();
+            pill.addRoundRect(bounds, radius, radius, android.graphics.Path.Direction.CW);
+            int save = canvas.save();
+            canvas.clipPath(pill);
+
+            // A narrow, low-opacity diagonal band travels across the frosted surface.
+            float w = bounds.width(), h = bounds.height();
+            float cx = bounds.left + (phase + 1.25f) * (w + h) * 0.5f;
+            android.graphics.LinearGradient sheen = new android.graphics.LinearGradient(
+                    cx - h * 0.55f, bounds.top, cx + h * 0.55f, bounds.bottom,
+                    new int[]{0x00FFFFFF, 0x12FFFFFF, 0x32FFFFFF, 0x12FFFFFF, 0x00FFFFFF},
+                    new float[]{0f, 0.38f, 0.5f, 0.62f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+            shimmer.setShader(sheen);
+            canvas.drawRect(bounds, shimmer);
+            shimmer.setShader(null);
+            canvas.restoreToCount(save);
+
+            // Draw the border last so the shimmer never softens its clean white edge.
+            edge.setColor(0xE6FFFFFF);
+            edge.setShadowLayer(stroke * 2.4f, 0, 0, 0x99FFFFFF);
+            canvas.drawRoundRect(bounds, radius, radius, edge);
+            edge.clearShadowLayer();
+        }
+
+        @Override protected void onBoundsChange(android.graphics.Rect b) { invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { edge.setAlpha(alpha); shimmer.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { edge.setColorFilter(filter); shimmer.setColorFilter(filter); invalidateSelf(); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+        @Override public void start() { if (!animator.isStarted()) animator.start(); }
+        @Override public void stop() { animator.cancel(); }
+        @Override public boolean isRunning() { return animator.isRunning(); }
+    }
+
+    /** Shared focus treatment for tabs and navigation items. */
     static void focusMotion(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
@@ -725,7 +831,8 @@ final class Ui {
             view.setPadding(dp(c, 10), dp(c, 7), dp(c, 10), dp(c, 7));
             view.setMinimumHeight(dp(c, 52));
             view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 12), 0, 0)));
-            focusMotion(c, view, 12);
+            // Foreground bounds track the complete measured row, including wrapped subtitles and tags.
+            settingFocus(c, view, 12);
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
             tile = text(c, emoji, 17, R.color.bn_text, 400);
             tile.setGravity(Gravity.CENTER);
