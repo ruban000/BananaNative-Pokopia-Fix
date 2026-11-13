@@ -75,6 +75,27 @@ jobs:
         run: |
           printf 'sdk.dir=%s\\n' "$ANDROID_SDK_ROOT" > android/app/local.properties
 
+      - name: Prepare persistent APK signing key
+        shell: bash
+        env:
+          NX_KEYSTORE_BASE64: ${{ secrets.NX_KEYSTORE_BASE64 }}
+          NX_KEY_ALIAS: ${{ secrets.NX_KEY_ALIAS }}
+          NX_KEY_PASSWORD: ${{ secrets.NX_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$NX_KEYSTORE_BASE64" || -z "$NX_KEY_ALIAS" || -z "$NX_KEY_PASSWORD" ]]; then
+            echo "::error::Add NX_KEYSTORE_BASE64, NX_KEY_ALIAS and NX_KEY_PASSWORD in GitHub Actions repository secrets."
+            exit 1
+          fi
+          KEYSTORE="$RUNNER_TEMP/banana-native-ui.jks"
+          printf '%s' "$NX_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          test -s "$KEYSTORE"
+          {
+            echo "NX_SIGN_STORE=$KEYSTORE"
+            echo "NX_SIGN_ALIAS=$NX_KEY_ALIAS"
+            echo "NX_SIGN_PASS=$NX_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
       - name: Build APK
         working-directory: android/app
         run: |
