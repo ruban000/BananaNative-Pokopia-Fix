@@ -151,23 +151,23 @@ public final class MainActivity extends Activity {
         android.widget.ScrollView homeScroll = pageScroll();
         if (homeScroll != null) homeScroll.setBackground(new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
-                new int[]{0xFF101A18, 0xFF182923, 0xFF0B1110}));
+                new int[]{0xFF07111F, 0xFF0D1B2B, 0xFF050A12}));
 
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setPadding(dp(2), dp(8), dp(2), dp(8));
         TextView mark = Ui.text(this, "●", 25, R.color.bn_accent, 800);
-        mark.setTextColor(0xFFFFC94A);
+        mark.setTextColor(0xFF5BA8FF);
         top.addView(mark);
         LinearLayout brand = new LinearLayout(this);
         brand.setOrientation(LinearLayout.VERTICAL);
         brand.setPadding(dp(10), 0, 0, 0);
         TextView brandName = Ui.text(this, "BANANA NATIVE", 17, R.color.bn_text, 800);
-        brandName.setTextColor(0xFFF5F6E9);
+        brandName.setTextColor(0xFFF4F7FC);
         brand.addView(brandName);
         TextView buildTag = Ui.small(this, Prefs.buildId());
-        buildTag.setTextColor(0xFFB5C6B9);
+        buildTag.setTextColor(0xFF9EADC0);
         brand.addView(buildTag);
         top.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         top.addView(Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true)));
@@ -176,9 +176,9 @@ public final class MainActivity extends Activity {
         LinearLayout hero = new LinearLayout(this);
         hero.setOrientation(LinearLayout.VERTICAL);
         hero.setPadding(dp(22), dp(24), dp(22), dp(22));
-        hero.setBackground(Ui.round(0xFF263B2B, dp(24), 0xFF587A43, dp(1)));
+        hero.setBackground(Ui.round(0xFF17283D, dp(24), 0xFF41658E, dp(1)));
         TextView eyebrow = Ui.text(this, "YOUR PLAY SPACE", 11, R.color.bn_text_2, 800);
-        eyebrow.setTextColor(0xFFFFD36A);
+        eyebrow.setTextColor(0xFF8CC5FF);
         hero.addView(eyebrow);
         TextView headline = Ui.text(this, "Ready when you are.", 27, R.color.bn_text, 800);
         headline.setTextColor(0xFFFFFFFF);
@@ -557,7 +557,7 @@ public final class MainActivity extends Activity {
     private View gameCard(Game g) {
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(18), dp(16), dp(16));
-        c.setBackground(Ui.round(0xFF202F25, dp(22), 0xFF526A43, dp(1)));
+        c.setBackground(Ui.round(0xFF172538, dp(22), 0xFF3C5877, dp(1)));
         c.setElevation(dp(2));
         LinearLayout top = Ui.row(this);
         top.setGravity(Gravity.TOP);
@@ -591,9 +591,9 @@ public final class MainActivity extends Activity {
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
         // Keep the game tile clean until the player selects it; selection reveals its Play action.
         play.setVisibility(View.GONE);
-        play.setBackground(Ui.round(0xFFB4D94B, dp(15), 0xFFE0F58A, dp(1)));
+        play.setBackground(Ui.round(0xFF347FD1, dp(15), 0xFF9BCFFF, dp(1)));
         play.label.setTextColor(0xFFFFFFFF);
-        play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFF18220F));
+        play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
         if (other) {   // nothing on this card can work in this app: the sentence, and no button (⋯ still has its folders, saves and Remove)
             Ui.add(c, Ui.body(this, Profile.missing(g.titleId, g.name)), 12);
             c.setOnLongClickListener(v -> { manage(g); return true; });
