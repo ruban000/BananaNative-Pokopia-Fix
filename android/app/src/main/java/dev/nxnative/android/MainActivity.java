@@ -148,7 +148,15 @@ public final class MainActivity extends Activity {
 
     private void buildHome(LinearLayout content) {
         overlayRow = null;
-        content.addView(Ui.header(this, Ui.badge(this, 44), "Banana Native", Prefs.buildId(), Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true))));   // the build identifier under the title (Prefs.buildId, the part of the overlay's build tag after the app's name), so a screenshot of Home names its build; Settings › About has the full tag
+        android.widget.ScrollView homeScroll = pageScroll();
+        if (homeScroll != null) homeScroll.setBackground(new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+                new int[]{0xFF07152D, 0xFF0B2344, 0xFF050B18}));
+        LinearLayout topBar = Ui.header(this, Ui.badge(this, 44), "Banana Native", Prefs.buildId(),
+                Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true)));
+        for (int i = 0; i < topBar.getChildCount(); i++) if (topBar.getChildAt(i) instanceof TextView)
+            ((TextView) topBar.getChildAt(i)).setTextColor(0xFFF4F8FF);
+        content.addView(topBar);
         accessCard = accessCard();
         Ui.add(content, accessCard, 16);
         Ondevice.attach(this, content, content.getChildCount());   // a game being prepared and its progress (hidden when there is none)
@@ -448,18 +456,36 @@ public final class MainActivity extends Activity {
         Button add = Ui.button(this, "Add game", Ui.Kind.QUIET, v -> addGame());
         add.setCompoundDrawablesRelativeWithIntrinsicBounds(Ui.icon(this, R.drawable.ic_add, R.color.bn_accent), null, null, null);
         add.setCompoundDrawablePadding(dp(6));
-        gameBox.addView(Ui.sectionHeader(this, "Your games", add));
-        // One card per game: while a game is being prepared its card is the progress card (Ondevice), at the game's place, or first for a game not listed yet
+        gameBox.addView(Ui.sectionHeader(this, "GAME LIBRARY", add));
+        // A console-style horizontal game rail: large cover tiles, one clear focus target at a time.
+        android.widget.HorizontalScrollView rail = new android.widget.HorizontalScrollView(this);
+        rail.setHorizontalScrollBarEnabled(false);
+        rail.setClipToPadding(false);
+        rail.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout cards = new LinearLayout(this);
+        cards.setOrientation(LinearLayout.HORIZONTAL);
+        cards.setClipToPadding(false);
+        rail.addView(cards, new android.widget.HorizontalScrollView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams railLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        railLp.topMargin = dp(14);
+        gameBox.addView(rail, railLp);
+        // Keep the preparing card in the same rail and preserve its existing pause/resume behavior.
         View pc = Ondevice.cardView();
         if (pc != null && pc.getParent() instanceof ViewGroup) ((ViewGroup) pc.getParent()).removeView(pc);
         boolean placed = false;
-        if (pc != null) { for (Game g : games) placed |= Ondevice.shows(g); if (!placed) { Ui.add(gameBox, pc, 4); placed = true; pc = null; } }
+        if (pc != null) { for (Game g : games) placed |= Ondevice.shows(g); if (!placed) { addRailCard(cards, pc); pc = null; } }
         for (Game g : games) {
-            if (pc != null && Ondevice.shows(g)) { Ui.add(gameBox, pc, gameBox.getChildCount() == 1 ? 4 : Ui.GAP); pc = null; continue; }
-            Ui.add(gameBox, gameCard(g), gameBox.getChildCount() == 1 ? 4 : Ui.GAP);
+            if (pc != null && Ondevice.shows(g)) { addRailCard(cards, pc); pc = null; continue; }
+            addRailCard(cards, gameCard(g));
         }
-        // A controller or keyboard starts on the first game's card (nothing happens in touch mode, where cards take no focus)
-        if (getCurrentFocus() == null && gameBox.getChildCount() > 1) gameBox.getChildAt(1).requestFocus();
+        // The first cover is the initial controller focus; touch users can tap any cover to select it.
+        if (getCurrentFocus() == null && cards.getChildCount() > 0) cards.getChildAt(0).requestFocus();
+    }
+
+    private void addRailCard(LinearLayout rail, View card) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMarginEnd(dp(14));
+        rail.addView(card, lp);
     }
 
     /** No game yet: the banana, the three steps, and Add game */
@@ -495,14 +521,18 @@ public final class MainActivity extends Activity {
     /** A game's card: its tile, name and state, ⋯ Manage at the top right (far from the big button), and one big button: Play, or Prepare when the pack does not fit */
     private View gameCard(Game g) {
         LinearLayout c = Ui.card(this);
-        c.setPadding(dp(16), dp(16), dp(16), dp(16));
+        c.setPadding(dp(16), dp(18), dp(16), dp(16));
+        c.setBackground(Ui.round(0xFF102846, dp(22), 0xFF24466D, dp(1)));
+        c.setElevation(dp(2));
         LinearLayout top = Ui.row(this);
-        TextView tile = Ui.tile(this, g.name, 52);
+        top.setGravity(Gravity.TOP);
+        TextView tile = Ui.tile(this, g.name, 76);
         top.addView(tile);
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.setPadding(dp(14), 0, dp(4), 0);
         TextView name = Ui.text(this, g.name, 17, R.color.bn_text, 700);
+        name.setTextColor(0xFFF4F8FF);
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(name);
@@ -516,12 +546,17 @@ public final class MainActivity extends Activity {
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
         TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();
-        sp.topMargin = dp(6);
-        info.addView(Ui.pill(st), sp);
+        sp.topMargin = dp(8);
+        st.setTextColor(other ? 0xFFFF8B8B : 0xFF9BCBFF);
+        Ui.pill(st).setBackground(Ui.round(0xFF18385D, dp(999), 0xFF315A83, dp(1)));
+        info.addView(st, sp);
         top.addView(info, Ui.weight());
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
+        play.setBackground(Ui.round(0xFF2878D0, dp(15), 0xFF62B5FF, dp(1)));
+        play.label.setTextColor(0xFFFFFFFF);
+        play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
         if (other) {   // nothing on this card can work in this app: the sentence, and no button (⋯ still has its folders, saves and Remove)
             Ui.add(c, Ui.body(this, Profile.missing(g.titleId, g.name)), 12);
             c.setOnLongClickListener(v -> { manage(g); return true; });
@@ -529,6 +564,7 @@ public final class MainActivity extends Activity {
         }
         Ui.add(c, play, 16);
         Ui.focusCard(this, c, v -> { if (play.isEnabled()) play.performClick(); });   // the card's confirm = the big button, whatever it has become (Play, Prepare, …)
+        Ui.ps5Focus(this, c, 22);
         check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
         return c;
