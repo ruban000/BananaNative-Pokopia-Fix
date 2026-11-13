@@ -146,7 +146,7 @@ public final class MainActivity extends Activity {
         else buildHome(content);
     }
 
-    /** Subtle PS5-inspired animated midnight background with slow flowing light ribbons. */
+    /** Layered PS5-inspired ambient background: drifting light fields, depth ribbons and slow particles. */
     private static final class Ps5AmbientBackground extends android.graphics.drawable.Drawable
             implements android.graphics.drawable.Animatable {
         private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
@@ -155,8 +155,7 @@ public final class MainActivity extends Activity {
         private float phase;
 
         Ps5AmbientBackground() {
-            paint.setStyle(android.graphics.Paint.Style.FILL);
-            animator.setDuration(14000L);
+            animator.setDuration(22000L);
             animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
             animator.setInterpolator(new android.view.animation.LinearInterpolator());
             animator.addUpdateListener(a -> {
@@ -165,39 +164,69 @@ public final class MainActivity extends Activity {
             });
         }
 
+        private float wave(float speed, float offset) {
+            return (float) Math.sin((phase * Math.PI * 2.0 * speed) + offset);
+        }
+
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
             float w = b.width(), h = b.height();
             if (w <= 0 || h <= 0) return;
             canvas.drawColor(0xFF05070B);
 
-            // Very restrained navy illumination drifting behind the interface.
-            float drift = (float)Math.sin(phase * Math.PI * 2.0) * w * 0.12f;
-            paint.setShader(new android.graphics.RadialGradient(w * 0.72f + drift, h * 0.34f,
-                    Math.max(w, h) * 0.72f, new int[]{0x182D5B91, 0x08204470, 0x0005070B},
+            // Three independently drifting light fields create depth without washing out the UI.
+            float driftA = wave(1.0f, 0f) * w * 0.13f;
+            float driftB = wave(0.63f, 1.8f) * w * 0.17f;
+            float driftC = wave(1.37f, 3.2f) * w * 0.08f;
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            paint.setShader(new android.graphics.RadialGradient(w * 0.78f + driftA, h * 0.27f,
+                    Math.max(w, h) * 0.76f, new int[]{0x242B5C91, 0x10204470, 0x0005070B},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(new android.graphics.RadialGradient(w * 0.16f + driftB, h * 0.78f,
+                    Math.max(w, h) * 0.62f, new int[]{0x18204D82, 0x08204470, 0x0005070B},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(new android.graphics.RadialGradient(w * 0.52f + driftC, h * 0.48f,
+                    Math.max(w, h) * 0.45f, new int[]{0x0D4A79B8, 0x0005070B},
                     null, android.graphics.Shader.TileMode.CLAMP));
             canvas.drawRect(0, 0, w, h, paint);
             paint.setShader(null);
 
-            // Faint flowing ribbons, inspired by the ambient motion of the PS5 home screen.
+            // Broad, very soft light bands move at different speeds behind the cards.
             paint.setStyle(android.graphics.Paint.Style.STROKE);
             paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            paint.setStrokeWidth(Math.max(1f, w * 0.0012f));
-            paint.setShader(new android.graphics.LinearGradient(0, h * 0.25f, w, h * 0.8f,
-                    new int[]{0x00000000, 0x143F78B5, 0x0D8BB8E8, 0x00000000},
-                    null, android.graphics.Shader.TileMode.CLAMP));
-            for (int i = 0; i < 3; i++) {
-                float y = h * (0.30f + i * 0.19f);
-                float offset = drift * (i + 1) * 0.45f;
+            for (int i = 0; i < 5; i++) {
+                float speed = 0.42f + i * 0.17f;
+                float sway = wave(speed, i * 1.13f);
+                float y = h * (0.18f + i * 0.16f);
+                paint.setStrokeWidth(Math.max(1f, w * (i % 2 == 0 ? 0.0022f : 0.0012f)));
+                paint.setShader(new android.graphics.LinearGradient(0, y - h * 0.25f, w, y + h * 0.25f,
+                        new int[]{0x00000000, i % 2 == 0 ? 0x173D6FA8 : 0x103E83B9,
+                                i % 2 == 0 ? 0x0D8CB9E8 : 0x164A83C4, 0x00000000},
+                        null, android.graphics.Shader.TileMode.CLAMP));
                 ribbon.reset();
-                ribbon.moveTo(-w * 0.12f, y + h * 0.10f);
-                ribbon.cubicTo(w * 0.28f + offset, y - h * 0.22f,
-                        w * 0.58f - offset, y + h * 0.25f,
-                        w * 1.12f, y - h * 0.08f);
+                ribbon.moveTo(-w * 0.16f, y + h * (0.08f + sway * 0.035f));
+                ribbon.cubicTo(w * 0.20f + sway * w * 0.10f, y - h * 0.22f,
+                        w * 0.68f - sway * w * 0.12f, y + h * 0.25f,
+                        w * 1.16f, y - h * (0.07f + sway * 0.025f));
                 canvas.drawPath(ribbon, paint);
             }
             paint.setShader(null);
+
+            // Small distant light points drift at separate rates for a subtle layered/parallax feel.
             paint.setStyle(android.graphics.Paint.Style.FILL);
+            for (int i = 0; i < 22; i++) {
+                float seed = i * 2.399f;
+                float x = (float) ((i * 0.6180339f % 1.0f) * w
+                        + wave(0.35f + (i % 4) * 0.11f, seed) * w * 0.035f);
+                float y = (float) ((i * 0.381966f % 1.0f) * h
+                        + wave(0.28f + (i % 3) * 0.13f, seed * 0.7f) * h * 0.025f);
+                float radius = Math.max(1f, w * (i % 5 == 0 ? 0.0018f : 0.0009f));
+                paint.setColor(i % 4 == 0 ? 0x2A8FC5F5 : 0x1476A6D8);
+                canvas.drawCircle(x, y, radius, paint);
+            }
+            paint.setColor(android.graphics.Color.WHITE);
         }
 
         @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
@@ -666,8 +695,9 @@ public final class MainActivity extends Activity {
         }
         Ui.add(c, play, 16);
         Ui.focusCard(this, c, v -> {
+            // Keep focus on the selected cover: moving focus to the Play child stops
+            // the cover's PS5 border sweep and makes the selection look frozen.
             play.setVisibility(View.VISIBLE);
-            play.requestFocus();
         });
         c.setOnFocusChangeListener((v, focused) -> {
             if (focused && play.getVisibility() != View.VISIBLE) {
