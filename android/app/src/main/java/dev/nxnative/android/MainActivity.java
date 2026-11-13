@@ -214,17 +214,36 @@ public final class MainActivity extends Activity {
             }
             paint.setShader(null);
 
-            // Small distant light points drift at separate rates for a subtle layered/parallax feel.
+            // Layer 1: a denser field of distant particles with independent parallax and twinkle.
             paint.setStyle(android.graphics.Paint.Style.FILL);
-            for (int i = 0; i < 22; i++) {
+            for (int i = 0; i < 68; i++) {
                 float seed = i * 2.399f;
+                float depth = 0.012f + (i % 5) * 0.009f;
                 float x = (float) ((i * 0.6180339f % 1.0f) * w
-                        + wave(0.35f + (i % 4) * 0.11f, seed) * w * 0.035f);
+                        + wave(0.22f + (i % 6) * 0.095f, seed) * w * depth);
                 float y = (float) ((i * 0.381966f % 1.0f) * h
-                        + wave(0.28f + (i % 3) * 0.13f, seed * 0.7f) * h * 0.025f);
-                float radius = Math.max(1f, w * (i % 5 == 0 ? 0.0018f : 0.0009f));
-                paint.setColor(i % 4 == 0 ? 0x2A8FC5F5 : 0x1476A6D8);
+                        + wave(0.19f + (i % 4) * 0.105f, seed * 0.7f) * h * depth);
+                float twinkle = 0.5f + 0.5f * wave(0.7f + (i % 7) * 0.13f, seed * 1.7f);
+                int alpha = 10 + (int) (twinkle * (i % 9 == 0 ? 42 : 19));
+                paint.setColor((alpha << 24) | (i % 5 == 0 ? 0x009FD7FF : 0x006FA9E8));
+                float radius = Math.max(1f, w * (i % 11 == 0 ? 0.0022f : 0.00085f));
                 canvas.drawCircle(x, y, radius, paint);
+            }
+
+            // Layer 2: slow luminous motes with tiny horizontal trails for visible movement.
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            for (int i = 0; i < 13; i++) {
+                float seed = i * 1.731f + 0.8f;
+                float x = (float) ((i * 0.754877f % 1.0f) * w
+                        + wave(0.42f + (i % 4) * 0.16f, seed) * w * 0.055f);
+                float y = (float) ((i * 0.56984f % 1.0f) * h
+                        + wave(0.31f + (i % 3) * 0.17f, seed * 0.8f) * h * 0.04f);
+                float glow = 0.5f + 0.5f * wave(0.55f, seed);
+                int alpha = 18 + (int) (glow * 35);
+                paint.setColor((alpha << 24) | 0x009DD9FF);
+                paint.setStrokeWidth(Math.max(1f, w * 0.0011f));
+                canvas.drawLine(x - w * 0.009f, y, x + w * (0.004f + glow * 0.009f), y - h * 0.002f, paint);
+                canvas.drawCircle(x, y, Math.max(1f, w * 0.0015f), paint);
             }
             paint.setColor(android.graphics.Color.WHITE);
         }
