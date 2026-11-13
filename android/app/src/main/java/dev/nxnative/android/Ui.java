@@ -13,7 +13,8 @@ import android.graphics.drawable.RippleDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.media.AudioManager;
-import android.media.ToneGenerator;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -47,17 +48,37 @@ final class Ui {
 
     static int dp(Context c, float v) { return Math.round(v * c.getResources().getDisplayMetrics().density); }
 
-    // A short, synthesized two-tone UI tick. Unlike playSoundEffect(), this is not
-    // suppressed when Android's optional touch-sounds setting is disabled.
-    private static ToneGenerator uiTone;
+    // Two crisp, high-pitched ticks with a fast decay: a light console-style UI response.
+    private static AudioTrack uiTickTrack;
     private static long lastClickAt;
     private static synchronized void click(View view) {
         long now = android.os.SystemClock.uptimeMillis();
-        if (now - lastClickAt < 42) return;
+        if (now - lastClickAt < 55) return;
         lastClickAt = now;
         try {
-            if (uiTone == null) uiTone = new ToneGenerator(AudioManager.STREAM_MUSIC, 42);
-            uiTone.startTone(ToneGenerator.TONE_PROP_ACK, 42);
+            if (uiTickTrack == null) {
+                final int rate = 44100;
+                short[] samples = new short[(int) (rate * 0.085f)];
+                for (int i = 0; i < samples.length; i++) {
+                    float t = i / (float) rate;
+                    float local;
+                    float frequency;
+                    if (t < 0.010f) { local = t; frequency = 2850f; }
+                    else if (t >= 0.032f && t < 0.044f) { local = t - 0.032f; frequency = 3450f; }
+                    else continue;
+                    float envelope = (float) Math.exp(-local * 360f);
+                    float wave = (float) Math.sin(2.0 * Math.PI * frequency * local);
+                    samples[i] = (short) (wave * envelope * 5200f);
+                }
+                uiTickTrack = new AudioTrack(AudioManager.STREAM_MUSIC, rate,
+                        AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                        samples.length * 2, AudioTrack.MODE_STATIC);
+                uiTickTrack.write(samples, 0, samples.length);
+                uiTickTrack.setVolume(0.55f);
+            }
+            if (uiTickTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) uiTickTrack.stop();
+            uiTickTrack.setPlaybackHeadPosition(0);
+            uiTickTrack.play();
         } catch (RuntimeException ignored) {
             // Sound is optional; never interrupt navigation if audio is unavailable.
         }
@@ -170,7 +191,7 @@ final class Ui {
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
-            float inset = stroke * 3.0f;
+            float inset = stroke * 5.0f;
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
             if (rect.width() <= 0 || rect.height() <= 0) return;
             if (sweep == null) {
