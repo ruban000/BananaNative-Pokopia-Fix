@@ -62,11 +62,9 @@ final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(0x336B4423), shape, mask);
     }
 
-    /** A console-style moving focus frame: follows the focused row and softly scales it into place. */
+    /** Shared glass focus treatment for settings rows, tabs and navigation items. */
     static void focusMotion(Context c, View v, float radiusDp) {
         v.setFocusable(true);
-        // Android does not normally focus a row when it is tapped. Request focus on
-        // touch-down as well, so the same animated selection is visible without a pad.
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
@@ -74,20 +72,16 @@ final class Ui {
         v.setOnFocusChangeListener((view, focused) -> {
             view.animate().cancel();
             if (focused) {
-                GradientDrawable frame = round(0x223E8BFF, dp(c, radiusDp), col(c, R.color.bn_accent), dp(c, 2));
-                frame.setAlpha(0);
-                view.setForeground(frame);
-                android.animation.ValueAnimator reveal = android.animation.ValueAnimator.ofInt(0, 255);
-                reveal.setDuration(220);
-                reveal.addUpdateListener(a -> frame.setAlpha((Integer) a.getAnimatedValue()));
-                reveal.start();
-                view.setScaleX(0.985f);
-                view.setScaleY(0.985f);
+                MovingBorderDrawable border = new MovingBorderDrawable(dp(c, radiusDp), dp(c, 2));
+                view.setForeground(border);
+                border.start();
                 view.animate().scaleX(1.018f).scaleY(1.018f).setDuration(220)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else {
+                Drawable current = view.getForeground();
+                if (current instanceof MovingBorderDrawable) ((MovingBorderDrawable) current).stop();
                 view.animate().scaleX(1f).scaleY(1f).setDuration(170)
-                        .withEndAction(() -> view.setForeground(null)).start();
+                        .withEndAction(() -> { if (!view.hasFocus()) view.setForeground(null); }).start();
             }
         });
     }
