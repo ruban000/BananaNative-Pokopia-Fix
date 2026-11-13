@@ -101,7 +101,7 @@ final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(0x336B4423), shape, mask);
     }
 
-    /** Settings-row focus: the glass pill follows the row's complete measured content bounds. */
+    /** PS5-style focus for settings rows: an inset ring leaves a clear 3dp glass gap. */
     static void settingFocus(Context c, View v, float radiusDp) {
         final Drawable normalBackground = v.getBackground();
         v.setFocusable(true);
@@ -111,7 +111,18 @@ final class Ui {
             ((ViewGroup) v).setClipToPadding(false);
         }
         v.setOnTouchListener((view, event) -> {
-            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
+            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                view.requestFocus();
+                view.animate().cancel();
+                view.animate().scaleX(0.97f).scaleY(0.97f).setDuration(85)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            } else if (event.getAction() == android.view.MotionEvent.ACTION_UP
+                    || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
+                view.animate().cancel();
+                view.animate().scaleX(view.hasFocus() ? 1.03f : 1f)
+                        .scaleY(view.hasFocus() ? 1.03f : 1f).setDuration(160)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            }
             return false;
         });
         v.setOnFocusChangeListener((view, focused) -> {
@@ -119,24 +130,46 @@ final class Ui {
             if (current instanceof SettingFocusDrawable) ((SettingFocusDrawable) current).stop();
             view.animate().cancel();
             if (focused) {
-                // About 13% opacity: a dark frosted-glass tint that keeps row text readable.
-                GradientDrawable glass = round(0x222B394A, dp(c, radiusDp), 0x00FFFFFF, 0);
-                view.setBackground(new RippleDrawable(
-                        ColorStateList.valueOf(0x22FFFFFF), glass,
-                        round(Color.WHITE, dp(c, radiusDp), 0, 0)));
-                SettingFocusDrawable highlight = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2));
+                GradientDrawable glass = round(0x14FFFFFF, dp(c, radiusDp), 0, 0);
+                view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF),
+                        glass, round(Color.WHITE, dp(c, radiusDp), 0, 0)));
+                SettingFocusDrawable highlight = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(highlight);
                 highlight.start();
-                // Small spring-like overshoot, settling at exactly 1.02x.
-                view.animate().scaleX(1.02f).scaleY(1.02f).setDuration(360)
-                        .setInterpolator(input -> {
-                            double t = input;
-                            return (float) (1.0 - Math.exp(-7.5 * t) * Math.cos(10.0 * t));
-                        }).start();
+                view.animate().scaleX(1.03f).scaleY(1.03f).setDuration(220)
+                        .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                view.setElevation(dp(c, 8));
+                if (view instanceof ViewGroup) {
+                    ViewGroup group = (ViewGroup) view;
+                    for (int i = 0; i < group.getChildCount(); i++) {
+                        View child = group.getChildAt(i);
+                        if (child instanceof ImageView) {
+                            child.animate().translationX(dp(c, 4)).setDuration(180)
+                                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                            child.setAlpha(1f);
+                        }
+                    }
+                    if (group.getChildCount() > 0) {
+                        View iconTile = group.getChildAt(0);
+                        iconTile.setBackground(round(0x44FFFFFF, dp(c, 11), 0, 0));
+                    }
+                }
             } else {
                 view.setBackground(normalBackground);
                 view.animate().scaleX(1f).scaleY(1f).setDuration(180)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                view.setElevation(0f);
+                if (view instanceof ViewGroup) {
+                    ViewGroup group = (ViewGroup) view;
+                    for (int i = 0; i < group.getChildCount(); i++) {
+                        View child = group.getChildAt(i);
+                        child.animate().translationX(0).setDuration(160).start();
+                    }
+                    if (group.getChildCount() > 0) {
+                        View iconTile = group.getChildAt(0);
+                        iconTile.setBackground(round(col(c, R.color.bn_tint), dp(c, 11), 0, 0));
+                    }
+                }
                 view.post(() -> {
                     if (!view.hasFocus()) {
                         Drawable fg = view.getForeground();
@@ -158,7 +191,7 @@ final class Ui {
         private final android.graphics.Path pill = new android.graphics.Path();
         private final android.graphics.Matrix shimmerMatrix = new android.graphics.Matrix();
         private android.graphics.LinearGradient sheen;
-        private final float radius, stroke;
+        private final float radius, stroke, gap;
         private final android.animation.ValueAnimator sheenAnimator;
         private final android.animation.ValueAnimator fadeAnimator;
         private float phase;
@@ -191,7 +224,7 @@ final class Ui {
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
-            float inset = Math.max(stroke, 1f);
+            float inset = gap + stroke * 0.5f;
             bounds.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
             if (bounds.width() <= 0 || bounds.height() <= 0) return;
             pill.reset();
