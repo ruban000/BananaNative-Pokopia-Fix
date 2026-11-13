@@ -687,6 +687,11 @@ public final class MainActivity extends Activity {
 
     /** A game's card: its tile, name and state, ⋯ Manage at the top right (far from the big button), and one big button: Play, or Prepare when the pack does not fit */
     private View gameCard(Game g) {
+        // The game header keeps its own surface; Play is a sibling on the page background,
+        // not nested inside the dark header card or another wrapper.
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(18), dp(16), dp(16));
         c.setBackground(Ui.round(0xFF172538, dp(22), 0, 0));
@@ -720,6 +725,7 @@ public final class MainActivity extends Activity {
         top.addView(info, Ui.weight());
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
+        item.addView(c, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
         // Keep the game tile clean until the player selects it; selection reveals its Play action.
         play.setVisibility(View.GONE);
@@ -731,7 +737,10 @@ public final class MainActivity extends Activity {
             c.setOnLongClickListener(v -> { manage(g); return true; });
             return c;
         }
-        Ui.add(c, play, 16);
+        // Only the pill-shaped Play control is visible here; no card, border or background wraps it.
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        playParams.topMargin = dp(12);
+        item.addView(play, playParams);
         Ui.focusCard(this, c, v -> {
             // Keep focus on the selected cover so its PS5 sweep never freezes.
             // Reveal Play with a short lift/fade, like the action row on a console hub.
@@ -752,7 +761,7 @@ public final class MainActivity extends Activity {
         Ui.ps5Focus(this, play, 15);
         check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
-        return c;
+        return item;
     }
 
     /** Why a game cannot start as it is, in a few words (unfinished or busy pack code, another game build, no current shader library), and whether Prepare fixes it */
