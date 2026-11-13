@@ -106,8 +106,10 @@ final class Ui {
         final Drawable normalBackground = v.getBackground();
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
-        v.setClipChildren(false);
-        v.setClipToPadding(false);
+        if (v instanceof ViewGroup) {
+            ((ViewGroup) v).setClipChildren(false);
+            ((ViewGroup) v).setClipToPadding(false);
+        }
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
