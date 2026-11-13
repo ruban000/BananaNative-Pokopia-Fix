@@ -656,9 +656,14 @@ final class TouchControls extends View {
         reset.setOnClickListener(v -> { os.setProgress(50); ss.setProgress(40); hb.setChecked(true); });   // 60 % opacity, 100 % size, the tick on
         box.addView(ol); box.addView(os); box.addView(sl); box.addView(ss); box.addView(hb); box.addView(lb); box.addView(tb); box.addView(reset);
         android.widget.Button ed = new android.widget.Button(ctx);   // the layout editor (runs onEditStart); the picture's position is in the panel's Picture rows (positionRows)
-        ed.setText("Edit the controls layout…");
+        ed.setText("Customize controls layout…");
         ed.setOnClickListener(v -> startEditLayout());
         box.addView(ed);
+        TextView editHint = new TextView(ctx);
+        editHint.setText("Drag a control group to move it, or pinch to resize it. Your layout is saved for this screen shape.");
+        editHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        editHint.setTextColor(Color.LTGRAY);
+        box.addView(editHint);
     }
 
     /** Whether GameActivity keeps the newest log lines over the picture once the game draws (off by default; the settings dialog's last box) */
