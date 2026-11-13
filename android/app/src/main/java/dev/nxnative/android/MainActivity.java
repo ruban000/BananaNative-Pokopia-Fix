@@ -740,7 +740,7 @@ public final class MainActivity extends Activity {
                 play.setTranslationY(dp(8));
                 play.setVisibility(View.VISIBLE);
                 play.animate().alpha(1f).translationY(0f).setDuration(260)
-                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).withEndAction(() -> play.requestFocus()).start();
             }
         });
         c.setOnFocusChangeListener((v, focused) -> {
@@ -748,7 +748,8 @@ public final class MainActivity extends Activity {
                 play.setVisibility(View.VISIBLE);
             }
         });
-        Ui.ps5Focus(this, c, 22);
+        // Keep the outer game card clean: the animated glass outline belongs to the Play action only.
+        Ui.ps5Focus(this, play, 15);
         check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
         return c;
