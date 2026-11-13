@@ -150,7 +150,11 @@ final class Ui {
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
             matrix.setRotate(angle, rect.centerX(), rect.centerY());
             sweep.setLocalMatrix(matrix);
-            // Soft glass-like halo beneath a crisp white moving highlight.
+            // Frosted-glass wash over the focused control, with a soft halo and moving white edge.
+            android.graphics.Paint glass = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            glass.setStyle(android.graphics.Paint.Style.FILL);
+            glass.setColor(0x14FFFFFF);
+            canvas.drawRoundRect(rect, radius, radius, glass);
             paint.setStrokeWidth(stroke * 3.8f);
             paint.setColor(0x66FFFFFF);
             paint.setMaskFilter(new android.graphics.BlurMaskFilter(stroke * 2.4f, android.graphics.BlurMaskFilter.Blur.NORMAL));
