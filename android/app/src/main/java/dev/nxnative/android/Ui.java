@@ -62,6 +62,21 @@ final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(0x336B4423), shape, mask);
     }
 
+    /** A console-style moving focus frame: follows the focused row and softly scales it into place. */
+    static void focusMotion(Context c, View v, float radiusDp) {
+        v.setFocusable(true);
+        v.setOnFocusChangeListener((view, focused) -> {
+            view.animate().cancel();
+            if (focused) {
+                GradientDrawable frame = round(0x223E8BFF, dp(c, radiusDp), col(c, R.color.bn_accent), dp(c, 2));
+                view.setForeground(frame);
+                view.animate().scaleX(1.018f).scaleY(1.018f).setDuration(180).start();
+            } else {
+                view.animate().scaleX(1f).scaleY(1f).setDuration(160).withEndAction(() -> view.setForeground(null)).start();
+            }
+        });
+    }
+
     static Typeface face(int weight) { return Typeface.create(Typeface.SANS_SERIF, weight, false); }
 
     /** A vector icon (res/drawable/ic_*.xml) tinted with a palette color */
@@ -547,6 +562,7 @@ final class Ui {
             view.setPadding(dp(c, 10), dp(c, 7), dp(c, 10), dp(c, 7));
             view.setMinimumHeight(dp(c, 52));
             view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 12), 0, 0)));
+            focusMotion(c, view, 12);
             view.setOnClickListener(l);
             tile = text(c, emoji, 17, R.color.bn_text, 400);
             tile.setGravity(Gravity.CENTER);
@@ -729,6 +745,7 @@ final class Ui {
             tab.setFocusable(true);
             tab.setSelected(on);
             tab.setContentDescription(labels[k] + (on ? ", tab, selected" : ", tab"));
+            focusMotion(c, tab, 10);
             tab.setOnClickListener(v -> { if (i != sel) pick.accept(i); });
             row.addView(tab, wrap());
         }
@@ -751,6 +768,7 @@ final class Ui {
         t.setFocusable(true);
         t.setSelected(selected);
         t.setContentDescription(label);
+        focusMotion(c, t, 12);
         t.setOnClickListener(l);
         return t;
     }
