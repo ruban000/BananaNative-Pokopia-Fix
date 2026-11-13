@@ -65,6 +65,7 @@ final class Ui {
     /** Shared glass focus treatment for settings rows, tabs and navigation items. */
     static void focusMotion(Context c, View v, float radiusDp) {
         v.setFocusable(true);
+        v.setFocusableInTouchMode(true);
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
@@ -116,9 +117,8 @@ final class Ui {
     private static final class MovingBorderDrawable extends Drawable implements android.graphics.drawable.Animatable {
         private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.RectF rect = new android.graphics.RectF();
-        private final android.graphics.Matrix matrix = new android.graphics.Matrix();
         private final float radius, stroke;
-        private final android.graphics.SweepGradient sweep;
+        private android.graphics.SweepGradient sweep;
         private final android.animation.ValueAnimator animator;
         private float angle;
 
@@ -128,10 +128,7 @@ final class Ui {
             paint.setStyle(android.graphics.Paint.Style.STROKE);
             paint.setStrokeWidth(stroke);
             paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            sweep = new android.graphics.SweepGradient(0, 0,
-                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
-                    new float[]{0f, 0.36f, 0.44f, 0.52f, 0.64f});
-            paint.setShader(sweep);
+            // Shader is created at the actual drawable center in onBoundsChange().
             animator = android.animation.ValueAnimator.ofFloat(0f, 360f);
             animator.setDuration(1800);
             animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
@@ -142,8 +139,14 @@ final class Ui {
             android.graphics.Rect b = getBounds();
             float inset = stroke;
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
-            matrix.setRotate(angle, rect.centerX(), rect.centerY());
-            sweep.setLocalMatrix(matrix);
+            if (sweep == null) {
+                sweep = new android.graphics.SweepGradient(rect.centerX(), rect.centerY(),
+                        new int[]{0x00FFFFFF, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
+                        new float[]{0f, 0.36f, 0.44f, 0.52f, 0.64f});
+                paint.setShader(sweep);
+            }
+            canvas.save();
+            canvas.rotate(angle, rect.centerX(), rect.centerY());
             // Frosted-glass wash over the focused control, with a soft halo and moving white edge.
             android.graphics.Paint glass = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
             glass.setStyle(android.graphics.Paint.Style.FILL);
@@ -157,8 +160,15 @@ final class Ui {
             paint.setStrokeWidth(stroke);
             paint.setColor(Color.WHITE);
             canvas.drawRoundRect(rect, radius, radius, paint);
+            canvas.restore();
         }
-        @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
+        @Override protected void onBoundsChange(android.graphics.Rect bounds) {
+            sweep = new android.graphics.SweepGradient(bounds.exactCenterX(), bounds.exactCenterY(),
+                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
+                    new float[]{0f, 0.36f, 0.44f, 0.52f, 0.64f});
+            paint.setShader(sweep);
+            invalidateSelf();
+        }
         @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
         @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
