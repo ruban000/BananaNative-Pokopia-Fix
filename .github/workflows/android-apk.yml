@@ -79,7 +79,7 @@ jobs:
         working-directory: android/app
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon -PnxPlay=true -PnxLabel='Banana Native ui' -PnxPackStage="$RUNNER_TEMP/nxnative-pack/stage" apk
+          ./gradlew --no-daemon -PnxPlay=true -PnxPlayId=dev.nxnative.android.play.ui -PnxLabel='Banana Native ui' -PnxPackStage="$RUNNER_TEMP/nxnative-pack/stage" apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
