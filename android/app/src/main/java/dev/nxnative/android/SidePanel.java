@@ -529,13 +529,33 @@ final class SidePanel extends FrameLayout {
         nextStartRows();
     }
 
+    /** GameHub-style action surface: rounded, full-width controls with a clear action color. */
+    private void actionButton(Button button, int fill, int stroke, int foreground) {
+        float dp = getResources().getDisplayMetrics().density;
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(fill);
+        bg.setCornerRadius(14 * dp);
+        bg.setStroke(Math.round(dp), stroke);
+        button.setBackground(bg);
+        button.setTextColor(foreground);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setAllCaps(false);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(Math.round(52 * dp));
+        button.setPadding(Math.round(14 * dp), Math.round(10 * dp), Math.round(14 * dp), Math.round(10 * dp));
+        button.setStateListAnimator(null);
+        button.setElevation(0);
+    }
+
     /** General: the panel's own look, Pause, Stop and Back to the game */
     private void general() {
         note("The game runs on behind this panel; every change applies now and is kept, except those marked for the next start.");
         panelRows();
 
         Button pause = new Button(act);   // the game suspended (clock, graphics, threads, audio) until a tap on the screen, or A / Start: GameActivity.pause
-        pause.setText("Pause the game");
+        pause.setText("Ⅱ   Pause the game");
+        actionButton(pause, 0xFF29264B, 0xFF7668E8, 0xFFEDEAFF);
         pause.setOnClickListener(v -> { close(); if (act instanceof GameActivity) ((GameActivity) act).pause(); });
         LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         pl.topMargin = Math.round(24 * getResources().getDisplayMetrics().density);
@@ -546,7 +566,8 @@ final class SidePanel extends FrameLayout {
         ret.setOnCheckedChangeListener((b, on) -> Prefs.pauseOnReturn(act, game(), on));
         box.addView(ret);
         Button stop = new Button(act);
-        stop.setText("Stop the game");
+        stop.setText("■   Stop the game");
+        actionButton(stop, 0xFF3A202B, 0xFFB94B62, 0xFFFFE8EC);
         stop.setOnClickListener(v -> padDialog(new AlertDialog.Builder(act).setTitle("Stop the game?").setMessage("The game ends; unsaved progress is lost. The log stays for Share log.")
                 .setPositiveButton("Stop", (d, w) -> { Native.note("stopped by the user"); ExitWatch.stopped(); if (act instanceof GameActivity) ((GameActivity) act).backToFrontend(); android.os.Process.killProcess(android.os.Process.myPid()); })
                 .setNegativeButton("Keep running", null).show()));
@@ -554,7 +575,8 @@ final class SidePanel extends FrameLayout {
         lp.topMargin = Math.round(24 * getResources().getDisplayMetrics().density);
         box.addView(stop, lp);
         Button done = new Button(act);
-        done.setText("Back to the game");
+        done.setText("↩   Back to the game");
+        actionButton(done, 0xFF202B3D, 0xFF526987, 0xFFE7EFFB);
         done.setOnClickListener(v -> close());
         box.addView(done, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
     }
