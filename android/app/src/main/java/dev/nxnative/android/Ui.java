@@ -157,7 +157,7 @@ final class Ui {
             if (rect.width() <= 0 || rect.height() <= 0) return;
             if (sweep == null) {
                 sweep = new android.graphics.SweepGradient(rect.centerX(), rect.centerY(),
-                        new int[]{0x00FFFFFF, 0x00FFFFFF, 0x55FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x55FFFFFF, 0x00FFFFFF},
+                        new int[]{0x00FFFFFF, 0x00FFFFFF, 0x33FFFFFF, 0xCCFFFFFF, 0xCCFFFFFF, 0x33FFFFFF, 0x00FFFFFF},
                         new float[]{0f, 0.37f, 0.43f, 0.47f, 0.53f, 0.59f, 0.65f});
                 paint.setShader(sweep);
                 updateShaderMatrix();
@@ -169,8 +169,8 @@ final class Ui {
             canvas.drawRoundRect(rect, radius, radius, glass);
 
             // Soft halo and crisp highlight are both clipped to the rounded border path.
-            paint.setStrokeWidth(stroke * 4.5f);
-            paint.setMaskFilter(new android.graphics.BlurMaskFilter(stroke * 2.2f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+            paint.setStrokeWidth(stroke * 2.2f);
+            paint.setMaskFilter(new android.graphics.BlurMaskFilter(stroke * 1.0f, android.graphics.BlurMaskFilter.Blur.NORMAL));
             canvas.drawPath(borderPath, paint);
             paint.setMaskFilter(null);
             paint.setStrokeWidth(stroke);
@@ -489,10 +489,7 @@ final class Ui {
      * and l on a tap or the controller's confirm button. The card's own buttons stay separate stops
      */
     static void focusCard(Context c, LinearLayout card, View.OnClickListener l) {
-        android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
-        s.addState(new int[]{android.R.attr.state_focused}, round(col(c, R.color.bn_card), dp(c, 20), col(c, R.color.bn_accent), dp(c, 2.5f)));
-        s.addState(new int[]{}, card.getBackground());
-        card.setBackground(s);
+        // The animated white glass border is the only focus outline; do not add the old blue focus stroke.
         card.setFocusable(true);
         card.setClickable(true);
         card.setOnClickListener(l);
