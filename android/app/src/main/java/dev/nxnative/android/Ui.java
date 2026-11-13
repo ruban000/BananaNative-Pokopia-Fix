@@ -114,10 +114,13 @@ final class Ui {
         });
     }
 
-    /** A short white sweep rotating continuously around a rounded focus border. */
+    /** A moving white highlight that stays on the rounded outline; the glass surface itself never rotates. */
     private static final class MovingBorderDrawable extends Drawable implements android.graphics.drawable.Animatable {
         private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint glass = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.RectF rect = new android.graphics.RectF();
+        private final android.graphics.Path borderPath = new android.graphics.Path();
+        private final android.graphics.Matrix shaderMatrix = new android.graphics.Matrix();
         private final float radius, stroke;
         private android.graphics.SweepGradient sweep;
         private final android.animation.ValueAnimator animator;
@@ -129,48 +132,62 @@ final class Ui {
             paint.setStyle(android.graphics.Paint.Style.STROKE);
             paint.setStrokeWidth(stroke);
             paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            // Shader is created at the actual drawable center in onBoundsChange().
+            glass.setStyle(android.graphics.Paint.Style.FILL);
+            glass.setColor(0x18FFFFFF);
             animator = android.animation.ValueAnimator.ofFloat(0f, 360f);
             animator.setDuration(1800);
             animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
-            animator.addUpdateListener(a -> { angle = (Float) a.getAnimatedValue(); invalidateSelf(); });
+            animator.addUpdateListener(a -> {
+                angle = (Float) a.getAnimatedValue();
+                updateShaderMatrix();
+                invalidateSelf();
+            });
+        }
+
+        private void updateShaderMatrix() {
+            if (sweep == null || rect.isEmpty()) return;
+            shaderMatrix.setRotate(angle, rect.centerX(), rect.centerY());
+            sweep.setLocalMatrix(shaderMatrix);
         }
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
-            float inset = stroke;
+            float inset = stroke * 1.5f;
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
+            if (rect.width() <= 0 || rect.height() <= 0) return;
             if (sweep == null) {
                 sweep = new android.graphics.SweepGradient(rect.centerX(), rect.centerY(),
-                        new int[]{0x00FFFFFF, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
-                        new float[]{0f, 0.36f, 0.44f, 0.52f, 0.64f});
+                        new int[]{0x00FFFFFF, 0x00FFFFFF, 0x55FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x55FFFFFF, 0x00FFFFFF},
+                        new float[]{0f, 0.37f, 0.43f, 0.47f, 0.53f, 0.59f, 0.65f});
                 paint.setShader(sweep);
+                updateShaderMatrix();
             }
-            canvas.save();
-            canvas.rotate(angle, rect.centerX(), rect.centerY());
-            // Frosted-glass wash over the focused control, with a soft halo and moving white edge.
-            android.graphics.Paint glass = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-            glass.setStyle(android.graphics.Paint.Style.FILL);
-            glass.setColor(0x14FFFFFF);
+            borderPath.reset();
+            borderPath.addRoundRect(rect, radius, radius, android.graphics.Path.Direction.CW);
+
+            // Keep the translucent glass fill stationary beneath the moving edge highlight.
             canvas.drawRoundRect(rect, radius, radius, glass);
-            paint.setStrokeWidth(stroke * 3.8f);
-            paint.setColor(0x66FFFFFF);
-            paint.setMaskFilter(new android.graphics.BlurMaskFilter(stroke * 2.4f, android.graphics.BlurMaskFilter.Blur.NORMAL));
-            canvas.drawRoundRect(rect, radius, radius, paint);
+
+            // Soft halo and crisp highlight are both clipped to the rounded border path.
+            paint.setStrokeWidth(stroke * 4.5f);
+            paint.setMaskFilter(new android.graphics.BlurMaskFilter(stroke * 2.2f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+            canvas.drawPath(borderPath, paint);
             paint.setMaskFilter(null);
             paint.setStrokeWidth(stroke);
-            paint.setColor(Color.WHITE);
-            canvas.drawRoundRect(rect, radius, radius, paint);
-            canvas.restore();
+            canvas.drawPath(borderPath, paint);
         }
+
         @Override protected void onBoundsChange(android.graphics.Rect bounds) {
-            sweep = new android.graphics.SweepGradient(bounds.exactCenterX(), bounds.exactCenterY(),
-                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
-                    new float[]{0f, 0.36f, 0.44f, 0.52f, 0.64f});
+            float inset = stroke * 1.5f;
+            rect.set(bounds.left + inset, bounds.top + inset, bounds.right - inset, bounds.bottom - inset);
+            sweep = new android.graphics.SweepGradient(rect.centerX(), rect.centerY(),
+                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0x55FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x55FFFFFF, 0x00FFFFFF},
+                    new float[]{0f, 0.37f, 0.43f, 0.47f, 0.53f, 0.59f, 0.65f});
             paint.setShader(sweep);
+            updateShaderMatrix();
             invalidateSelf();
         }
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); glass.setAlpha(alpha); invalidateSelf(); }
         @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
         @Override public void start() { if (!animator.isStarted()) animator.start(); }
