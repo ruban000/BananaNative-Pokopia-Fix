@@ -171,6 +171,9 @@ final class Ui {
             borderPath.reset();
             borderPath.addRoundRect(rect, radius, radius, android.graphics.Path.Direction.CW);
 
+            // Clip the glow to the drawable bounds so it cannot spill outside a selected row.
+            int save = canvas.save();
+            canvas.clipRect(getBounds());
             // Keep the translucent glass fill stationary beneath the moving edge highlight.
             canvas.drawRoundRect(rect, radius, radius, glass);
 
@@ -185,7 +188,7 @@ final class Ui {
         }
 
         @Override protected void onBoundsChange(android.graphics.Rect bounds) {
-            float inset = stroke * 1.5f;
+            float inset = stroke * 3.0f;
             rect.set(bounds.left + inset, bounds.top + inset, bounds.right - inset, bounds.bottom - inset);
             sweep = new android.graphics.SweepGradient(rect.centerX(), rect.centerY(),
                     new int[]{0x00FFFFFF, 0x00FFFFFF, 0x55FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x55FFFFFF, 0x00FFFFFF},
@@ -499,7 +502,7 @@ final class Ui {
         // The animated white glass border is the only focus outline; do not add the old blue focus stroke.
         card.setFocusable(true);
         card.setClickable(true);
-        card.setOnClickListener(l);
+        card.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
     }
 
     /** A state line as a pill (the tint, a hairline edge), like the state chip of the settings pages; the words and their color are set by status() */
