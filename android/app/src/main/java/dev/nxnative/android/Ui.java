@@ -150,9 +150,8 @@ final class Ui {
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
             matrix.setRotate(angle, rect.centerX(), rect.centerY());
             sweep.setLocalMatrix(matrix);
-            paint.setShadowLayer(stroke * 1.8f, 0, 0, 0x99FFFFFF);
+            // Keep the control flat and opaque; only the thin white highlight moves.
             canvas.drawRoundRect(rect, radius, radius, paint);
-            paint.clearShadowLayer();
         }
         @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
         @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
