@@ -591,7 +591,7 @@ public final class MainActivity extends Activity {
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
         // Keep the game tile clean until the player selects it; selection reveals its Play action.
         play.setVisibility(View.GONE);
-        play.setBackground(Ui.round(0xFF347FD1, dp(15), 0xFF9BCFFF, dp(1)));
+        play.setBackground(Ui.round(0xFF111820, dp(15), 0xFF46515F, dp(1)));
         play.label.setTextColor(0xFFFFFFFF);
         play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
         if (other) {   // nothing on this card can work in this app: the sentence, and no button (⋯ still has its folders, saves and Remove)
