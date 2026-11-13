@@ -216,7 +216,7 @@ public final class MainActivity extends Activity {
 
             // Layer 1: a denser field of distant particles with independent parallax and twinkle.
             paint.setStyle(android.graphics.Paint.Style.FILL);
-            for (int i = 0; i < 68; i++) {
+            for (int i = 0; i < 128; i++) {
                 float seed = i * 2.399f;
                 float depth = 0.012f + (i % 5) * 0.009f;
                 float x = (float) ((i * 0.6180339f % 1.0f) * w
@@ -232,7 +232,7 @@ public final class MainActivity extends Activity {
 
             // Layer 2: slow luminous motes with tiny horizontal trails for visible movement.
             paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            for (int i = 0; i < 13; i++) {
+            for (int i = 0; i < 24; i++) {
                 float seed = i * 1.731f + 0.8f;
                 float x = (float) ((i * 0.754877f % 1.0f) * w
                         + wave(0.42f + (i % 4) * 0.16f, seed) * w * 0.055f);
@@ -245,6 +245,25 @@ public final class MainActivity extends Activity {
                 canvas.drawLine(x - w * 0.009f, y, x + w * (0.004f + glow * 0.009f), y - h * 0.002f, paint);
                 canvas.drawCircle(x, y, Math.max(1f, w * 0.0015f), paint);
             }
+            // Layer 3: occasional four-point star glints that gently brighten and fade.
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            for (int i = 0; i < 14; i++) {
+                float seed = i * 2.173f + 1.1f;
+                float x = (float) ((i * 0.683281f % 1.0f) * w
+                        + wave(0.28f + (i % 5) * 0.12f, seed) * w * 0.035f);
+                float y = (float) ((i * 0.414214f % 1.0f) * h
+                        + wave(0.23f + (i % 4) * 0.14f, seed * 0.9f) * h * 0.03f);
+                float sparkle = 0.5f + 0.5f * wave(0.9f + (i % 3) * 0.22f, seed);
+                int alpha = 8 + (int) (sparkle * 54);
+                paint.setColor((alpha << 24) | 0x00C5E7FF);
+                float arm = Math.max(2f, w * (0.002f + sparkle * 0.0022f));
+                paint.setStrokeWidth(Math.max(1f, w * 0.0008f));
+                canvas.drawLine(x - arm, y, x + arm, y, paint);
+                canvas.drawLine(x, y - arm, x, y + arm, paint);
+                canvas.drawCircle(x, y, Math.max(1f, arm * 0.22f), paint);
+            }
+            paint.setStyle(android.graphics.Paint.Style.FILL);
             paint.setColor(android.graphics.Color.WHITE);
         }
 
