@@ -92,8 +92,7 @@ final class Ui {
         });
     }
 
-    /** PS5-inspired focus treatment: a cool-blue frame, lift, glow and a smooth scale transition. */
-    /** Banana Native selection: warm lime focus ring with a soft lift and spring-like settle. */
+    /** Banana Native focus: a moving white highlight travels around the focused outline. */
     static void ps5Focus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setOnTouchListener((view, event) -> {
@@ -103,17 +102,65 @@ final class Ui {
         v.setOnFocusChangeListener((view, focused) -> {
             view.animate().cancel();
             if (focused) {
-                GradientDrawable frame = round(0x33C7E96A, dp(c, radiusDp), 0xFFD7F58A, dp(c, 2));
-                view.setForeground(frame);
+                MovingBorderDrawable border = new MovingBorderDrawable(dp(c, radiusDp), dp(c, 2));
+                view.setForeground(border);
+                border.start();
                 view.setElevation(dp(c, 14));
-                view.animate().translationY(-dp(c, 4)).scaleX(1.025f).scaleY(1.025f)
+                view.animate().translationY(-dp(c, 3)).scaleX(1.025f).scaleY(1.025f)
                         .setDuration(230).setInterpolator(new android.view.animation.OvershootInterpolator(0.8f)).start();
             } else {
+                Drawable current = view.getForeground();
+                if (current instanceof MovingBorderDrawable) ((MovingBorderDrawable) current).stop();
                 view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(190)
                         .withEndAction(() -> { if (!view.hasFocus()) view.setForeground(null); }).start();
                 view.setElevation(dp(c, 2));
             }
         });
+    }
+
+    /** A short white sweep rotating continuously around a rounded focus border. */
+    private static final class MovingBorderDrawable extends Drawable implements android.graphics.drawable.Animatable {
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.RectF rect = new android.graphics.RectF();
+        private final android.graphics.Matrix matrix = new android.graphics.Matrix();
+        private final float radius, stroke;
+        private final android.graphics.SweepGradient sweep;
+        private final android.animation.ValueAnimator animator;
+        private float angle;
+
+        MovingBorderDrawable(float radius, float stroke) {
+            this.radius = radius;
+            this.stroke = stroke;
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeWidth(stroke);
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            sweep = new android.graphics.SweepGradient(0, 0,
+                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
+                    new float[]{0f, 0.36f, 0.44f, 0.52f, 0.64f});
+            paint.setShader(sweep);
+            animator = android.animation.ValueAnimator.ofFloat(0f, 360f);
+            animator.setDuration(1800);
+            animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            animator.addUpdateListener(a -> { angle = (Float) a.getAnimatedValue(); invalidateSelf(); });
+        }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            float inset = stroke;
+            rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
+            matrix.setRotate(angle, rect.centerX(), rect.centerY());
+            sweep.setLocalMatrix(matrix);
+            paint.setShadowLayer(stroke * 1.8f, 0, 0, 0x99FFFFFF);
+            canvas.drawRoundRect(rect, radius, radius, paint);
+            paint.clearShadowLayer();
+        }
+        @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+        @Override public void start() { if (!animator.isStarted()) animator.start(); }
+        @Override public void stop() { animator.cancel(); }
+        @Override public boolean isRunning() { return animator.isRunning(); }
     }
 
     static Typeface face(int weight) { return Typeface.create(Typeface.SANS_SERIF, weight, false); }
@@ -516,6 +563,7 @@ final class Ui {
             setIcon(drawable);
             setContentDescription(s);
             setOnClickListener(l);
+            ps5Focus(c, this, 16);
         }
 
         void setText(CharSequence s) { label.setText(s); setContentDescription(s); }
