@@ -92,6 +92,29 @@ final class Ui {
         });
     }
 
+    /** PS5-inspired focus treatment: a cool-blue frame, lift, glow and a smooth scale transition. */
+    static void ps5Focus(Context c, View v, float radiusDp) {
+        v.setFocusable(true);
+        v.setOnTouchListener((view, event) -> {
+            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
+            return false;
+        });
+        v.setOnFocusChangeListener((view, focused) -> {
+            view.animate().cancel();
+            if (focused) {
+                GradientDrawable frame = round(0x332B78D0, dp(c, radiusDp), 0xFF66B7FF, dp(c, 2));
+                view.setForeground(frame);
+                view.setElevation(dp(c, 18));
+                view.animate().translationY(-dp(c, 7)).scaleX(1.045f).scaleY(1.045f)
+                        .setDuration(260).setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            } else {
+                view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(210)
+                        .withEndAction(() -> { if (!view.hasFocus()) view.setForeground(null); }).start();
+                view.setElevation(dp(c, 2));
+            }
+        });
+    }
+
     static Typeface face(int weight) { return Typeface.create(Typeface.SANS_SERIF, weight, false); }
 
     /** A vector icon (res/drawable/ic_*.xml) tinted with a palette color */
