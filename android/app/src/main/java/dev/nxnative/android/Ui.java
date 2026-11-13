@@ -93,6 +93,7 @@ final class Ui {
     }
 
     /** PS5-inspired focus treatment: a cool-blue frame, lift, glow and a smooth scale transition. */
+    /** Banana Native selection: warm lime focus ring with a soft lift and spring-like settle. */
     static void ps5Focus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setOnTouchListener((view, event) -> {
@@ -102,13 +103,13 @@ final class Ui {
         v.setOnFocusChangeListener((view, focused) -> {
             view.animate().cancel();
             if (focused) {
-                GradientDrawable frame = round(0x332B78D0, dp(c, radiusDp), 0xFF66B7FF, dp(c, 2));
+                GradientDrawable frame = round(0x33C7E96A, dp(c, radiusDp), 0xFFD7F58A, dp(c, 2));
                 view.setForeground(frame);
-                view.setElevation(dp(c, 18));
-                view.animate().translationY(-dp(c, 7)).scaleX(1.045f).scaleY(1.045f)
-                        .setDuration(260).setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                view.setElevation(dp(c, 14));
+                view.animate().translationY(-dp(c, 4)).scaleX(1.025f).scaleY(1.025f)
+                        .setDuration(230).setInterpolator(new android.view.animation.OvershootInterpolator(0.8f)).start();
             } else {
-                view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(210)
+                view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(190)
                         .withEndAction(() -> { if (!view.hasFocus()) view.setForeground(null); }).start();
                 view.setElevation(dp(c, 2));
             }
