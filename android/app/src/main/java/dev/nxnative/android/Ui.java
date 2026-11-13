@@ -12,7 +12,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
-import android.view.SoundEffectConstants;
+import android.media.AudioManager;
+import android.media.ToneGenerator;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -46,9 +47,20 @@ final class Ui {
 
     static int dp(Context c, float v) { return Math.round(v * c.getResources().getDisplayMetrics().density); }
 
-    /** Use Android's short system click sample so it respects the device's sound-effects setting. */
-    private static void click(View view) {
-        view.playSoundEffect(SoundEffectConstants.CLICK);
+    // A short, synthesized two-tone UI tick. Unlike playSoundEffect(), this is not
+    // suppressed when Android's optional touch-sounds setting is disabled.
+    private static ToneGenerator uiTone;
+    private static long lastClickAt;
+    private static synchronized void click(View view) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastClickAt < 42) return;
+        lastClickAt = now;
+        try {
+            if (uiTone == null) uiTone = new ToneGenerator(AudioManager.STREAM_MUSIC, 42);
+            uiTone.startTone(ToneGenerator.TONE_PROP_ACK, 42);
+        } catch (RuntimeException ignored) {
+            // Sound is optional; never interrupt navigation if audio is unavailable.
+        }
     }
     static int col(Context c, int res) { return c.getColor(res); }
 
