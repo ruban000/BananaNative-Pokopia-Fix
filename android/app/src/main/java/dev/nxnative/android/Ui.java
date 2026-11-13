@@ -604,6 +604,8 @@ final class Ui {
         b.setTextColor(col(c, textColor(k)));
         style(c, b, k, 14);
         b.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
+        // Every standard button uses the same animated white PS5-style focus edge.
+        ps5Focus(c, b, 14);
         return b;
     }
 
@@ -662,6 +664,8 @@ final class Ui {
         v.setFocusable(true);
         v.setOnClickListener(x -> { click(x); if (l != null) l.onClick(x); });
         v.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 44), dp(c, 44)));
+        // Icon-only controls share the exact same moving white focus treatment.
+        ps5Focus(c, v, 14);
         return v;
     }
 
