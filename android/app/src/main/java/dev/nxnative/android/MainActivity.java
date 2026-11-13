@@ -151,15 +151,50 @@ public final class MainActivity extends Activity {
         android.widget.ScrollView homeScroll = pageScroll();
         if (homeScroll != null) homeScroll.setBackground(new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
-                new int[]{0xFF07152D, 0xFF0B2344, 0xFF050B18}));
-        LinearLayout topBar = Ui.header(this, Ui.badge(this, 44), "Banana Native", Prefs.buildId(),
-                Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true)));
-        for (int i = 0; i < topBar.getChildCount(); i++) if (topBar.getChildAt(i) instanceof TextView)
-            ((TextView) topBar.getChildAt(i)).setTextColor(0xFFF4F8FF);
-        content.addView(topBar);
+                new int[]{0xFF101A18, 0xFF182923, 0xFF0B1110}));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setPadding(dp(2), dp(8), dp(2), dp(8));
+        TextView mark = Ui.text(this, "●", 25, R.color.bn_accent, 800);
+        mark.setTextColor(0xFFFFC94A);
+        top.addView(mark);
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.VERTICAL);
+        brand.setPadding(dp(10), 0, 0, 0);
+        TextView brandName = Ui.text(this, "BANANA NATIVE", 17, R.color.bn_text, 800);
+        brandName.setTextColor(0xFFF5F6E9);
+        brand.addView(brandName);
+        TextView buildTag = Ui.small(this, Prefs.buildId());
+        buildTag.setTextColor(0xFFB5C6B9);
+        brand.addView(buildTag);
+        top.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        top.addView(Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true)));
+        content.addView(top);
+
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setPadding(dp(22), dp(24), dp(22), dp(22));
+        hero.setBackground(Ui.round(0xFF263B2B, dp(24), 0xFF587A43, dp(1)));
+        TextView eyebrow = Ui.text(this, "YOUR PLAY SPACE", 11, R.color.bn_text_2, 800);
+        eyebrow.setTextColor(0xFFFFD36A);
+        hero.addView(eyebrow);
+        TextView headline = Ui.text(this, "Ready when you are.", 27, R.color.bn_text, 800);
+        headline.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams hp = Ui.wrap();
+        hp.topMargin = dp(7);
+        hero.addView(headline, hp);
+        TextView sub = Ui.body(this, "Your games, your settings, your next adventure.");
+        sub.setTextColor(0xFFD0DCCF);
+        LinearLayout.LayoutParams subp = Ui.wrap();
+        subp.topMargin = dp(5);
+        hero.addView(sub, subp);
+        Ui.add(content, hero, 18);
+
         accessCard = accessCard();
         Ui.add(content, accessCard, 16);
-        Ondevice.attach(this, content, content.getChildCount());   // a game being prepared and its progress (hidden when there is none)
+        Ondevice.attach(this, content, content.getChildCount());
         fixGap(content, Ui.GAP);
         gameBox = new LinearLayout(this);
         gameBox.setOrientation(LinearLayout.VERTICAL);
@@ -456,7 +491,7 @@ public final class MainActivity extends Activity {
         Button add = Ui.button(this, "Add game", Ui.Kind.QUIET, v -> addGame());
         add.setCompoundDrawablesRelativeWithIntrinsicBounds(Ui.icon(this, R.drawable.ic_add, R.color.bn_accent), null, null, null);
         add.setCompoundDrawablePadding(dp(6));
-        gameBox.addView(Ui.sectionHeader(this, "GAME LIBRARY", add));
+        gameBox.addView(Ui.sectionHeader(this, "YOUR GAMES", add));
         // A console-style horizontal game rail: large cover tiles, one clear focus target at a time.
         android.widget.HorizontalScrollView rail = new android.widget.HorizontalScrollView(this);
         rail.setHorizontalScrollBarEnabled(false);
@@ -483,7 +518,7 @@ public final class MainActivity extends Activity {
     }
 
     private void addRailCard(LinearLayout rail, View card) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(276), ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMarginEnd(dp(14));
         rail.addView(card, lp);
     }
@@ -522,7 +557,7 @@ public final class MainActivity extends Activity {
     private View gameCard(Game g) {
         LinearLayout c = Ui.card(this);
         c.setPadding(dp(16), dp(18), dp(16), dp(16));
-        c.setBackground(Ui.round(0xFF102846, dp(22), 0xFF24466D, dp(1)));
+        c.setBackground(Ui.round(0xFF202F25, dp(22), 0xFF526A43, dp(1)));
         c.setElevation(dp(2));
         LinearLayout top = Ui.row(this);
         top.setGravity(Gravity.TOP);
@@ -554,9 +589,9 @@ public final class MainActivity extends Activity {
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
-        play.setBackground(Ui.round(0xFF2878D0, dp(15), 0xFF62B5FF, dp(1)));
+        play.setBackground(Ui.round(0xFFB4D94B, dp(15), 0xFFE0F58A, dp(1)));
         play.label.setTextColor(0xFFFFFFFF);
-        play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
+        play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFF18220F));
         if (other) {   // nothing on this card can work in this app: the sentence, and no button (⋯ still has its folders, saves and Remove)
             Ui.add(c, Ui.body(this, Profile.missing(g.titleId, g.name)), 12);
             c.setOnLongClickListener(v -> { manage(g); return true; });
