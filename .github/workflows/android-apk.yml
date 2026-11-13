@@ -22,7 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-apk-${{ github.ref }}
+  # One Android APK build at a time across pushes, PRs and manual runs.
+  group: android-apk-global
   cancel-in-progress: true
 
 jobs:
