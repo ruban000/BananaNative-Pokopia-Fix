@@ -83,9 +83,9 @@ final class SidePanel extends FrameLayout {
     private static GradientDrawable makePanelBackground() {
         GradientDrawable bg = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
-                new int[] {0xF51A2032, 0xF50D1424, 0xF51A1830});
+                new int[] {0xF51B2A20, 0xF5111D17, 0xF51A281D});
         bg.setCornerRadius(0);
-        bg.setStroke(1, 0x553C4B72);
+        bg.setStroke(1, 0x55617A43);
         return bg;
     }
 
@@ -132,7 +132,7 @@ final class SidePanel extends FrameLayout {
         sh.addView(brand, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         tabs = new LinearLayout(a);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setBackgroundColor(0xFF151B2B);
+        tabs.setBackgroundColor(0xFF17221B);
         sh.addView(tabs, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         sh.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         addView(sh, new LayoutParams(PanelLook.widthPx(Prefs.panelSize(a), dp, a.getResources().getDisplayMetrics().widthPixels), LayoutParams.MATCH_PARENT, Gravity.END));
@@ -330,10 +330,10 @@ final class SidePanel extends FrameLayout {
             t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);   // compact icon-and-label navigation
             t.setPadding(pad, 0, pad, 0);
             t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setTextColor(on ? 0xFFFFFFFF : 0xFFB7C0D5);
+            t.setTextColor(on ? 0xFF17210F : 0xFFB9C9B9);
             GradientDrawable tabBg = new GradientDrawable();
             tabBg.setCornerRadius(14 * dp);
-            tabBg.setColor(on ? 0xFF6658D8 : 0x00151B2B);
+            tabBg.setColor(on ? 0xFFB5D84A : 0x0017221B);
             t.setBackground(tabBg);
             t.setPadding(pad, Math.round(5 * dp), pad, Math.round(5 * dp));
             t.setSelected(on);
