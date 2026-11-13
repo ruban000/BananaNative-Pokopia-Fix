@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The launcher's look (MainActivity): cream and banana, no action bar (the screen draws its own header), edge to edge. values-night has the dark parent -->
-    <style name="Theme.Banana" parent="android:Theme.Material.Light.NoActionBar">
+    <!-- Dark console-style launcher theme, edge to edge. -->
+    <style name="Theme.Banana" parent="android:Theme.Material.NoActionBar">
         <item name="android:colorPrimary">@color/bn_banana</item>
         <item name="android:colorPrimaryDark">@color/bn_bg</item>
         <item name="android:colorAccent">@color/bn_accent</item>
@@ -12,12 +12,12 @@
         <item name="android:textColorSecondary">@color/bn_text_2</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
         <item name="android:alertDialogTheme">@style/Theme.Banana.Dialog</item>
     </style>
 
-    <!-- Dialogs: a rounded cream card; buttons in the deep gold accent -->
+    <!-- Dark glass dialogs with blue accent controls. -->
     <style name="Theme.Banana.Dialog" parent="android:Theme.Material.Light.Dialog.Alert">
         <item name="android:colorAccent">@color/bn_accent</item>
         <item name="android:colorControlActivated">@color/bn_accent</item>
@@ -28,7 +28,7 @@
         <item name="android:buttonBarButtonStyle">@style/Banana.DialogButton</item>
     </style>
 
-    <style name="Banana.DialogButton" parent="android:Widget.Material.Light.Button.Borderless.Colored">
+    <style name="Banana.DialogButton" parent="android:Widget.Material.Button.Borderless.Colored">
         <item name="android:textAllCaps">false</item>
         <item name="android:textStyle">bold</item>
         <item name="android:textSize">15sp</item>
