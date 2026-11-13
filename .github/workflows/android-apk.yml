@@ -29,7 +29,7 @@ concurrency:
 jobs:
   build:
     name: Build arm64 Android APK
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - name: Check out source
@@ -65,7 +65,9 @@ jobs:
           python-version: "3.14"
 
       - name: Install native build tools
-        run: brew install ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build zsh perl
 
       - name: Build the on-device packer stage
         shell: zsh {0}
