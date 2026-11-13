@@ -276,7 +276,13 @@ final class SidePanel extends FrameLayout {
 
     /** The focus frame: a yellow outline on the focused row of the panel (not in touch mode, where nothing has the focus) */
     private void focusMoved(View old, View now) {
-        if (lit != null) { lit.setForeground(null); lit = null; }
+        if (lit != null) {
+            View previous = lit;
+            previous.animate().cancel();
+            previous.animate().scaleX(1f).scaleY(1f).setDuration(150)
+                    .withEndAction(() -> { if (previous != lit) previous.setForeground(null); }).start();
+            lit = null;
+        }
         if (now == null || !inside(now) || isInTouchMode()) return;
         float dp = getResources().getDisplayMetrics().density;
         android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
@@ -284,6 +290,8 @@ final class SidePanel extends FrameLayout {
         d.setStroke(Math.round(2.5f * dp), FOCUS);
         d.setCornerRadius(10 * dp);
         now.setForeground(d);
+        now.animate().cancel();
+        now.animate().scaleX(1.018f).scaleY(1.018f).setDuration(180).start();
         lit = now;
     }
 
