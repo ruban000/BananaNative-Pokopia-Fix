@@ -83,9 +83,9 @@ final class SidePanel extends FrameLayout {
     private static GradientDrawable makePanelBackground() {
         GradientDrawable bg = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
-                new int[] {0xF51B2A20, 0xF5111D17, 0xF51A281D});
+                new int[] {0xF5182638, 0xF50B1422, 0xF5162233});
         bg.setCornerRadius(0);
-        bg.setStroke(1, 0x55617A43);
+        bg.setStroke(1, 0x5579A9D8);
         return bg;
     }
 
@@ -132,7 +132,7 @@ final class SidePanel extends FrameLayout {
         sh.addView(brand, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         tabs = new LinearLayout(a);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setBackgroundColor(0xFF17221B);
+        tabs.setBackgroundColor(0xFF101B2A);
         sh.addView(tabs, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         sh.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         addView(sh, new LayoutParams(PanelLook.widthPx(Prefs.panelSize(a), dp, a.getResources().getDisplayMetrics().widthPixels), LayoutParams.MATCH_PARENT, Gravity.END));
@@ -330,10 +330,10 @@ final class SidePanel extends FrameLayout {
             t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);   // compact icon-and-label navigation
             t.setPadding(pad, 0, pad, 0);
             t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setTextColor(on ? 0xFF17210F : 0xFFB9C9B9);
+            t.setTextColor(on ? 0xFFECF4FF : 0xFFB5C2D2);
             GradientDrawable tabBg = new GradientDrawable();
             tabBg.setCornerRadius(14 * dp);
-            tabBg.setColor(on ? 0xFFB5D84A : 0x0017221B);
+            tabBg.setColor(on ? 0xFF397FD0 : 0x00101B2A);
             t.setBackground(tabBg);
             t.setPadding(pad, Math.round(5 * dp), pad, Math.round(5 * dp));
             t.setSelected(on);
@@ -595,7 +595,7 @@ final class SidePanel extends FrameLayout {
 
         Button pause = new Button(act);   // the game suspended (clock, graphics, threads, audio) until a tap on the screen, or A / Start: GameActivity.pause
         pause.setText("Ⅱ   Pause the game");
-        actionButton(pause, 0xFF29264B, 0xFF7668E8, 0xFFEDEAFF);
+        actionButton(pause, 0xFF1D3552, 0xFF5B9FE8, 0xFFF0F6FF);
         pause.setOnClickListener(v -> { close(); if (act instanceof GameActivity) ((GameActivity) act).pause(); });
         LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         pl.topMargin = Math.round(24 * getResources().getDisplayMetrics().density);
