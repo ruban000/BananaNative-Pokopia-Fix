@@ -150,7 +150,14 @@ final class Ui {
             rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
             matrix.setRotate(angle, rect.centerX(), rect.centerY());
             sweep.setLocalMatrix(matrix);
-            // Keep the control flat and opaque; only the thin white highlight moves.
+            // Soft glass-like halo beneath a crisp white moving highlight.
+            paint.setStrokeWidth(stroke * 3.8f);
+            paint.setColor(0x66FFFFFF);
+            paint.setMaskFilter(new android.graphics.BlurMaskFilter(stroke * 2.4f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+            canvas.drawRoundRect(rect, radius, radius, paint);
+            paint.setMaskFilter(null);
+            paint.setStrokeWidth(stroke);
+            paint.setColor(Color.WHITE);
             canvas.drawRoundRect(rect, radius, radius, paint);
         }
         @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
