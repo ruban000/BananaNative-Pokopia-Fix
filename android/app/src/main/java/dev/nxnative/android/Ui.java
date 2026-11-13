@@ -420,8 +420,8 @@ final class Ui {
             // Clip the glow to the drawable bounds so it cannot spill outside a selected row.
             int save = canvas.save();
             canvas.clipRect(getBounds());
-            // Keep the translucent glass fill stationary beneath the moving edge highlight.
-            canvas.drawRoundRect(rect, radius, radius, glass);
+            // This drawable is a foreground, so never paint a fill over the button's text or icons.
+            // Draw only the animated outline; the button's own background remains visible underneath.
 
             // Soft halo and crisp highlight are both clipped to the rounded border path.
             paint.setStrokeWidth(stroke * 2.2f);
