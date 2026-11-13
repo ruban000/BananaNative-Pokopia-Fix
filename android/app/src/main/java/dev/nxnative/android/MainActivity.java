@@ -681,7 +681,12 @@ public final class MainActivity extends Activity {
             steps.addView(chip, lp);
         }
         Ui.add(c, steps, 16, Ui.wrap());
-        Ui.add(c, Ui.action(this, R.drawable.ic_add, "Add game", Ui.Kind.PRIMARY, v -> addGame()), 20);
+        Ui.Action addGame = Ui.action(this, R.drawable.ic_add, "Add game", Ui.Kind.PRIMARY, v -> addGame());
+        // Keep the animated white focus outline on the button's true outer edge:
+        // remove the colored backing layer and extra inset padding.
+        addGame.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        addGame.setPadding(0, 0, 0, 0);
+        Ui.add(c, addGame, 20);
         return c;
     }
 
