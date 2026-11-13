@@ -197,9 +197,10 @@ final class Ui {
         private float phase;
         private float focusAlpha;
 
-        SettingFocusDrawable(float radius, float stroke) {
+        SettingFocusDrawable(float radius, float stroke, float gap) {
             this.radius = radius;
             this.stroke = stroke;
+            this.gap = gap;
             edge.setStyle(android.graphics.Paint.Style.STROKE);
             edge.setStrokeWidth(stroke);
             shimmer.setStyle(android.graphics.Paint.Style.FILL);
