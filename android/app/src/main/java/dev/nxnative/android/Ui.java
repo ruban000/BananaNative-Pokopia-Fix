@@ -42,6 +42,9 @@ import android.widget.TextView;
 final class Ui {
     private Ui() {}
 
+    private static float lastSettingFocusCenterY = Float.NaN;
+    private static int lastSettingFocusHeight;
+
     enum Kind { PRIMARY, TONAL, SOFT, DANGER, QUIET }   // SOFT: an outlined button for use on a tinted surface
 
     static final int GAP = 12, SECTION_GAP = 24;
@@ -136,8 +139,16 @@ final class Ui {
                 SettingFocusDrawable highlight = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(highlight);
                 highlight.start();
-                view.animate().scaleX(1.03f).scaleY(1.03f).setDuration(220)
-                        .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                int[] location = new int[2];
+                view.getLocationOnScreen(location);
+                float centerY = location[1] + view.getHeight() * 0.5f;
+                float glideY = Float.isNaN(lastSettingFocusCenterY) ? 0f : lastSettingFocusCenterY - centerY;
+                float heightStart = lastSettingFocusHeight > 0 && view.getHeight() > 0
+                        ? Math.max(0.82f, Math.min(1.22f, lastSettingFocusHeight / (float) view.getHeight())) : 1f;
+                view.setTranslationY(glideY);
+                view.setScaleY(heightStart);
+                view.animate().translationY(0f).scaleX(1.03f).scaleY(1.03f).setDuration(220)
+                        .setInterpolator(new android.view.animation.PathInterpolator(0f, 0f, 0.2f, 1f)).start();
                 view.setElevation(dp(c, 8));
                 if (view instanceof ViewGroup) {
                     ViewGroup group = (ViewGroup) view;
@@ -155,6 +166,10 @@ final class Ui {
                     }
                 }
             } else {
+                int[] previousLocation = new int[2];
+                view.getLocationOnScreen(previousLocation);
+                lastSettingFocusCenterY = previousLocation[1] + view.getHeight() * 0.5f;
+                lastSettingFocusHeight = view.getHeight();
                 view.setBackground(normalBackground);
                 view.animate().scaleX(1f).scaleY(1f).setDuration(180)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
@@ -189,12 +204,16 @@ final class Ui {
         private final android.graphics.Paint shimmer = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.RectF bounds = new android.graphics.RectF();
         private final android.graphics.Path pill = new android.graphics.Path();
+        private final android.graphics.Path shimmerSegment = new android.graphics.Path();
+        private final android.graphics.PathMeasure perimeter = new android.graphics.PathMeasure();
         private final android.graphics.Matrix shimmerMatrix = new android.graphics.Matrix();
         private android.graphics.LinearGradient sheen;
         private final float radius, stroke, gap;
         private final android.animation.ValueAnimator sheenAnimator;
         private final android.animation.ValueAnimator fadeAnimator;
+        private final android.animation.ValueAnimator glowAnimator;
         private float phase;
+        private float glowPhase;
         private float focusAlpha;
 
         SettingFocusDrawable(float radius, float stroke, float gap) {
@@ -205,12 +224,22 @@ final class Ui {
             edge.setStrokeWidth(stroke);
             shimmer.setStyle(android.graphics.Paint.Style.FILL);
 
-            sheenAnimator = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
-            sheenAnimator.setDuration(2700);
+            sheenAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f);
+            sheenAnimator.setDuration(1800);
             sheenAnimator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
             sheenAnimator.setInterpolator(new android.view.animation.LinearInterpolator());
             sheenAnimator.addUpdateListener(a -> {
                 phase = (Float) a.getAnimatedValue();
+                invalidateSelf();
+            });
+
+            glowAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f);
+            glowAnimator.setDuration(1800);
+            glowAnimator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            glowAnimator.setRepeatMode(android.animation.ValueAnimator.REVERSE);
+            glowAnimator.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
+            glowAnimator.addUpdateListener(a -> {
+                glowPhase = (Float) a.getAnimatedValue();
                 invalidateSelf();
             });
 
@@ -231,37 +260,43 @@ final class Ui {
             pill.reset();
             pill.addRoundRect(bounds, radius, radius, android.graphics.Path.Direction.CW);
 
-            int save = canvas.save();
-            canvas.clipPath(pill);
-
-            // A faint 45-degree white streak sweeps left-to-right every 2.7 seconds.
-            float w = bounds.width(), h = bounds.height();
-            if (sheen == null) {
-                sheen = new android.graphics.LinearGradient(
-                        -h, 0, 0, h,
-                        new int[]{0x00FFFFFF, 0x0AFFFFFF, 0x20FFFFFF, 0x0AFFFFFF, 0x00FFFFFF},
-                        new float[]{0f, 0.38f, 0.5f, 0.62f, 1f},
-                        android.graphics.Shader.TileMode.CLAMP);
-                shimmer.setShader(sheen);
-            }
-            shimmer.setAlpha(Math.round(255f * focusAlpha));
-            float travel = (phase + 1.25f) * (w + h) * 0.5f - h;
-            shimmerMatrix.setTranslate(bounds.left + travel, bounds.top);
-            sheen.setLocalMatrix(shimmerMatrix);
-            canvas.drawRect(bounds, shimmer);
-            canvas.restoreToCount(save);
-
-            // The ambient halo is drawn first; the clean solid white 2dp edge stays sharp.
-            int borderAlpha = Math.round(242f * focusAlpha);
-            edge.setColor(android.graphics.Color.argb(borderAlpha, 255, 255, 255));
-            edge.setShadowLayer(stroke * 3.0f, 0, 0,
-                    android.graphics.Color.argb(Math.round(112f * focusAlpha), 255, 255, 255));
+            // Soft 1.8s breathing halo under a crisp, continuous 2dp white perimeter.
+            float glow = 0.55f + 0.45f * glowPhase;
+            edge.setColor(android.graphics.Color.argb(Math.round(238f * focusAlpha), 255, 255, 255));
+            edge.setShadowLayer(stroke * (2.2f + glow * 2.0f), 0, 0,
+                    android.graphics.Color.argb(Math.round((52f + 68f * glow) * focusAlpha), 255, 255, 255));
             canvas.drawRoundRect(bounds, radius, radius, edge);
             edge.clearShadowLayer();
+
+            // A bright, feathered highlight travels around the actual rounded perimeter.
+            perimeter.setPath(pill, false);
+            float length = perimeter.getLength();
+            if (length > 0f) {
+                float segmentLength = Math.min(length * 0.19f, dpForDrawable(72f));
+                float start = phase * length;
+                shimmerSegment.reset();
+                if (start + segmentLength <= length) {
+                    perimeter.getSegment(start, start + segmentLength, shimmerSegment, true);
+                } else {
+                    perimeter.getSegment(start, length, shimmerSegment, true);
+                    perimeter.getSegment(0f, start + segmentLength - length, shimmerSegment, true);
+                }
+                shimmer.setShader(null);
+                shimmer.setStyle(android.graphics.Paint.Style.STROKE);
+                shimmer.setStrokeWidth(stroke);
+                shimmer.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                shimmer.setColor(android.graphics.Color.argb(Math.round((145f + 85f * glow) * focusAlpha), 255, 255, 255));
+                shimmer.setShadowLayer(stroke * 2.5f, 0, 0,
+                        android.graphics.Color.argb(Math.round(105f * focusAlpha), 255, 255, 255));
+                canvas.drawPath(shimmerSegment, shimmer);
+                shimmer.clearShadowLayer();
+            }
         }
 
+        private float dpForDrawable(float value) { return value; }
+
         @Override protected void onBoundsChange(android.graphics.Rect b) {
-            sheen = null; // Rebuild the gradient only when the row's measured size changes.
+            sheen = null;
             shimmer.setShader(null);
             invalidateSelf();
         }
@@ -270,12 +305,13 @@ final class Ui {
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
         @Override public void start() {
             if (!sheenAnimator.isStarted()) sheenAnimator.start();
+            if (!glowAnimator.isStarted()) glowAnimator.start();
             fadeAnimator.cancel();
             fadeAnimator.setFloatValues(focusAlpha, 1f);
             fadeAnimator.start();
         }
-        @Override public void stop() { sheenAnimator.cancel(); fadeAnimator.cancel(); }
-        @Override public boolean isRunning() { return sheenAnimator.isRunning() || fadeAnimator.isRunning(); }
+        @Override public void stop() { sheenAnimator.cancel(); glowAnimator.cancel(); fadeAnimator.cancel(); }
+        @Override public boolean isRunning() { return sheenAnimator.isRunning() || glowAnimator.isRunning() || fadeAnimator.isRunning(); }
     }
 
     /** Shared focus treatment for tabs and navigation items. */
