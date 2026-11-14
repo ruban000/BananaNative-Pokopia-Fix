@@ -545,6 +545,10 @@ final class Ui {
     static LinearLayout settingsList(Context c) {
         LinearLayout l = new LinearLayout(c);
         l.setOrientation(LinearLayout.VERTICAL);
+        // Keep a 16dp expansion buffer around scaled focus rings; padding belongs to the list, not each row.
+        l.setPadding(dp(c, 16), 0, dp(c, 16), 0);
+        l.setClipChildren(false);
+        l.setClipToPadding(false);
         l.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
         l.setDividerDrawable(new android.graphics.drawable.ColorDrawable(0x14FFFFFF));
         l.setDividerPadding(dp(c, 2));
@@ -606,13 +610,17 @@ final class Ui {
         ScrollView scroll = new ScrollView(a);
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
+        scroll.setClipChildren(false);
         scroll.setScrollBarStyle(View.SCROLLBARS_OUTSIDE_OVERLAY);
         LinearLayout content = new LinearLayout(a);
         content.setOrientation(LinearLayout.VERTICAL);
+        // Let focused rows draw beyond their own bounds while list gutters keep them inside the viewport.
+        content.setClipChildren(false);
+        content.setClipToPadding(false);
         scroll.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         android.graphics.drawable.GradientDrawable ps5Background = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF050A14, 0xFF0D192E});
+                new int[]{0xFF0B101B, 0xFF111B2A});
         scroll.setBackground(ps5Background);
         content.setBackgroundColor(Color.TRANSPARENT);
         frame.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
