@@ -155,8 +155,8 @@ final class Ui {
                 view.setForeground(highlight);
                 highlight.start();
                 view.setPivotX(view.getWidth() * 0.5f);
-                float safeScale = safeFocusScaleX(view, c, 1.03f);
-                view.animate().scaleX(safeScale).scaleY(1.03f).setDuration(220)
+                float safeScale = safeFocusScaleX(view, c, 1.02f);
+                view.animate().scaleX(safeScale).scaleY(1.02f).setDuration(200)
                         .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
                 view.setElevation(dp(c, 8));
                 if (view instanceof ViewGroup) {
@@ -306,7 +306,7 @@ final class Ui {
                 SettingFocusDrawable border = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(border);
                 border.start();
-                view.animate().scaleX(1.006f).scaleY(1.006f).setDuration(220)
+                view.animate().scaleX(1.02f).scaleY(1.02f).setDuration(200)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else {
                 Drawable current = view.getForeground();
@@ -356,9 +356,9 @@ final class Ui {
                 border.start();
                 view.setElevation(dp(c, 8));
                 view.setPivotX(view.getWidth() * 0.5f);
-                float safeScale = safeFocusScaleX(view, c, 1.025f);
-                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.025f)
-                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                float safeScale = safeFocusScaleX(view, c, 1.02f);
+                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.02f)
+                        .setDuration(200).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
             } else {
                 view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(180)
                         .withEndAction(() -> {
@@ -635,7 +635,7 @@ final class Ui {
         scroll.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         android.graphics.drawable.GradientDrawable ps5Background = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF050A14, 0xFF0D192E});
+                new int[]{0xFF0B101B, 0xFF111B2A});
         scroll.setBackground(ps5Background);
         content.setBackgroundColor(Color.TRANSPARENT);
         frame.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1378,7 +1378,7 @@ final class Ui {
         android.graphics.drawable.GradientDrawable ps5Sheet = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[]{0xFF050A14, 0xFF0D192E});
-        ps5Sheet.setCornerRadius(dp(a, 22));
+        ps5Sheet.setCornerRadius(dp(a, 24));
         ps5Sheet.setStroke(dp(a, 1), 0x33FFFFFF);
         sv.setBackground(ps5Sheet);
         content.setBackgroundColor(Color.TRANSPARENT);
