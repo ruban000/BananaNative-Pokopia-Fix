@@ -866,7 +866,7 @@ final class Ui {
             case "🌿": return "✳"; case "🧩": return "◇"; case "🧱": return "▥"; case "🧵": return "≋";
             case "💾": return "▣"; case "⚡": return "ϟ"; case "⏸️": return "Ⅱ"; case "📝": return "≡";
             case "🌐": return "◎"; case "🔁": return "↻"; case "📦": return "□"; case "📲": return "▯";
-            case "🏠": return "⌂"; case "🛠️": return "⚙"; case "🛠": return "⚙"; default: return "◇";
+            case "🏠": return "⌂"; case "🛠️": return "⚙"; default: return "◇";
         }
     }
 
