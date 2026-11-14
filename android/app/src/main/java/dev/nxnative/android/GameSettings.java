@@ -355,8 +355,13 @@ final class GameSettings {
         if (cur == null) return;
         LinearLayout body = Ui.add(content, Ui.row(a), 16);
         body.setGravity(Gravity.TOP);
+        // Both sides of the wide layout must allow the same 16dp focus-frame overflow as the phone Settings list.
+        body.setClipChildren(false);
+        body.setClipToPadding(false);
         LinearLayout nav = new LinearLayout(a);
         nav.setOrientation(LinearLayout.VERTICAL);
+        nav.setClipChildren(false);
+        nav.setClipToPadding(false);
         for (Section s : all) {
             if (s.empty()) continue;
             Ui.add(nav, Ui.navItem(a, s.emoji, s.label, s == cur, v -> { shown = s.key; again.run(); }), 2);
@@ -364,6 +369,8 @@ final class GameSettings {
         body.addView(nav, new LinearLayout.LayoutParams(Ui.dp(a, 210), ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout right = new LinearLayout(a);
         right.setOrientation(LinearLayout.VERTICAL);
+        right.setClipChildren(false);
+        right.setClipToPadding(false);
         LinearLayout.LayoutParams rp = Ui.weight();
         rp.setMarginStart(Ui.dp(a, 20));
         body.addView(right, rp);

@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Dark mode: a warm night (roasted peel browns) with the same banana yellow -->
-    <color name="bn_bg">#FF080F1A</color>
-    <color name="bn_card">#FF172538</color>
-    <color name="bn_card_stroke">#FF344B68</color>
-    <color name="bn_tint">#FF20344D</color>
-    <color name="bn_banana">#FF347FD1</color>
-    <color name="bn_banana_deep">#FF245E9F</color>
-    <color name="bn_on_banana">#FFFFFFFF</color>
-    <color name="bn_text">#FFF1F5FC</color>
-    <color name="bn_text_2">#FFB5C2D2</color>
-    <color name="bn_accent">#FF347FD1</color>
-    <color name="bn_leaf">#FF347FD1</color>
+    <color name="ic_launcher_background">#FF0B101B</color>
+    <color name="bn_bg">#FF0B101B</color>
+    <color name="bn_card">#FF111B2A</color>
+    <color name="bn_card_stroke">#333F536B</color>
+    <color name="bn_tint">#FF1A293C</color>
+    <color name="bn_banana">#FFFFFFFF</color>
+    <color name="bn_banana_deep">#FFDCE5F0</color>
+    <color name="bn_on_banana">#FF0B101B</color>
+    <color name="bn_text">#FFFFFFFF</color>
+    <color name="bn_text_2">#FF9AA8BA</color>
+    <color name="bn_accent">#FFFFFFFF</color>
+    <color name="bn_leaf">#FF0B101B</color>
     <color name="bn_on_leaf">#FFFFFFFF</color>
-    <color name="bn_danger">#FFFF9670</color>
-    <color name="bn_danger_tint">#FF3D2016</color>
-    <color name="bn_warn_tint">#FF3F3014</color>
+    <color name="bn_danger">#FFFF8796</color>
+    <color name="bn_danger_tint">#FF3A202B</color>
+    <color name="bn_warn_tint">#FF382D1D</color>
 </resources>

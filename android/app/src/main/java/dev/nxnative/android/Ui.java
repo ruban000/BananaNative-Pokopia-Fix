@@ -116,13 +116,188 @@ final class Ui {
         return Math.max(1f, Math.min(requested, safe));
     }
 
-    /** PS5-style focus for settings rows: an inset ring leaves a clear 3dp glass gap. */
-    static void settingFocus(Context c, View v, float radiusDp) {
-        final Drawable normalBackground = v.getBackground();
+    /** One shared focus frame per vertical list: it glides between rows instead of drawing separate row borders. */
+    private static final java.util.WeakHashMap<ViewGroup, SharedFocusController> sharedFocusControllers = new java.util.WeakHashMap<>();
+
+    private static final class SharedFocusController {
+        final ViewGroup host;
+        final SharedFocusGlow glow;
+        final android.animation.ValueAnimator slide = android.animation.ValueAnimator.ofFloat(0f, 1f);
+        float fromLeft, fromTop, fromRight, fromBottom;
+        float toLeft, toTop, toRight, toBottom;
+        boolean positioned;
+        boolean attached = true;
+
+        SharedFocusController(ViewGroup host, float radius) {
+            this.host = host;
+            glow = new SharedFocusGlow(radius);
+            slide.setDuration(420);
+            slide.setInterpolator(new android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f));
+            slide.addUpdateListener(a -> {
+                float t = (Float) a.getAnimatedValue();
+                float l = fromLeft + (toLeft - fromLeft) * t;
+                float top = fromTop + (toTop - fromTop) * t;
+                float r = fromRight + (toRight - fromRight) * t;
+                float bottom = fromBottom + (toBottom - fromBottom) * t;
+                glow.setBounds(Math.round(l), Math.round(top), Math.round(r), Math.round(bottom));
+            });
+            host.getOverlay().add(glow);
+            glow.startBreathing();
+        }
+
+        void moveTo(View row, float radius) {
+            // clearIfIdle() may have removed the overlay while focus was outside this list.
+            // Reattach it before every new focus so returning to the list never loses the frame.
+            if (!attached) {
+                host.getOverlay().add(glow);
+                attached = true;
+            }
+            glow.startBreathing();
+            int[] rowPos = new int[2], hostPos = new int[2];
+            row.getLocationOnScreen(rowPos);
+            host.getLocationOnScreen(hostPos);
+            float left = rowPos[0] - hostPos[0] - dp(host.getContext(), 4);
+            float top = rowPos[1] - hostPos[1] - dp(host.getContext(), 3);
+            float right = left + row.getWidth() + dp(host.getContext(), 8);
+            float bottom = top + row.getHeight() + dp(host.getContext(), 6);
+            glow.setRadius(dp(host.getContext(), radius));
+            slide.cancel();
+            if (!positioned) {
+                fromLeft = left; fromTop = top; fromRight = right; fromBottom = bottom;
+                positioned = true;
+                glow.setBounds(Math.round(left), Math.round(top), Math.round(right), Math.round(bottom));
+            } else {
+                fromLeft = glow.getBounds().left;
+                fromTop = glow.getBounds().top;
+                fromRight = glow.getBounds().right;
+                fromBottom = glow.getBounds().bottom;
+            }
+            toLeft = left; toTop = top; toRight = right; toBottom = bottom;
+            slide.start();
+        }
+
+        void clearIfIdle() {
+            host.post(() -> {
+                if (host.findFocus() == null) {
+                    slide.cancel();
+                    glow.stopBreathing();
+                    host.getOverlay().remove(glow);
+                    attached = false;
+                    positioned = false;
+                }
+            });
+        }
+    }
+
+    private static final class SharedFocusGlow extends Drawable {
+        private final android.graphics.Paint border = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint halo = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint innerSheenPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Matrix gradientMatrix = new android.graphics.Matrix();
+        private android.graphics.SweepGradient rimGradient;
+        private android.graphics.LinearGradient innerSheen;
+        private final android.graphics.Rect shaderBounds = new android.graphics.Rect();
+        private float radius;
+        private float rotation;
+        private final android.animation.ValueAnimator rotationAnimator = android.animation.ValueAnimator.ofFloat(0f, 360f);
+
+        SharedFocusGlow(float radius) {
+            this.radius = radius;
+            border.setStyle(android.graphics.Paint.Style.STROKE);
+            border.setStrokeWidth(2f);
+            halo.setStyle(android.graphics.Paint.Style.STROKE);
+            halo.setStrokeWidth(2f);
+            innerSheenPaint.setStyle(android.graphics.Paint.Style.FILL);
+            rotationAnimator.setDuration(7000);
+            rotationAnimator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            rotationAnimator.setInterpolator(new android.view.animation.LinearInterpolator());
+            rotationAnimator.addUpdateListener(a -> {
+                rotation = (Float) a.getAnimatedValue();
+                if (rimGradient != null) {
+                    android.graphics.Rect bounds = getBounds();
+                    gradientMatrix.setRotate(rotation, bounds.exactCenterX(), bounds.exactCenterY());
+                    rimGradient.setLocalMatrix(gradientMatrix);
+                }
+                invalidateSelf();
+            });
+        }
+
+        void setRadius(float value) { radius = value; invalidateSelf(); }
+        void startBreathing() { if (!rotationAnimator.isStarted()) rotationAnimator.start(); }
+        void stopBreathing() { rotationAnimator.cancel(); }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            if (b.width() <= 0 || b.height() <= 0) return;
+            android.graphics.RectF r = new android.graphics.RectF(b.left + 2f, b.top + 2f, b.right - 2f, b.bottom - 2f);
+            android.graphics.Path outline = new android.graphics.Path();
+            outline.addRoundRect(r, radius, radius, android.graphics.Path.Direction.CW);
+
+            int save = canvas.save();
+            canvas.clipPath(outline);
+            if (!shaderBounds.equals(b)) {
+                shaderBounds.set(b);
+                innerSheen = new android.graphics.LinearGradient(0f, r.top, 0f, r.bottom,
+                        new int[]{0x1FFFFFFF, 0x05FFFFFF},
+                        new float[]{0f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+                innerSheenPaint.setShader(innerSheen);
+                rimGradient = new android.graphics.SweepGradient(r.centerX(), r.centerY(),
+                        new int[]{0xFFFFFFFF, 0x80B4DCFF, 0x14FFFFFF, 0x80B4DCFF, 0xFFFFFFFF},
+                        new float[]{0f, 0.22f, 0.5f, 0.78f, 1f});
+                gradientMatrix.setRotate(rotation, r.centerX(), r.centerY());
+                rimGradient.setLocalMatrix(gradientMatrix);
+                border.setShader(rimGradient);
+            }
+            canvas.drawRect(r, innerSheenPaint);
+            canvas.restoreToCount(save);
+
+            // Soft outer white bloom behind the rotating conic rim.
+            halo.setColor(0x28FFFFFF);
+            halo.setShadowLayer(8f, 0f, 0f, 0x66FFFFFF);
+            canvas.drawRoundRect(r, radius, radius, halo);
+            halo.clearShadowLayer();
+
+            border.setStrokeWidth(2f);
+            canvas.drawRoundRect(r, radius, radius, border);
+        }
+
+        @Override public void setAlpha(int alpha) {
+            border.setAlpha(alpha);
+            halo.setAlpha(alpha);
+            innerSheenPaint.setAlpha(alpha);
+            invalidateSelf();
+        }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) {
+            border.setColorFilter(filter);
+            halo.setColorFilter(filter);
+            innerSheenPaint.setColorFilter(filter);
+            invalidateSelf();
+        }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+    }
+
+    private static void animateFocusContent(View view, boolean focused) {
+        if (view instanceof TextView || view instanceof ImageView) {
+            view.animate().cancel();
+            float scale = focused ? 1.015f : 1f;
+            view.setPivotX(view.getWidth() * 0.5f);
+            view.setPivotY(view.getHeight() * 0.5f);
+            view.animate().scaleX(scale).scaleY(scale).setDuration(180)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            // Focus scaling slightly expands glyphs beyond their normal bounds. Let the
+            // text and icon render outside child bounds so the first/last glyph is not cut.
+            group.setClipChildren(false);
+            group.setClipToPadding(false);
+            for (int i = 0; i < group.getChildCount(); i++) animateFocusContent(group.getChildAt(i), focused);
+        }
+    }
+
+    private static void sharedFocus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
-        // Focus handlers are installed before rows are attached; apply overflow rules again
-        // after attachment so the complete parent chain is included.
         allowFocusOverflow(v);
         v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View view) { allowFocusOverflow(view); }
@@ -132,77 +307,62 @@ final class Ui {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
                 view.requestFocus();
                 view.animate().cancel();
-                view.animate().scaleX(0.97f).scaleY(0.97f).setDuration(85)
+                view.animate().scaleX(0.985f).scaleY(0.985f).setDuration(110)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else if (event.getAction() == android.view.MotionEvent.ACTION_UP
                     || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
                 view.animate().cancel();
-                view.animate().scaleX(view.hasFocus() ? 1.03f : 1f)
-                        .scaleY(view.hasFocus() ? 1.03f : 1f).setDuration(160)
+                boolean focused = view.hasFocus();
+                view.animate().scaleX(focused ? safeFocusScaleX(view, c, 1.015f) : 1f)
+                        .scaleY(focused ? 1.015f : 1f).setDuration(280)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             }
             return false;
         });
         v.setOnFocusChangeListener((view, focused) -> {
-            Drawable current = view.getForeground();
-            if (current instanceof SettingFocusDrawable) ((SettingFocusDrawable) current).stop();
+            android.view.ViewParent p = view.getParent();
+            if (!(p instanceof ViewGroup)) return;
+            ViewGroup host = (ViewGroup) p;
+            SharedFocusController controller;
+            synchronized (sharedFocusControllers) {
+                controller = sharedFocusControllers.get(host);
+                if (controller == null) {
+                    controller = new SharedFocusController(host, dp(c, radiusDp));
+                    sharedFocusControllers.put(host, controller);
+                }
+            }
             view.animate().cancel();
             if (focused) {
-                GradientDrawable glass = round(0x14FFFFFF, dp(c, radiusDp), 0, 0);
-                view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF),
-                        glass, round(Color.WHITE, dp(c, radiusDp), 0, 0)));
-                SettingFocusDrawable highlight = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
-                view.setForeground(highlight);
-                highlight.start();
-                view.setPivotX(view.getWidth() * 0.5f);
-                float safeScale = safeFocusScaleX(view, c, 1.03f);
-                view.animate().scaleX(safeScale).scaleY(1.03f).setDuration(220)
-                        .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                controller.moveTo(view, radiusDp);
                 view.setElevation(dp(c, 8));
-                if (view instanceof ViewGroup) {
-                    ViewGroup group = (ViewGroup) view;
-                    for (int i = 0; i < group.getChildCount(); i++) {
-                        View child = group.getChildAt(i);
-                        if (child instanceof ImageView) {
-                            child.animate().translationX(dp(c, 4)).setDuration(180)
-                                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
-                            child.setAlpha(1f);
-                        }
-                    }
-                    // Keep setting icons bare; the selected row itself carries the focus treatment.
-                }
+                view.setPivotX(view.getWidth() * 0.5f);
+                view.animate().translationY(-dp(c, 1.5f)).scaleX(safeFocusScaleX(view, c, 1.015f)).scaleY(1.015f)
+                        .setDuration(320).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                animateFocusContent(view, true);
             } else {
-                view.setBackground(normalBackground);
-                view.animate().scaleX(1f).scaleY(1f).setDuration(180)
+                view.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(180)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
                 view.setElevation(0f);
-                if (view instanceof ViewGroup) {
-                    ViewGroup group = (ViewGroup) view;
-                    for (int i = 0; i < group.getChildCount(); i++) {
-                        View child = group.getChildAt(i);
-                        child.animate().translationX(0).setDuration(160).start();
-                    }
-                    // No per-icon background is applied in either focus state.
-                }
-                view.post(() -> {
-                    if (!view.hasFocus()) {
-                        Drawable fg = view.getForeground();
-                        if (fg instanceof SettingFocusDrawable) {
-                            ((SettingFocusDrawable) fg).stop();
-                            view.setForeground(null);
-                        }
-                    }
-                });
+                animateFocusContent(view, false);
+                controller.clearIfIdle();
             }
         });
+    }
+
+    /** PS5-style settings focus: one shared frame slides to the focused row and resizes to its measured height. */
+    static void settingFocus(Context c, View v, float radiusDp) {
+        sharedFocus(c, v, radiusDp);
     }
 
     /** A 2dp white focus edge, soft ambient halo, and 45-degree sheen; both animations are frame-paced. */
     private static final class SettingFocusDrawable extends Drawable implements android.graphics.drawable.Animatable {
         private final android.graphics.Paint edge = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint shimmer = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint movingGlow = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint movingCore = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.RectF bounds = new android.graphics.RectF();
         private final android.graphics.Path pill = new android.graphics.Path();
+        private final android.graphics.Path glowPath = new android.graphics.Path();
         private final android.graphics.Matrix shimmerMatrix = new android.graphics.Matrix();
         private android.graphics.LinearGradient sheen;
         private final float radius, stroke, gap;
@@ -218,6 +378,12 @@ final class Ui {
             edge.setStyle(android.graphics.Paint.Style.STROKE);
             edge.setStrokeWidth(stroke);
             shimmer.setStyle(android.graphics.Paint.Style.FILL);
+            movingGlow.setStyle(android.graphics.Paint.Style.STROKE);
+            movingGlow.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            movingGlow.setStrokeWidth(stroke * 3.2f);
+            movingCore.setStyle(android.graphics.Paint.Style.STROKE);
+            movingCore.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            movingCore.setStrokeWidth(stroke * 1.25f);
 
             sheenAnimator = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
             sheenAnimator.setDuration(2700);
@@ -272,6 +438,32 @@ final class Ui {
                     android.graphics.Color.argb(Math.round(112f * focusAlpha), 255, 255, 255));
             canvas.drawRoundRect(bounds, radius, radius, edge);
             edge.clearShadowLayer();
+
+            // A bright white segment travels continuously around the rounded focus ring,
+            // like the moving highlight on a PS5 settings selection.
+            android.graphics.PathMeasure measure = new android.graphics.PathMeasure(pill, false);
+            float perimeter = measure.getLength();
+            if (perimeter > 0f && focusAlpha > 0f) {
+                float segment = Math.min(perimeter * 0.24f, Math.max(stroke * 12f, perimeter * 0.16f));
+                float progress = (phase + 1.25f) / 2.5f;
+                float start = progress * perimeter;
+                float end = start + segment;
+                glowPath.reset();
+                if (end <= perimeter) {
+                    measure.getSegment(start, end, glowPath, true);
+                } else {
+                    measure.getSegment(start, perimeter, glowPath, true);
+                    measure.getSegment(0f, end - perimeter, glowPath, true);
+                }
+                int glowAlpha = Math.round(210f * focusAlpha);
+                movingGlow.setColor(android.graphics.Color.argb(glowAlpha, 255, 255, 255));
+                movingGlow.setShadowLayer(stroke * 2.8f, 0, 0,
+                        android.graphics.Color.argb(Math.round(190f * focusAlpha), 255, 255, 255));
+                canvas.drawPath(glowPath, movingGlow);
+                movingGlow.clearShadowLayer();
+                movingCore.setColor(android.graphics.Color.argb(Math.round(245f * focusAlpha), 255, 255, 255));
+                canvas.drawPath(glowPath, movingCore);
+            }
         }
 
         @Override protected void onBoundsChange(android.graphics.Rect b) {
@@ -279,8 +471,8 @@ final class Ui {
             shimmer.setShader(null);
             invalidateSelf();
         }
-        @Override public void setAlpha(int alpha) { edge.setAlpha(alpha); shimmer.setAlpha(alpha); invalidateSelf(); }
-        @Override public void setColorFilter(android.graphics.ColorFilter filter) { edge.setColorFilter(filter); shimmer.setColorFilter(filter); invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { edge.setAlpha(alpha); shimmer.setAlpha(alpha); movingGlow.setAlpha(alpha); movingCore.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { edge.setColorFilter(filter); shimmer.setColorFilter(filter); movingGlow.setColorFilter(filter); movingCore.setColorFilter(filter); invalidateSelf(); }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
         @Override public void start() {
             if (!sheenAnimator.isStarted()) sheenAnimator.start();
@@ -306,7 +498,7 @@ final class Ui {
                 SettingFocusDrawable border = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(border);
                 border.start();
-                view.animate().scaleX(1.006f).scaleY(1.006f).setDuration(220)
+                view.animate().scaleX(1.02f).scaleY(1.02f).setDuration(200)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else {
                 Drawable current = view.getForeground();
@@ -332,47 +524,9 @@ final class Ui {
         }
     }
 
-    /** Banana Native focus: a moving white highlight travels around the focused outline. */
+    /** Choice-sheet and navigation focus use the same shared sliding selection frame. */
     static void ps5Focus(Context c, View v, float radiusDp) {
-        v.setFocusable(true);
-        v.setFocusableInTouchMode(true);
-        // Controls are often styled before their parent is assigned; reapply on attach.
-        allowFocusOverflow(v);
-        v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
-            @Override public void onViewAttachedToWindow(View view) { allowFocusOverflow(view); }
-            @Override public void onViewDetachedFromWindow(View view) { }
-        });
-        v.setOnTouchListener((view, event) -> {
-            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
-            return false;
-        });
-        v.setOnFocusChangeListener((view, focused) -> {
-            Drawable current = view.getForeground();
-            if (current instanceof SettingFocusDrawable) ((SettingFocusDrawable) current).stop();
-            view.animate().cancel();
-            if (focused) {
-                SettingFocusDrawable border = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
-                view.setForeground(border);
-                border.start();
-                view.setElevation(dp(c, 8));
-                view.setPivotX(view.getWidth() * 0.5f);
-                float safeScale = safeFocusScaleX(view, c, 1.025f);
-                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.025f)
-                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
-            } else {
-                view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(180)
-                        .withEndAction(() -> {
-                            if (!view.hasFocus()) {
-                                Drawable fg = view.getForeground();
-                                if (fg instanceof SettingFocusDrawable) {
-                                    ((SettingFocusDrawable) fg).stop();
-                                    view.setForeground(null);
-                                }
-                            }
-                        }).start();
-                view.setElevation(0f);
-            }
-        });
+        sharedFocus(c, v, radiusDp);
     }
 
     static Typeface face(int weight) { return Typeface.create(Typeface.SANS_SERIF, weight, false); }
@@ -635,7 +789,7 @@ final class Ui {
         scroll.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         android.graphics.drawable.GradientDrawable ps5Background = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF050A14, 0xFF0D192E});
+                new int[]{0xFF0B101B, 0xFF111B2A});
         scroll.setBackground(ps5Background);
         content.setBackgroundColor(Color.TRANSPARENT);
         frame.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1059,14 +1213,14 @@ final class Ui {
             view.addView(tile, iconLp);
             LinearLayout col = new LinearLayout(c);
             col.setOrientation(LinearLayout.VERTICAL);
-            col.setPadding(dp(c, 12), 0, dp(c, 8), 0);
+            col.setPadding(dp(c, 16), 0, dp(c, 16), 0);
             this.title = text(c, title, 15, R.color.bn_text, 600);
             this.title.setMaxLines(2);   // one line at the normal font scale (titles are kept short); a large font scale wraps it rather than cut it
             this.title.setEllipsize(TextUtils.TruncateAt.END);
             col.addView(this.title);
             value = small(c, "");
-            value.setMaxLines(3);
-            value.setEllipsize(TextUtils.TruncateAt.END);
+            value.setMaxLines(Integer.MAX_VALUE);   // Let wrapped descriptions determine the row and shared focus-frame height.
+            value.setEllipsize(null);
             value.setVisibility(View.GONE);   // shown by value(…) when there is one
             LinearLayout.LayoutParams vp = fill();
             vp.topMargin = dp(c, 1);
@@ -1091,8 +1245,8 @@ final class Ui {
             lp.topMargin = dp(c, 3);
             col.addView(tags, lp);
             note = small(c, "");
-            note.setMaxLines(2);
-            note.setEllipsize(TextUtils.TruncateAt.END);
+            note.setMaxLines(Integer.MAX_VALUE);
+            note.setEllipsize(null);
             note.setVisibility(View.GONE);   // shown by note(…)
             col.addView(note);
             view.addView(col, weight());
@@ -1266,7 +1420,8 @@ final class Ui {
         t.setSoundEffectsEnabled(false);
         t.setSelected(selected);
         t.setContentDescription(label);
-        focusMotion(c, t, 12);
+        // Wide game-settings section columns use the same shared PS5 sliding focus frame as Settings rows.
+        sharedFocus(c, t, 12);
         t.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
         return t;
     }
@@ -1378,7 +1533,7 @@ final class Ui {
         android.graphics.drawable.GradientDrawable ps5Sheet = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[]{0xFF050A14, 0xFF0D192E});
-        ps5Sheet.setCornerRadius(dp(a, 22));
+        ps5Sheet.setCornerRadius(dp(a, 24));
         ps5Sheet.setStroke(dp(a, 1), 0x33FFFFFF);
         sv.setBackground(ps5Sheet);
         content.setBackgroundColor(Color.TRANSPARENT);
