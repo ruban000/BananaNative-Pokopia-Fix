@@ -891,7 +891,9 @@ final class Ui {
             tile.setIncludeFontPadding(false);
             tile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
             tile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            view.addView(tile, new LinearLayout.LayoutParams(dp(c, 36), dp(c, 36)));
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 22), dp(c, 22));
+            iconLp.setMarginEnd(dp(c, 14));
+            view.addView(tile, iconLp);
             LinearLayout col = new LinearLayout(c);
             col.setOrientation(LinearLayout.VERTICAL);
             col.setPadding(dp(c, 12), 0, dp(c, 8), 0);
@@ -992,7 +994,8 @@ final class Ui {
             view.setPaddingRelative(dp(c, 30), dp(c, 4), dp(c, 10), dp(c, 4));
             view.setMinimumHeight(dp(c, 46));
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) tile.getLayoutParams();
-            lp.width = lp.height = dp(c, 28);
+            lp.width = lp.height = dp(c, 22);
+            lp.setMarginEnd(dp(c, 6));
             tile.setLayoutParams(lp);
             tile.setTextSize(22);
             title.setTextSize(14);
