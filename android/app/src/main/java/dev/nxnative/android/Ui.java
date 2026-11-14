@@ -101,6 +101,21 @@ final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(0x336B4423), shape, mask);
     }
 
+    /** Keep the scaled focus ring inside a 16dp viewport gutter, even on narrow screens. */
+    private static float safeFocusScaleX(View view, Context c, float requested) {
+        if (view.getWidth() <= 0 || view.getParent() == null) return 1f;
+        View root = view.getRootView();
+        int[] pos = new int[2], rootPos = new int[2];
+        view.getLocationOnScreen(pos);
+        root.getLocationOnScreen(rootPos);
+        float center = pos[0] + view.getWidth() * 0.5f;
+        float gutter = dp(c, 16);
+        float availableHalf = Math.min(center - (rootPos[0] + gutter),
+                rootPos[0] + root.getWidth() - gutter - center);
+        float safe = (2f * availableHalf) / view.getWidth();
+        return Math.max(1f, Math.min(requested, safe));
+    }
+
     /** PS5-style focus for settings rows: an inset ring leaves a clear 3dp glass gap. */
     static void settingFocus(Context c, View v, float radiusDp) {
         final Drawable normalBackground = v.getBackground();
@@ -136,7 +151,9 @@ final class Ui {
                 SettingFocusDrawable highlight = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(highlight);
                 highlight.start();
-                view.animate().scaleX(1.03f).scaleY(1.03f).setDuration(220)
+                view.setPivotX(view.getWidth() * 0.5f);
+                float safeScale = safeFocusScaleX(view, c, 1.03f);
+                view.animate().scaleX(safeScale).scaleY(1.03f).setDuration(220)
                         .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
                 view.setElevation(dp(c, 8));
                 if (view instanceof ViewGroup) {
@@ -324,7 +341,9 @@ final class Ui {
                 view.setForeground(border);
                 border.start();
                 view.setElevation(dp(c, 8));
-                view.animate().translationY(-dp(c, 3)).scaleX(1.025f).scaleY(1.025f)
+                view.setPivotX(view.getWidth() * 0.5f);
+                float safeScale = safeFocusScaleX(view, c, 1.025f);
+                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.025f)
                         .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
             } else {
                 view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(180)
@@ -836,7 +855,7 @@ final class Ui {
         switch (source) {
             case "🔄": return "↻"; case "👀": return "◉"; case "🎮": case "🎛️": return "⌘";
             case "🔘": return "●"; case "🖼️": case "📺": return "▣"; case "⏱️": case "⏲️": return "◷";
-            case "📳": return "⌁"; case "🚀": return "↗"; case "🅰️": return "A"; case "🕹️": return "⊙";
+            case "📳": return "⌁"; case "🚀": return "↗"; case "🔆": return "☼"; case "🅰️": return "A"; case "🕹️": return "⊙";
             case "🔍": return "⌕"; case "✨": return "✧"; case "📐": case "📏": return "⌁";
             case "📁": return "▱"; case "🧹": return "⌫"; case "📋": return "▤"; case "🧪": return "◌";
             case "📨": return "↗"; case "🛠": return "⚙"; case "🪟": return "▢"; case "🎬": return "▷";
@@ -844,7 +863,7 @@ final class Ui {
             case "🌿": return "✳"; case "🧩": return "◇"; case "🧱": return "▥"; case "🧵": return "≋";
             case "💾": return "▣"; case "⚡": return "ϟ"; case "⏸️": return "Ⅱ"; case "📝": return "≡";
             case "🌐": return "◎"; case "🔁": return "↻"; case "📦": return "□"; case "📲": return "▯";
-            case "🏠": return "⌂"; default: return "·";
+            case "🏠": return "⌂"; case "🛠️": return "⚙"; case "🛠": return "⚙"; default: return "◇";
         }
     }
 
@@ -863,7 +882,7 @@ final class Ui {
             // Foreground bounds track the complete measured row, including wrapped subtitles and tags.
             settingFocus(c, view, 12);
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
-            tile = text(c, monochromeGlyph(emoji), 19, R.color.bn_text, 400);
+            tile = text(c, monochromeGlyph(emoji), 22, R.color.bn_text, 400);
             tile.setTextColor(0xFFFFFFFF);
             tile.setGravity(Gravity.CENTER);
             tile.setIncludeFontPadding(false);
@@ -972,7 +991,7 @@ final class Ui {
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) tile.getLayoutParams();
             lp.width = lp.height = dp(c, 28);
             tile.setLayoutParams(lp);
-            tile.setTextSize(14);
+            tile.setTextSize(22);
             title.setTextSize(14);
             return this;
         }
@@ -1130,8 +1149,9 @@ final class Ui {
         for (int i = 0; i < labels.length; i++) {
             final int index = i;
             LinearLayout item = row(a);
-            item.setMinimumHeight(dp(a, 52));
-            item.setPadding(dp(a, 14), dp(a, 8), dp(a, 12), dp(a, 8));
+            item.setMinimumHeight(dp(a, 54));
+            item.setPadding(dp(a, 16), dp(a, 8), dp(a, 12), dp(a, 8));
+            item.setBackground(round(Color.TRANSPARENT, dp(a, 12), 0, 0));
             item.addView(text(a, labels[i], 15, R.color.bn_text, 600), weight());
             TextView tick = text(a, i == checked ? "✓" : "", 18, R.color.bn_text, 700);
             tick.setTextColor(Color.WHITE);
@@ -1143,12 +1163,21 @@ final class Ui {
                 if (dialog[0] != null) dialog[0].dismiss();
             });
             options.addView(item, fill());
-            if (i + 1 < labels.length) options.addView(divider(a));
+            if (i + 1 < labels.length) {
+                View line = divider(a);
+                line.setBackgroundColor(0x20FFFFFF);
+                options.addView(line);
+            }
         }
         dialog[0] = sheet(a, title, options).setNegativeButton("Cancel", null).create();
         dialog[0].setOnShowListener(v -> {
             if (dialog[0].getWindow() != null) {
-                dialog[0].getWindow().setBackgroundDrawable(round(0xF20F192D, dp(a, 22), 0x44FFFFFF, dp(a, 1)));
+                android.graphics.drawable.GradientDrawable dialogBg = new android.graphics.drawable.GradientDrawable(
+                        android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[]{0xFF050A14, 0xFF0D192E});
+                dialogBg.setCornerRadius(dp(a, 22));
+                dialogBg.setStroke(dp(a, 1), 0x44FFFFFF);
+                dialog[0].getWindow().setBackgroundDrawable(dialogBg);
                 if (android.os.Build.VERSION.SDK_INT >= 31) dialog[0].getWindow().setBackgroundBlurRadius(dp(a, 24));
                 dialog[0].getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
                 android.view.WindowManager.LayoutParams lp = dialog[0].getWindow().getAttributes();
@@ -1170,7 +1199,12 @@ final class Ui {
         ScrollView sv = new ScrollView(a);
         sv.setFillViewport(true);
         sv.setClipToPadding(false);
-        sv.setBackground(round(0xE60F192D, dp(a, 22), 0x33FFFFFF, dp(a, 1)));
+        android.graphics.drawable.GradientDrawable ps5Sheet = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xFF050A14, 0xFF0D192E});
+        ps5Sheet.setCornerRadius(dp(a, 22));
+        ps5Sheet.setStroke(dp(a, 1), 0x33FFFFFF);
+        sv.setBackground(ps5Sheet);
         content.setBackgroundColor(Color.TRANSPARENT);
         int p = dp(a, 20);
         content.setPadding(p, dp(a, 4), p, dp(a, 8));
