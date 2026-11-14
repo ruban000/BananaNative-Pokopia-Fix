@@ -121,10 +121,13 @@ final class Ui {
         final Drawable normalBackground = v.getBackground();
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
-        if (v instanceof ViewGroup) {
-            ((ViewGroup) v).setClipChildren(false);
-            ((ViewGroup) v).setClipToPadding(false);
-        }
+        // Focus handlers are installed before rows are attached; apply overflow rules again
+        // after attachment so the complete parent chain is included.
+        allowFocusOverflow(v);
+        v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { allowFocusOverflow(view); }
+            @Override public void onViewDetachedFromWindow(View view) { }
+        });
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
                 view.requestFocus();
@@ -339,8 +342,12 @@ final class Ui {
     static void ps5Focus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
-        // Standard buttons and action controls all get the same unclipped focus halo.
+        // Controls are often styled before their parent is assigned; reapply on attach.
         allowFocusOverflow(v);
+        v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { allowFocusOverflow(view); }
+            @Override public void onViewDetachedFromWindow(View view) { }
+        });
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
@@ -883,7 +890,7 @@ final class Ui {
         SettingIconView(Context c, String source) {
             super(c);
             this.source = source;
-            setText("");
+            setText(isCustomIcon(source) ? "" : monochromeGlyph(source));
             setTextColor(Color.WHITE);
             setGravity(Gravity.CENTER);
             setIncludeFontPadding(false);
@@ -893,6 +900,14 @@ final class Ui {
             iconPaint.setStrokeWidth(2f); // Canvas is scaled to dp below, so this is exactly 2dp.
             iconPaint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             iconPaint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+        }
+
+        private static boolean isCustomIcon(String source) {
+            return "🔄".equals(source) || "👀".equals(source) || "🎮".equals(source)
+                    || "🎛️".equals(source) || "🔘".equals(source) || "🖼️".equals(source)
+                    || "📺".equals(source) || "⏱️".equals(source) || "⏲️".equals(source)
+                    || "📳".equals(source) || "🚀".equals(source) || "🅰️".equals(source)
+                    || "🔍".equals(source);
         }
 
         private void line(android.graphics.Canvas c, float x1, float y1, float x2, float y2) {
