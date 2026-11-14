@@ -53,7 +53,7 @@ final class GameSettings {
         final List<String> titles = new ArrayList<>();
         String info;
 
-        Section(MainActivity a, String key, String emoji, String label) { this.key = key; this.emoji = emoji; this.label = label; rows = Ui.listCard(a); }
+        Section(MainActivity a, String key, String emoji, String label) { this.key = key; this.emoji = emoji; this.label = label; rows = Ui.settingsList(a); }
 
         boolean empty() { return rows.getChildCount() == 0; }
 
@@ -591,11 +591,10 @@ final class GameSettings {
         System.arraycopy(GameLanguage.NAMES, 0, labels, 1, GameLanguage.NAMES.length);
         String m = Prefs.gameLang(a, g.titleId);
         int checked = m == null ? 0 : 1 + Math.max(0, Arrays.asList(GameLanguage.CODES).indexOf(m));
-        new AlertDialog.Builder(a).setTitle("Game language · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        Ui.choiceSheet(a, "Game language · " + g.name, labels, checked, w -> {
             Prefs.gameLang(a, g.titleId, w == 0 ? null : GameLanguage.CODES[w - 1]);
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 
     /** A choice made under Advanced (a game with presets) stores Advanced, so the choices are not taken for a preset they happen to match (ResPresets.current) */
@@ -610,34 +609,31 @@ final class GameSettings {
         Profile mp = Profile.of(g.titleId);
         String[] modes = mp != null ? mp.modes() : null;
         if (modes != null) {   // a game with one docked and one handheld row (Profile.modes): those two choices only, as Display shows its two
-            new AlertDialog.Builder(a).setTitle(windowTitle(g) + " · " + g.name).setSingleChoiceItems(new String[] {mp.modeLabel(0), mp.modeLabel(1)},
-                    mp.modeOf(Prefs.gameWindow(a, g.titleId)), (x, w) -> {
+            Ui.choiceSheet(a, windowTitle(g) + " · " + g.name,
+                    new String[] {mp.modeLabel(0), mp.modeLabel(1)}, mp.modeOf(Prefs.gameWindow(a, g.titleId)), w -> {
                 Prefs.gameWindow(a, g.titleId, modes[w]);
                 keepAdvanced(a, g);
-                x.dismiss();
                 done.run();
-            }).setNegativeButton("Cancel", null).show();
+            });
             return;
         }
         String[] labels = new String[Prefs.WINDOWS.length + 1];
         labels[0] = "Default (" + Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false) + ")";
         { Profile lp = Profile.of(g.titleId); for (int li = 0; li < Prefs.WINDOWS.length; li++) labels[li + 1] = lp != null ? lp.windowLabel(Prefs.WINDOWS[li], Prefs.WINDOW_NAMES[li]) : Prefs.WINDOW_NAMES[li]; }   // a choice the game draws at another size says so (Profile.windowLabel)
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
-        new AlertDialog.Builder(a).setTitle(windowTitle(g) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        Ui.choiceSheet(a, windowTitle(g) + " · " + g.name, labels, checked, w -> {
             Prefs.gameWindow(a, g.titleId, w == 0 ? null : Prefs.WINDOWS[w - 1]);
             keepAdvanced(a, g);
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 
     /** Display: Fit keeps the game's 16:9 picture with bars on a screen of another shape; Stretch fills the screen (DM_VK_STRETCH), the touch mapping with it */
     private static void display(MainActivity a, Game g, Runnable done) {
-        new AlertDialog.Builder(a).setTitle("Display · " + g.name).setSingleChoiceItems(Prefs.DISPLAY_NAMES, Prefs.stretch(a, g.titleId) ? 1 : 0, (x, w) -> {
+        Ui.choiceSheet(a, "Display · " + g.name, Prefs.DISPLAY_NAMES, Prefs.stretch(a, g.titleId) ? 1 : 0, w -> {
             Prefs.stretch(a, g.titleId, w == 1);
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 
     private static void xbox(MainActivity a, Game g, Runnable done) {   // Default first: the game follows Settings again
@@ -645,11 +641,10 @@ final class GameSettings {
         labels[0] = "Default (Settings: " + Prefs.xboxLabel(Prefs.xboxButtons(a)) + ")";
         System.arraycopy(Prefs.XBOX_NAMES, 0, labels, 1, Prefs.XBOX_NAMES.length);
         int checked = Prefs.ownXboxButtons(a, g.titleId) ? Prefs.xboxButtons(a, g.titleId) + 1 : 0;
-        new AlertDialog.Builder(a).setTitle("Xbox button label swap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        Ui.choiceSheet(a, "Xbox button label swap · " + g.name, labels, checked, w -> {
             Prefs.xboxButtons(a, g.titleId, w == 0 ? null : w - 1);
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 
     private static void cap(MainActivity a, Game g, Runnable done) {
@@ -660,10 +655,10 @@ final class GameSettings {
             labels[0] = rc != null ? "Recommended (" + Prefs.paceLabel(rc) + ")" : pl > 0 ? "Default (this game's: " + Prefs.paceLabel(Prefs.paceOf(pl)) + ")" : "Default (Settings: " + Prefs.paceLabel(Prefs.paceOf(Prefs.fpsCap(a))) + ")";
             int checked = 0, cur = Prefs.paceCap(a, g.titleId);
             for (int k = 0; k < Prefs.PACE_CAPS.length; k++) { labels[k + 1] = Prefs.paceLabel(Prefs.PACE_CAPS[k]); if (Prefs.ownFpsCap(a, g.titleId) && Prefs.PACE_CAPS[k] == cur) checked = k + 1; }
-            new AlertDialog.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            Ui.choiceSheet(a, "Frame rate cap · " + g.name, labels, checked, w -> {
                 Prefs.fpsCap(a, g.titleId, w == 0 ? null : Prefs.PACE_CAPS[w - 1]);
-                x.dismiss(); done.run();
-            }).setNegativeButton("Cancel", null).show();
+                done.run();
+            });
             return;
         }
         int n = Prefs.FPS_CAPS.length;
@@ -679,11 +674,10 @@ final class GameSettings {
             labels[k + 2] = MainActivity.capLabel(Prefs.FPS_CAPS[k]);
             if (own && Prefs.FPS_CAPS[k] == cur) checked = k + 2;
         }
-        new AlertDialog.Builder(a).setTitle("Frame rate cap · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        Ui.choiceSheet(a, "Frame rate cap · " + g.name, labels, checked, w -> {
             Prefs.fpsCap(a, g.titleId, w == 0 ? null : w == 1 ? -1 : Prefs.FPS_CAPS[w - 2]);
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 
     private static void driver(MainActivity a, Game g, Runnable done) {
@@ -699,11 +693,10 @@ final class GameSettings {
             labels.add(inst.get(k).label());
             if (c != null && inst.get(k).dir.getName().equals(c)) checked = k + 2;
         }
-        new AlertDialog.Builder(a).setTitle("GPU driver · " + g.name).setSingleChoiceItems(labels.toArray(new String[0]), checked, (x, w) -> {
+        Ui.choiceSheet(a, "GPU driver · " + g.name, labels.toArray(new String[0]), checked, w -> {
             GpuDriver.choice(a, g.titleId, w == 0 ? null : w == 1 ? GpuDriver.SYSTEM : inst.get(w - 2).dir.getName());
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 
     private static void env(MainActivity a, Game g, Runnable done) {
@@ -788,10 +781,9 @@ final class GameSettings {
         for (int k = 0; k < as.size(); k++) labels[k + 1] = as.get(k) + " (native: cameras and menus laid out for " + as.get(k) + ")";
         String cur = Prefs.aspect(a, g.titleId);
         int checked = cur == null ? 0 : Math.max(0, as.indexOf(cur) + 1);
-        new AlertDialog.Builder(a).setTitle("Aspect ratio · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+        Ui.choiceSheet(a, "Aspect ratio · " + g.name, labels, checked, w -> {
             Prefs.aspect(a, g.titleId, w == 0 ? null : as.get(w - 1));
-            x.dismiss();
             done.run();
-        }).setNegativeButton("Cancel", null).show();
+        });
     }
 }
