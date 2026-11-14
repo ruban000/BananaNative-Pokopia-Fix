@@ -317,7 +317,8 @@ public final class MainActivity extends Activity {
 
     private View accessCard() {
         LinearLayout c = Ui.card(this);
-        c.setBackground(Ui.round(Ui.col(this, R.color.bn_warn_tint), dp(20), Ui.col(this, R.color.bn_banana_deep), dp(1)));
+        // File access is an informational step, not an error: use the same midnight card and hairline edge as Settings.
+        c.setBackground(Ui.round(Ui.col(this, R.color.bn_card), dp(20), Ui.col(this, R.color.bn_card_stroke), dp(1)));
         c.addView(Ui.heading(this, "Allow file access"));
         Ui.add(c, Ui.body(this, "Needed to read a dump folder where it is. A .nup file works without it, and a dump folder can be copied into the app instead."), 4);
         Ui.add(c, Ui.button(this, "Allow", Ui.Kind.PRIMARY, v -> openAccessSettings()), 14, Ui.wrap());
@@ -652,10 +653,8 @@ public final class MainActivity extends Activity {
             steps.addView(chip, lp);
         }
         Ui.add(c, steps, 16, Ui.wrap());
-        Ui.Action addGame = Ui.action(this, R.drawable.ic_add, "Add game", Ui.Kind.PRIMARY, v -> addGame());
-        // Keep the animated white focus outline on the button's true outer edge:
-        // remove the colored backing layer and extra inset padding.
-        addGame.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        // A transparent PS5-style action: white label and icon, with the shared animated focus rim.
+        Ui.Action addGame = Ui.action(this, R.drawable.ic_add, "Add game", Ui.Kind.QUIET, v -> addGame());
         addGame.setPadding(0, 0, 0, 0);
         Ui.add(c, addGame, 20);
         return c;
