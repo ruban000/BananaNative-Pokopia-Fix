@@ -907,7 +907,8 @@ final class Ui {
                     || "🎛️".equals(source) || "🔘".equals(source) || "🖼️".equals(source)
                     || "📺".equals(source) || "⏱️".equals(source) || "⏲️".equals(source)
                     || "📳".equals(source) || "🚀".equals(source) || "🅰️".equals(source)
-                    || "🔍".equals(source);
+                    || "🔍".equals(source) || "🕹️".equals(source) || "🧹".equals(source)
+                    || "🧪".equals(source) || "✨".equals(source);
         }
 
         private void line(android.graphics.Canvas c, float x1, float y1, float x2, float y2) {
@@ -938,10 +939,13 @@ final class Ui {
                     path(canvas, 1.5f, 11, 5, 6.5f, 11, 4.5f, 17, 6.5f, 20.5f, 11, 17, 15.5f, 11, 17.5f, 5, 15.5f, 1.5f, 11);
                     circle(canvas, 11, 11, 3);
                     break;
-                case "🎮": case "🎛️": // controls / controller
-                    path(canvas, 5, 7, 17, 7, 19.5f, 10, 20, 15, 17.5f, 17, 14, 13.5f, 8, 13.5f, 4.5f, 17, 2, 15, 2.5f, 10, 5, 7);
-                    line(canvas, 6, 9, 6, 13); line(canvas, 4, 11, 8, 11);
-                    circle(canvas, 15.5f, 10, 0.8f); circle(canvas, 17.5f, 12.5f, 0.8f);
+                case "🎮": case "🎛️": // clean, symmetric controller silhouette
+                    path(canvas, 5.2f, 7.2f, 16.8f, 7.2f, 19.2f, 9.2f, 20.2f, 15.2f,
+                            18.5f, 17.5f, 16.2f, 17.2f, 13.8f, 13.8f, 8.2f, 13.8f,
+                            5.8f, 17.2f, 3.5f, 17.5f, 1.8f, 15.2f, 2.8f, 9.2f, 5.2f, 7.2f);
+                    line(canvas, 6.2f, 9.5f, 6.2f, 13.2f); line(canvas, 4.3f, 11.35f, 8.1f, 11.35f);
+                    circle(canvas, 15.2f, 10.2f, 0.9f); circle(canvas, 17.3f, 12.4f, 0.9f);
+                    circle(canvas, 12.8f, 12.2f, 0.65f);
                     break;
                 case "🔘": // show / hide
                     circle(canvas, 11, 11, 8.5f); circle(canvas, 11, 11, 3.2f);
@@ -960,11 +964,13 @@ final class Ui {
                     path(canvas, 3.5f, 7, 2, 9, 2, 13, 3.5f, 15);
                     path(canvas, 18.5f, 7, 20, 9, 20, 13, 18.5f, 15);
                     break;
-                case "🚀": // fast cores
-                    path(canvas, 11, 2, 16, 6, 17, 11, 12, 17, 7, 12, 8, 7, 11, 2);
-                    circle(canvas, 12, 8, 1.7f);
-                    path(canvas, 7, 13, 4, 17, 8, 16);
-                    path(canvas, 13, 16, 16, 19, 17, 15);
+                case "🚀": // fast cores: processor with fast-lane accents
+                    canvas.drawRoundRect(6, 6, 16, 16, 2, 2, iconPaint);
+                    line(canvas, 9, 9, 13, 9); line(canvas, 9, 12, 13, 12);
+                    line(canvas, 9, 15, 12, 15);
+                    line(canvas, 2, 8, 4.5f, 8); line(canvas, 1, 11, 4.5f, 11);
+                    line(canvas, 2, 14, 4.5f, 14);
+                    line(canvas, 17.5f, 8, 20, 8); line(canvas, 17.5f, 14, 20, 14);
                     break;
                 case "🅰️": // Xbox label swap
                     circle(canvas, 11, 11, 9);
@@ -977,6 +983,27 @@ final class Ui {
                 case "🔍": // upscaler / magnification
                     circle(canvas, 9.5f, 9.5f, 6.5f);
                     line(canvas, 14.3f, 14.3f, 20, 20);
+                    break;
+                case "🕹️": // button mapping: directional pad and mapped buttons
+                    canvas.drawRoundRect(2, 4, 20, 18, 3, 3, iconPaint);
+                    line(canvas, 7, 7.5f, 7, 14.5f); line(canvas, 3.5f, 11, 10.5f, 11);
+                    circle(canvas, 15, 8.5f, 1.1f); circle(canvas, 17.5f, 11.5f, 1.1f);
+                    circle(canvas, 14, 14.5f, 0.8f);
+                    break;
+                case "🧹": // storage / cleanup: compact drive with eject/clear mark
+                    canvas.drawRoundRect(2, 5, 20, 18, 2, 2, iconPaint);
+                    line(canvas, 5, 9, 17, 9); line(canvas, 5, 13, 13, 13);
+                    line(canvas, 14.5f, 12, 19.5f, 17); line(canvas, 19.5f, 12, 14.5f, 17);
+                    break;
+                case "🧪": // graphics self-test: test flask with a check
+                    line(canvas, 8, 3, 14, 3); line(canvas, 10, 3, 10, 9);
+                    line(canvas, 12, 3, 12, 9); path(canvas, 10, 9, 4, 18, 18, 18, 12, 9);
+                    line(canvas, 8, 14, 10, 16); line(canvas, 10, 16, 14, 12);
+                    break;
+                case "✨": // frame generation: crisp four-point frame sparkle
+                    path(canvas, 11, 1.5f, 13.2f, 8.8f, 20.5f, 11, 13.2f, 13.2f,
+                            11, 20.5f, 8.8f, 13.2f, 1.5f, 11, 8.8f, 8.8f, 11, 1.5f);
+                    line(canvas, 18, 2, 18, 6); line(canvas, 16, 4, 20, 4);
                     break;
                 default:
                     canvas.restoreToCount(save);
@@ -1022,8 +1049,9 @@ final class Ui {
             tile = new SettingIconView(c, emoji);
             tile.setTextSize(22);
             tile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
-            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 22), dp(c, 22));
-            iconLp.setMarginEnd(dp(c, 14));
+            // A 26dp viewport gives font glyphs and custom paths breathing room, avoiding edge clipping.
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 26), dp(c, 26));
+            iconLp.setMarginEnd(dp(c, 12));
             view.addView(tile, iconLp);
             LinearLayout col = new LinearLayout(c);
             col.setOrientation(LinearLayout.VERTICAL);
@@ -1125,7 +1153,7 @@ final class Ui {
             view.setPaddingRelative(dp(c, 30), dp(c, 4), dp(c, 10), dp(c, 4));
             view.setMinimumHeight(dp(c, 46));
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) tile.getLayoutParams();
-            lp.width = lp.height = dp(c, 22);
+            lp.width = lp.height = dp(c, 26);
             lp.setMarginEnd(dp(c, 6));
             tile.setLayoutParams(lp);
             tile.setTextSize(22);
