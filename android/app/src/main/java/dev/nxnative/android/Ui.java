@@ -289,14 +289,14 @@ final class Ui {
         v.setOnFocusChangeListener((view, focused) -> {
             view.animate().cancel();
             if (focused) {
-                MovingBorderDrawable border = new MovingBorderDrawable(dp(c, radiusDp), dp(c, 2));
+                SettingFocusDrawable border = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(border);
                 border.start();
                 view.animate().scaleX(1.006f).scaleY(1.006f).setDuration(220)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else {
                 Drawable current = view.getForeground();
-                if (current instanceof MovingBorderDrawable) ((MovingBorderDrawable) current).stop();
+                if (current instanceof SettingFocusDrawable) ((SettingFocusDrawable) current).stop();
                 view.animate().scaleX(1f).scaleY(1f).setDuration(170)
                         .withEndAction(() -> { if (!view.hasFocus()) view.setForeground(null); }).start();
             }
