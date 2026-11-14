@@ -874,6 +874,104 @@ final class Ui {
      * state does, says(…)), a short status line when the setting needs something (status(…): "Needs Prepare again: …"), its tags on a line of their own (so they never
      * squeeze the text), a muted note, and a chevron (or a switch); the whole row is the touch target (a switch row's tap flips the switch). Compact: 52 dp high, 36 dp tiles
      */
+    /** Full-size 22dp line icons for the settings rows that previously used tiny text glyphs. */
+    private static final class SettingIconView extends TextView {
+        private final String source;
+        private final android.graphics.Paint iconPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path iconPath = new android.graphics.Path();
+
+        SettingIconView(Context c, String source) {
+            super(c);
+            this.source = source;
+            setText("");
+            setTextColor(Color.WHITE);
+            setGravity(Gravity.CENTER);
+            setIncludeFontPadding(false);
+            setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            iconPaint.setColor(Color.WHITE);
+            iconPaint.setStyle(android.graphics.Paint.Style.STROKE);
+            iconPaint.setStrokeWidth(dp(c, 2));
+            iconPaint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            iconPaint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+        }
+
+        private void line(android.graphics.Canvas c, float x1, float y1, float x2, float y2) {
+            c.drawLine(x1, y1, x2, y2, iconPaint);
+        }
+        private void circle(android.graphics.Canvas c, float x, float y, float r) {
+            c.drawCircle(x, y, r, iconPaint);
+        }
+        private void path(android.graphics.Canvas c, float... xy) {
+            iconPath.reset();
+            iconPath.moveTo(xy[0], xy[1]);
+            for (int i = 2; i < xy.length; i += 2) iconPath.lineTo(xy[i], xy[i + 1]);
+            c.drawPath(iconPath, iconPaint);
+        }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            float density = getResources().getDisplayMetrics().density;
+            int save = canvas.save();
+            float side = Math.min(getWidth(), getHeight()) / density;
+            canvas.translate((getWidth() - side * density) * 0.5f, (getHeight() - side * density) * 0.5f);
+            canvas.scale(density, density);
+            canvas.translate((side - 22f) * 0.5f, (side - 22f) * 0.5f);
+            switch (source) {
+                case "🔄": // update / refresh
+                    canvas.drawArc(3, 3, 19, 19, 42, 285, false, iconPaint);
+                    path(canvas, 15, 2.8f, 19, 3.5f, 18.2f, 7.5f);
+                    break;
+                case "👀": // overlay / visibility
+                    path(canvas, 1.5f, 11, 5, 6.5f, 11, 4.5f, 17, 6.5f, 20.5f, 11, 17, 15.5f, 11, 17.5f, 5, 15.5f, 1.5f, 11);
+                    circle(canvas, 11, 11, 3);
+                    break;
+                case "🎮": case "🎛️": // controls / controller
+                    path(canvas, 5, 7, 17, 7, 19.5f, 10, 20, 15, 17.5f, 17, 14, 13.5f, 8, 13.5f, 4.5f, 17, 2, 15, 2.5f, 10, 5, 7);
+                    line(canvas, 6, 9, 6, 13); line(canvas, 4, 11, 8, 11);
+                    circle(canvas, 15.5f, 10, 0.8f); circle(canvas, 17.5f, 12.5f, 0.8f);
+                    break;
+                case "🔘": // show / hide
+                    circle(canvas, 11, 11, 8.5f); circle(canvas, 11, 11, 3.2f);
+                    break;
+                case "🖼️": case "📺": // resolution / display
+                    canvas.drawRoundRect(1.8f, 3, 20.2f, 17, 2, 2, iconPaint);
+                    line(canvas, 8, 20, 14, 20); line(canvas, 11, 17, 11, 20);
+                    break;
+                case "⏱️": case "⏲️": // frame-rate cap
+                    circle(canvas, 11, 12, 8);
+                    line(canvas, 8, 2, 14, 2); line(canvas, 11, 2, 11, 4);
+                    line(canvas, 11, 12, 11, 7); line(canvas, 11, 12, 15, 14);
+                    break;
+                case "📳": // rumble
+                    path(canvas, 7, 4, 7, 18); path(canvas, 15, 4, 15, 18);
+                    path(canvas, 3.5f, 7, 2, 9, 2, 13, 3.5f, 15);
+                    path(canvas, 18.5f, 7, 20, 9, 20, 13, 18.5f, 15);
+                    break;
+                case "🚀": // fast cores
+                    path(canvas, 11, 2, 16, 6, 17, 11, 12, 17, 7, 12, 8, 7, 11, 2);
+                    circle(canvas, 12, 8, 1.7f);
+                    path(canvas, 7, 13, 4, 17, 8, 16);
+                    path(canvas, 13, 16, 16, 19, 17, 15);
+                    break;
+                case "🅰️": // Xbox label swap
+                    circle(canvas, 11, 11, 9);
+                    iconPaint.setStyle(android.graphics.Paint.Style.FILL);
+                    iconPaint.setTextSize(12);
+                    iconPaint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+                    canvas.drawText("A", 7.1f, 15.2f, iconPaint);
+                    iconPaint.setStyle(android.graphics.Paint.Style.STROKE);
+                    break;
+                case "🔍": // upscaler / magnification
+                    circle(canvas, 9.5f, 9.5f, 6.5f);
+                    line(canvas, 14.3f, 14.3f, 20, 20);
+                    break;
+                default:
+                    canvas.restoreToCount(save);
+                    super.onDraw(canvas);
+                    return;
+            }
+            canvas.restoreToCount(save);
+        }
+    }
+
     private static String monochromeGlyph(String source) {
         if (source == null || source.isEmpty()) return "·";
         switch (source) {
@@ -906,12 +1004,9 @@ final class Ui {
             // Foreground bounds track the complete measured row, including wrapped subtitles and tags.
             settingFocus(c, view, 12);
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
-            tile = text(c, monochromeGlyph(emoji), 22, R.color.bn_text, 400);
-            tile.setTextColor(0xFFFFFFFF);
-            tile.setGravity(Gravity.CENTER);
-            tile.setIncludeFontPadding(false);
+            tile = new SettingIconView(c, emoji);
+            tile.setTextSize(22);
             tile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
-            tile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 22), dp(c, 22));
             iconLp.setMarginEnd(dp(c, 14));
             view.addView(tile, iconLp);
