@@ -241,6 +241,12 @@ final class Ui {
                         new int[]{0x1FFFFFFF, 0x05FFFFFF},
                         new float[]{0f, 1f}, android.graphics.Shader.TileMode.CLAMP);
                 innerSheenPaint.setShader(innerSheen);
+                rimGradient = new android.graphics.SweepGradient(r.centerX(), r.centerY(),
+                        new int[]{0xFFFFFFFF, 0x80B4DCFF, 0x14FFFFFF, 0x80B4DCFF, 0xFFFFFFFF},
+                        new float[]{0f, 0.22f, 0.5f, 0.78f, 1f});
+                gradientMatrix.setRotate(rotation, r.centerX(), r.centerY());
+                rimGradient.setLocalMatrix(gradientMatrix);
+                border.setShader(rimGradient);
             }
             canvas.drawRect(r, innerSheenPaint);
             canvas.restoreToCount(save);
@@ -250,14 +256,6 @@ final class Ui {
             halo.setShadowLayer(8f, 0f, 0f, 0x66FFFFFF);
             canvas.drawRoundRect(r, radius, radius, halo);
             halo.clearShadowLayer();
-
-                rimGradient = new android.graphics.SweepGradient(r.centerX(), r.centerY(),
-                        new int[]{0xFFFFFFFF, 0x80B4DCFF, 0x14FFFFFF, 0x80B4DCFF, 0xFFFFFFFF},
-                        new float[]{0f, 0.22f, 0.5f, 0.78f, 1f});
-                gradientMatrix.setRotate(rotation, r.centerX(), r.centerY());
-                rimGradient.setLocalMatrix(gradientMatrix);
-                border.setShader(rimGradient);
-            }
 
             border.setStrokeWidth(2f);
             canvas.drawRoundRect(r, radius, radius, border);
