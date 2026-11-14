@@ -890,7 +890,7 @@ final class Ui {
             setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             iconPaint.setColor(Color.WHITE);
             iconPaint.setStyle(android.graphics.Paint.Style.STROKE);
-            iconPaint.setStrokeWidth(dp(c, 2));
+            iconPaint.setStrokeWidth(2f); // Canvas is scaled to dp below, so this is exactly 2dp.
             iconPaint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             iconPaint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
         }
