@@ -4,8 +4,8 @@
     <style name="Theme.Banana" parent="android:Theme.Material.NoActionBar">
         <item name="android:colorPrimary">@color/bn_banana</item>
         <item name="android:colorPrimaryDark">@color/bn_bg</item>
-        <item name="android:colorAccent">@color/bn_accent</item>
-        <item name="android:colorControlActivated">@color/bn_accent</item>
+        <item name="android:colorAccent">#FFFFFFFF</item>
+        <item name="android:colorControlActivated">#FFFFFFFF</item>
         <item name="android:colorBackground">@color/bn_bg</item>
         <item name="android:windowBackground">@color/bn_bg</item>
         <item name="android:textColorPrimary">@color/bn_text</item>
