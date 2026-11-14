@@ -146,12 +146,187 @@ public final class MainActivity extends Activity {
         else buildHome(content);
     }
 
+    /** Layered PS5-inspired ambient background: drifting light fields, depth ribbons and slow particles. */
+    private static final class Ps5AmbientBackground extends android.graphics.drawable.Drawable
+            implements android.graphics.drawable.Animatable {
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path ribbon = new android.graphics.Path();
+        private final android.animation.ValueAnimator animator = android.animation.ValueAnimator.ofFloat(0f, 1f);
+        private float phase;
+
+        Ps5AmbientBackground() {
+            animator.setDuration(22000L);
+            animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            animator.setInterpolator(new android.view.animation.LinearInterpolator());
+            animator.addUpdateListener(a -> {
+                phase = (Float) a.getAnimatedValue();
+                invalidateSelf();
+            });
+        }
+
+        private float wave(float speed, float offset) {
+            return (float) Math.sin((phase * Math.PI * 2.0 * speed) + offset);
+        }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            float w = b.width(), h = b.height();
+            if (w <= 0 || h <= 0) return;
+            canvas.drawColor(0xFF05070B);
+
+            // Three independently drifting light fields create depth without washing out the UI.
+            float driftA = wave(1.0f, 0f) * w * 0.13f;
+            float driftB = wave(0.63f, 1.8f) * w * 0.17f;
+            float driftC = wave(1.37f, 3.2f) * w * 0.08f;
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            paint.setShader(new android.graphics.RadialGradient(w * 0.78f + driftA, h * 0.27f,
+                    Math.max(w, h) * 0.76f, new int[]{0x242B5C91, 0x10204470, 0x0005070B},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(new android.graphics.RadialGradient(w * 0.16f + driftB, h * 0.78f,
+                    Math.max(w, h) * 0.62f, new int[]{0x18204D82, 0x08204470, 0x0005070B},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(new android.graphics.RadialGradient(w * 0.52f + driftC, h * 0.48f,
+                    Math.max(w, h) * 0.45f, new int[]{0x0D4A79B8, 0x0005070B},
+                    null, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(null);
+
+            // Broad, very soft light bands move at different speeds behind the cards.
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            for (int i = 0; i < 5; i++) {
+                float speed = 0.42f + i * 0.17f;
+                float sway = wave(speed, i * 1.13f);
+                float y = h * (0.18f + i * 0.16f);
+                paint.setStrokeWidth(Math.max(1f, w * (i % 2 == 0 ? 0.0022f : 0.0012f)));
+                paint.setShader(new android.graphics.LinearGradient(0, y - h * 0.25f, w, y + h * 0.25f,
+                        new int[]{0x00000000, i % 2 == 0 ? 0x173D6FA8 : 0x103E83B9,
+                                i % 2 == 0 ? 0x0D8CB9E8 : 0x164A83C4, 0x00000000},
+                        null, android.graphics.Shader.TileMode.CLAMP));
+                ribbon.reset();
+                ribbon.moveTo(-w * 0.16f, y + h * (0.08f + sway * 0.035f));
+                ribbon.cubicTo(w * 0.20f + sway * w * 0.10f, y - h * 0.22f,
+                        w * 0.68f - sway * w * 0.12f, y + h * 0.25f,
+                        w * 1.16f, y - h * (0.07f + sway * 0.025f));
+                canvas.drawPath(ribbon, paint);
+            }
+            paint.setShader(null);
+
+            // Layer 1: a denser field of distant particles with independent parallax and twinkle.
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            for (int i = 0; i < 128; i++) {
+                float seed = i * 2.399f;
+                float depth = 0.012f + (i % 5) * 0.009f;
+                float x = (float) ((i * 0.6180339f % 1.0f) * w
+                        + wave(0.22f + (i % 6) * 0.095f, seed) * w * depth);
+                float y = (float) ((i * 0.381966f % 1.0f) * h
+                        + wave(0.19f + (i % 4) * 0.105f, seed * 0.7f) * h * depth);
+                float twinkle = 0.5f + 0.5f * wave(0.7f + (i % 7) * 0.13f, seed * 1.7f);
+                int alpha = 10 + (int) (twinkle * (i % 9 == 0 ? 42 : 19));
+                paint.setColor((alpha << 24) | (i % 5 == 0 ? 0x009FD7FF : 0x006FA9E8));
+                float radius = Math.max(1f, w * (i % 11 == 0 ? 0.0022f : 0.00085f));
+                canvas.drawCircle(x, y, radius, paint);
+            }
+
+            // Layer 2: slow luminous motes with tiny horizontal trails for visible movement.
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            for (int i = 0; i < 24; i++) {
+                float seed = i * 1.731f + 0.8f;
+                float x = (float) ((i * 0.754877f % 1.0f) * w
+                        + wave(0.42f + (i % 4) * 0.16f, seed) * w * 0.055f);
+                float y = (float) ((i * 0.56984f % 1.0f) * h
+                        + wave(0.31f + (i % 3) * 0.17f, seed * 0.8f) * h * 0.04f);
+                float glow = 0.5f + 0.5f * wave(0.55f, seed);
+                int alpha = 18 + (int) (glow * 35);
+                paint.setColor((alpha << 24) | 0x009DD9FF);
+                paint.setStrokeWidth(Math.max(1f, w * 0.0011f));
+                canvas.drawLine(x - w * 0.009f, y, x + w * (0.004f + glow * 0.009f), y - h * 0.002f, paint);
+                canvas.drawCircle(x, y, Math.max(1f, w * 0.0015f), paint);
+            }
+            // Layer 3: occasional four-point star glints that gently brighten and fade.
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            for (int i = 0; i < 14; i++) {
+                float seed = i * 2.173f + 1.1f;
+                float x = (float) ((i * 0.683281f % 1.0f) * w
+                        + wave(0.28f + (i % 5) * 0.12f, seed) * w * 0.035f);
+                float y = (float) ((i * 0.414214f % 1.0f) * h
+                        + wave(0.23f + (i % 4) * 0.14f, seed * 0.9f) * h * 0.03f);
+                float sparkle = 0.5f + 0.5f * wave(0.9f + (i % 3) * 0.22f, seed);
+                int alpha = 8 + (int) (sparkle * 54);
+                paint.setColor((alpha << 24) | 0x00C5E7FF);
+                float arm = Math.max(2f, w * (0.002f + sparkle * 0.0022f));
+                paint.setStrokeWidth(Math.max(1f, w * 0.0008f));
+                canvas.drawLine(x - arm, y, x + arm, y, paint);
+                canvas.drawLine(x, y - arm, x, y + arm, paint);
+                canvas.drawCircle(x, y, Math.max(1f, arm * 0.22f), paint);
+            }
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            paint.setColor(android.graphics.Color.WHITE);
+        }
+
+        @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.OPAQUE; }
+        @Override public void start() { if (!animator.isStarted()) animator.start(); }
+        @Override public void stop() { animator.cancel(); }
+        @Override public boolean isRunning() { return animator.isRunning(); }
+    }
+
     private void buildHome(LinearLayout content) {
         overlayRow = null;
-        content.addView(Ui.header(this, Ui.badge(this, 44), "Banana Native", Prefs.buildId(), Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true))));   // the build identifier under the title (Prefs.buildId, the part of the overlay's build tag after the app's name), so a screenshot of Home names its build; Settings › About has the full tag
+        android.widget.ScrollView homeScroll = pageScroll();
+        if (homeScroll != null) {
+            Ps5AmbientBackground ambient = new Ps5AmbientBackground();
+            homeScroll.setBackground(ambient);
+            ambient.start();
+        }
+
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setPadding(dp(2), dp(8), dp(2), dp(8));
+        TextView mark = Ui.text(this, "●", 25, R.color.bn_accent, 800);
+        mark.setTextColor(0xFF5BA8FF);
+        top.addView(mark);
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.VERTICAL);
+        brand.setPadding(dp(10), 0, 0, 0);
+        TextView brandName = Ui.text(this, "BANANA NATIVE", 17, R.color.bn_text, 800);
+        brandName.setTextColor(0xFFF4F7FC);
+        brand.addView(brandName);
+        TextView buildTag = Ui.small(this, Prefs.buildId());
+        buildTag.setTextColor(0xFF9EADC0);
+        brand.addView(buildTag);
+        top.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        top.addView(Ui.iconButton(this, R.drawable.ic_settings, "Settings", Ui.Kind.TONAL, v -> page(true)));
+        content.addView(top);
+
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setPadding(dp(22), dp(24), dp(22), dp(22));
+        hero.setBackground(Ui.round(0xFF17283D, dp(24), 0xFF41658E, dp(1)));
+        TextView eyebrow = Ui.text(this, "YOUR PLAY SPACE", 11, R.color.bn_text_2, 800);
+        eyebrow.setTextColor(0xFF8CC5FF);
+        hero.addView(eyebrow);
+        TextView headline = Ui.text(this, "Ready when you are.", 27, R.color.bn_text, 800);
+        headline.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams hp = Ui.wrap();
+        hp.topMargin = dp(7);
+        hero.addView(headline, hp);
+        TextView sub = Ui.body(this, "Your games, your settings, your next adventure.");
+        sub.setTextColor(0xFFD0DCCF);
+        LinearLayout.LayoutParams subp = Ui.wrap();
+        subp.topMargin = dp(5);
+        hero.addView(sub, subp);
+        Ui.add(content, hero, 18);
+
         accessCard = accessCard();
         Ui.add(content, accessCard, 16);
-        Ondevice.attach(this, content, content.getChildCount());   // a game being prepared and its progress (hidden when there is none)
+        Ondevice.attach(this, content, content.getChildCount());
         fixGap(content, Ui.GAP);
         gameBox = new LinearLayout(this);
         gameBox.setOrientation(LinearLayout.VERTICAL);
@@ -196,18 +371,16 @@ public final class MainActivity extends Activity {
                 .toggle(this, Prefs.overlay(this), (b, on) -> { Prefs.overlay(this, on); refreshSettings(); });
         play.addView(overlayRow.view);
         Ui.Setting touch = new Ui.Setting(this, "🎮", "On-screen controls", null).chevron(this);
-        touch.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("On-screen controls")
-                .setSingleChoiceItems(TouchControls.MODE_NAMES, TouchControls.mode(this), (d, w) -> { TouchControls.mode(this, w); touch.value(touchLabel(w)); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show());
+        touch.view.setOnClickListener(v -> Ui.choiceSheet(this, "On-screen controls", TouchControls.MODE_NAMES,
+                TouchControls.mode(this), w -> { TouchControls.mode(this, w); touch.value(touchLabel(w)); }));
         touch.value(touchLabel(TouchControls.mode(this)));
         play.addView(touch.view);
         play.addView(new Ui.Setting(this, "🔘", "Show / hide button", null).toggle(this, TouchControls.toggleButton(this), (b, on) -> TouchControls.toggleButton(this, on))
                 .value("The small button at the top centre that hides the on-screen controls").view);
         // How a controller opens the in-game panel (PadPanel); the panel opens by touch with a swipe in from the right edge or Back
         Ui.Setting padPanel = new Ui.Setting(this, "🎛️", "Controller: in-game panel", null).chevron(this);
-        padPanel.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Open the in-game panel with a controller")
-                .setSingleChoiceItems(PadPanel.OPEN_NAMES, Prefs.panelPad(this), (d, w) -> { Prefs.panelPad(this, w); padPanel.value(padPanelLabel(w)); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show());
+        padPanel.view.setOnClickListener(v -> Ui.choiceSheet(this, "Open the in-game panel with a controller", PadPanel.OPEN_NAMES,
+                Prefs.panelPad(this), w -> { Prefs.panelPad(this, w); padPanel.value(padPanelLabel(w)); }));
         padPanel.value(padPanelLabel(Prefs.panelPad(this)));
         play.addView(padPanel.view);
         resRow = new Ui.Setting(this, "🖼️", "Resolution", v -> gameRes()).chevron(this);
@@ -220,9 +393,8 @@ public final class MainActivity extends Activity {
         play.addView(new Ui.Setting(this, "🚀", "Use fast cores", null).toggle(this, Prefs.pinThreads(this), (b, on) -> Prefs.pinThreadsDefault(this, on))
                 .value("Keeps the busiest threads off the small cores").view);
         Ui.Setting xbox = new Ui.Setting(this, "🅰️", "Xbox button label swap", null).chevron(this);
-        xbox.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Xbox button label swap")
-                .setSingleChoiceItems(Prefs.XBOX_NAMES, Prefs.xboxButtons(this), (d, w) -> { Prefs.xboxButtonsDefault(this, w); xbox.value(Prefs.xboxLabel(w)); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show());
+        xbox.view.setOnClickListener(v -> Ui.choiceSheet(this, "Xbox button label swap", Prefs.XBOX_NAMES,
+                Prefs.xboxButtons(this), w -> { Prefs.xboxButtonsDefault(this, w); xbox.value(Prefs.xboxLabel(w)); }));
         xbox.value(Prefs.xboxLabel(Prefs.xboxButtons(this)));
         play.addView(xbox.view);
         Ui.Setting padMap = new Ui.Setting(this, "🕹️", "Button mapping", null).chevron(this);
@@ -289,7 +461,7 @@ public final class MainActivity extends Activity {
     }
 
     /** A settings group's card of rows, under its section label */
-    private LinearLayout settingsCard(LinearLayout content) { return Ui.add(content, Ui.listCard(this), 8); }
+    private LinearLayout settingsCard(LinearLayout content) { return Ui.add(content, Ui.settingsList(this), 8); }
 
     /** The settings rows' current values (after a dialog, on resume) */
     private void refreshSettings() {
@@ -448,18 +620,36 @@ public final class MainActivity extends Activity {
         Button add = Ui.button(this, "Add game", Ui.Kind.QUIET, v -> addGame());
         add.setCompoundDrawablesRelativeWithIntrinsicBounds(Ui.icon(this, R.drawable.ic_add, R.color.bn_accent), null, null, null);
         add.setCompoundDrawablePadding(dp(6));
-        gameBox.addView(Ui.sectionHeader(this, "Your games", add));
-        // One card per game: while a game is being prepared its card is the progress card (Ondevice), at the game's place, or first for a game not listed yet
+        gameBox.addView(Ui.sectionHeader(this, "YOUR GAMES", add));
+        // A console-style horizontal game rail: large cover tiles, one clear focus target at a time.
+        android.widget.HorizontalScrollView rail = new android.widget.HorizontalScrollView(this);
+        rail.setHorizontalScrollBarEnabled(false);
+        rail.setClipToPadding(false);
+        rail.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout cards = new LinearLayout(this);
+        cards.setOrientation(LinearLayout.HORIZONTAL);
+        cards.setClipToPadding(false);
+        rail.addView(cards, new android.widget.HorizontalScrollView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams railLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        railLp.topMargin = dp(14);
+        gameBox.addView(rail, railLp);
+        // Keep the preparing card in the same rail and preserve its existing pause/resume behavior.
         View pc = Ondevice.cardView();
         if (pc != null && pc.getParent() instanceof ViewGroup) ((ViewGroup) pc.getParent()).removeView(pc);
         boolean placed = false;
-        if (pc != null) { for (Game g : games) placed |= Ondevice.shows(g); if (!placed) { Ui.add(gameBox, pc, 4); placed = true; pc = null; } }
+        if (pc != null) { for (Game g : games) placed |= Ondevice.shows(g); if (!placed) { addRailCard(cards, pc); pc = null; } }
         for (Game g : games) {
-            if (pc != null && Ondevice.shows(g)) { Ui.add(gameBox, pc, gameBox.getChildCount() == 1 ? 4 : Ui.GAP); pc = null; continue; }
-            Ui.add(gameBox, gameCard(g), gameBox.getChildCount() == 1 ? 4 : Ui.GAP);
+            if (pc != null && Ondevice.shows(g)) { addRailCard(cards, pc); pc = null; continue; }
+            addRailCard(cards, gameCard(g));
         }
-        // A controller or keyboard starts on the first game's card (nothing happens in touch mode, where cards take no focus)
-        if (getCurrentFocus() == null && gameBox.getChildCount() > 1) gameBox.getChildAt(1).requestFocus();
+        // The first cover is the initial controller focus; touch users can tap any cover to select it.
+        if (getCurrentFocus() == null && cards.getChildCount() > 0) cards.getChildAt(0).requestFocus();
+    }
+
+    private void addRailCard(LinearLayout rail, View card) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(276), ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMarginEnd(dp(14));
+        rail.addView(card, lp);
     }
 
     /** No game yet: the banana, the three steps, and Add game */
@@ -488,21 +678,35 @@ public final class MainActivity extends Activity {
             steps.addView(chip, lp);
         }
         Ui.add(c, steps, 16, Ui.wrap());
-        Ui.add(c, Ui.action(this, R.drawable.ic_add, "Add game", Ui.Kind.PRIMARY, v -> addGame()), 20);
+        Ui.Action addGame = Ui.action(this, R.drawable.ic_add, "Add game", Ui.Kind.PRIMARY, v -> addGame());
+        // Keep the animated white focus outline on the button's true outer edge:
+        // remove the colored backing layer and extra inset padding.
+        addGame.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        addGame.setPadding(0, 0, 0, 0);
+        Ui.add(c, addGame, 20);
         return c;
     }
 
     /** A game's card: its tile, name and state, ⋯ Manage at the top right (far from the big button), and one big button: Play, or Prepare when the pack does not fit */
     private View gameCard(Game g) {
+        // The game header keeps its own surface; Play is a sibling on the page background,
+        // not nested inside the dark header card or another wrapper.
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         LinearLayout c = Ui.card(this);
-        c.setPadding(dp(16), dp(16), dp(16), dp(16));
+        c.setPadding(dp(16), dp(18), dp(16), dp(16));
+        c.setBackground(Ui.round(0xFF172538, dp(22), 0, 0));
+        c.setElevation(dp(2));
         LinearLayout top = Ui.row(this);
-        TextView tile = Ui.tile(this, g.name, 52);
+        top.setGravity(Gravity.TOP);
+        TextView tile = Ui.tile(this, g.name, 76);
         top.addView(tile);
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.setPadding(dp(14), 0, dp(4), 0);
         TextView name = Ui.text(this, g.name, 17, R.color.bn_text, 700);
+        name.setTextColor(0xFFF4F8FF);
         name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(name);
@@ -516,22 +720,50 @@ public final class MainActivity extends Activity {
         boolean other = Profile.of(g.titleId) == null;   // no profile in this APK: it cannot run here (Profile.missing says why)
         TextView st = other ? Ui.status(this, "Not in this app version", R.color.bn_danger) : Ui.status(this, "Checking…", R.color.bn_text_2);
         LinearLayout.LayoutParams sp = Ui.wrap();
-        sp.topMargin = dp(6);
-        info.addView(Ui.pill(st), sp);
+        sp.topMargin = dp(8);
+        st.setTextColor(other ? 0xFFFF8B8B : 0xFF9BCBFF);
+        Ui.pill(st).setBackground(Ui.round(0xFF18385D, dp(999), 0xFF315A83, dp(1)));
+        info.addView(st, sp);
         top.addView(info, Ui.weight());
         top.addView(Ui.more(this, "Manage " + g.name, v -> manage(g)));
         c.addView(top);
+        item.addView(c, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         Ui.Action play = Ui.action(this, R.drawable.ic_play, "Play", Ui.Kind.PRIMARY, v -> launch(g));
+        // Keep the game tile clean until the player selects it; selection reveals its Play action.
+        play.setVisibility(View.GONE);
+        play.setBackground(Ui.round(0xFF111820, dp(15), 0xFF46515F, dp(1)));
+        play.label.setTextColor(0xFFFFFFFF);
+        play.icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
         if (other) {   // nothing on this card can work in this app: the sentence, and no button (⋯ still has its folders, saves and Remove)
             Ui.add(c, Ui.body(this, Profile.missing(g.titleId, g.name)), 12);
             c.setOnLongClickListener(v -> { manage(g); return true; });
             return c;
         }
-        Ui.add(c, play, 16);
-        Ui.focusCard(this, c, v -> { if (play.isEnabled()) play.performClick(); });   // the card's confirm = the big button, whatever it has become (Play, Prepare, …)
+        // Only the pill-shaped Play control is visible here; no card, border or background wraps it.
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        playParams.topMargin = dp(12);
+        item.addView(play, playParams);
+        Ui.focusCard(this, c, v -> {
+            // Keep focus on the selected cover so its PS5 sweep never freezes.
+            // Reveal Play with a short lift/fade, like the action row on a console hub.
+            if (play.getVisibility() != View.VISIBLE) {
+                play.setAlpha(0f);
+                play.setTranslationY(dp(8));
+                play.setVisibility(View.VISIBLE);
+                play.animate().alpha(1f).translationY(0f).setDuration(260)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).withEndAction(() -> play.requestFocus()).start();
+            }
+        });
+        c.setOnFocusChangeListener((v, focused) -> {
+            if (focused && play.getVisibility() != View.VISIBLE) {
+                play.setVisibility(View.VISIBLE);
+            }
+        });
+        // Keep the outer game card clean: the animated glass outline belongs to the Play action only.
+        Ui.ps5Focus(this, play, 15);
         check(g, st, play, info);
         c.setOnLongClickListener(v -> { manage(g); return true; });
-        return c;
+        return item;
     }
 
     /** Why a game cannot start as it is, in a few words (unfinished or busy pack code, another game build, no current shader library), and whether Prepare fixes it */
@@ -1297,8 +1529,10 @@ public final class MainActivity extends Activity {
     /** Game resolution: the window size the host gives the game (DM_WINDOW), from the next start */
     private void gameRes() {
         int i = Math.max(0, java.util.Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.window(this)));
-        new AlertDialog.Builder(this).setTitle("Game resolution").setSingleChoiceItems(Prefs.WINDOW_NAMES, i, (d, w) -> { Prefs.window(this, Prefs.WINDOWS[w]); refreshSettings(); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(this, "Game resolution", Prefs.WINDOW_NAMES, i, w -> {
+            Prefs.window(this, Prefs.WINDOWS[w]);
+            refreshSettings();
+        });
     }
 
     static String capLabel(int v) { return v < 0 ? "Default" : v == 0 ? "The game's own" : v + " fps"; }
@@ -1314,9 +1548,10 @@ public final class MainActivity extends Activity {
             labels[k + 1] = capLabel(v);
             if (v == cur) checked = k + 1;
         }
-        new AlertDialog.Builder(this).setTitle("Frame rate cap")
-                .setSingleChoiceItems(labels, checked, (d, w) -> { Prefs.fpsCap(this, w == 0 ? -1 : Prefs.FPS_CAPS[w - 1]); refreshSettings(); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(this, "Frame rate cap", labels, checked, w -> {
+            Prefs.fpsCap(this, w == 0 ? -1 : Prefs.FPS_CAPS[w - 1]);
+            refreshSettings();
+        });
     }
 
     /** Frame generation's settings and the Lossless.dll found (or a manual pick when it is in none of the known places) */
@@ -1376,6 +1611,6 @@ public final class MainActivity extends Activity {
     private static String touchLabel(int m) { return m == TouchControls.MODE_AUTO ? "Auto: hidden while a controller is connected" : TouchControls.MODE_NAMES[m]; }
     /** A default's choice in Settings (no "Default" entry: this is the default) */
     private void pick(String title, String[] items, int cur, java.util.function.IntConsumer set) {
-        new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(items, cur, (d, w) -> { set.accept(w); refreshSettings(); d.dismiss(); }).setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(this, title, items, cur, w -> { set.accept(w); refreshSettings(); });
     }
 }

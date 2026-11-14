@@ -204,18 +204,30 @@ final class GpuDriver {
         labels.add("System (the phone's own driver)");
         int checked = 0;
         for (int k = 0; k < inst.size(); k++) { labels.add(inst.get(k).label() + (recommended(inst.get(k)) ? " (recommended)" : "")); if (sel != null && inst.get(k).dir.equals(sel.dir)) checked = k + 1; }
-        new AlertDialog.Builder(a).setTitle("GPU driver (takes effect at the next game start)")
-                .setSingleChoiceItems(labels.toArray(new String[0]), checked, (d, w) -> { select(a, w == 0 ? null : inst.get(w - 1)); d.dismiss(); })
-                .setPositiveButton("Install…", (d, w) -> installDialog(a, request))
-                .setNeutralButton(sel != null ? "Remove picked…" : "Close", (d, w) -> {
-                    if (sel == null) return;
-                    Ui.confirmDanger(a, "Remove " + sel.label() + "?", "Deleted: this driver's copy inside the app (" + sel.dir + ").\n\nKept: the zip you installed it from, "
-                            + "your games, packs and saves. The game uses the phone's own driver until you pick another.", "Remove driver", () -> {
-                        DriverZip.deleteTree(sel.dir); select(a, null);
-                        Toast.makeText(a, "Removed " + sel.label() + "; the system driver is used", Toast.LENGTH_LONG).show();
-                    });
-                })
-                .setNegativeButton("Cancel", null).show();
+        List<String> options = new ArrayList<>(labels);
+        int installIndex = options.size();
+        options.add("＋  Install a driver…");
+        int removeIndex = -1;
+        if (sel != null) {
+            removeIndex = options.size();
+            options.add("－  Remove picked driver…");
+        }
+        final int removeAction = removeIndex;
+        Ui.choiceSheet(a, "GPU driver · takes effect next game start",
+                options.toArray(new String[0]), checked, w -> {
+                    if (w < inst.size() + 1) {
+                        select(a, w == 0 ? null : inst.get(w - 1));
+                        Toast.makeText(a, "GPU driver: " + (w == 0 ? "system" : inst.get(w - 1).label()), Toast.LENGTH_SHORT).show();
+                    } else if (w == installIndex) {
+                        installDialog(a, request);
+                    } else if (w == removeAction && sel != null) {
+                        Ui.confirmDanger(a, "Remove " + sel.label() + "?", "Deleted: this driver's copy inside the app (" + sel.dir + ").\\n\\nKept: the zip you installed it from, your games, packs and saves. The game uses the phone's own driver until you pick another.", "Remove driver", () -> {
+                            DriverZip.deleteTree(sel.dir);
+                            select(a, null);
+                            Toast.makeText(a, "Removed " + sel.label() + "; the system driver is used", Toast.LENGTH_LONG).show();
+                        });
+                    }
+                });
     }
 
     private static void installDialog(Activity a, int request) {
@@ -224,17 +236,21 @@ final class GpuDriver {
         for (File f : zips) labels.add(f.getName() + "  (the app's gpu_drivers folder)");
         labels.add("Pick a zip…");
         labels.add("Download…");   // DriverFetch: GitHub releases, only on a tap
-        new AlertDialog.Builder(a).setTitle("Install a driver zip (with meta.json)")
-                .setItems(labels.toArray(new String[0]), (d, w) -> {
-                    if (w == zips.size() + 1) { DriverFetch.dialog(a, request); return; }
-                    if (w == zips.size()) {
-                        a.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")   // some providers label zips otherwise
-                                .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"}), request);
-                        return;
-                    }
-                    File z = zips.get(w);
-                    installInBackground(a, z.getName(), () -> install(a, z), null);
-                }).setNegativeButton("Cancel", null).show();
+        int pickIndex = labels.size();
+        labels.add("＋  Pick a zip…");
+        int downloadIndex = labels.size();
+        labels.add("↓  Download a driver…");
+        Ui.choiceSheet(a, "Install a driver zip · meta.json", labels.toArray(new String[0]), -1, w -> {
+            if (w == downloadIndex) {
+                DriverFetch.dialog(a, request);
+            } else if (w == pickIndex) {
+                a.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                        .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"}), request);
+            } else {
+                File z = zips.get(w);
+                installInBackground(a, z.getName(), () -> install(a, z), null);
+            }
+        });
     }
 
     /** The picker's result (MainActivity.onActivityResult) */
