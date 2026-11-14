@@ -253,7 +253,7 @@ final class Ui {
             return false;
         });
         v.setOnFocusChangeListener((view, focused) -> {
-            ViewParent p = view.getParent();
+            android.view.ViewParent p = view.getParent();
             if (!(p instanceof ViewGroup)) return;
             ViewGroup host = (ViewGroup) p;
             SharedFocusController controller;
