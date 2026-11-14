@@ -1146,8 +1146,8 @@ final class Ui {
             this.title.setEllipsize(TextUtils.TruncateAt.END);
             col.addView(this.title);
             value = small(c, "");
-            value.setMaxLines(3);
-            value.setEllipsize(TextUtils.TruncateAt.END);
+            value.setMaxLines(Integer.MAX_VALUE);   // Let wrapped descriptions determine the row and shared focus-frame height.
+            value.setEllipsize(null);
             value.setVisibility(View.GONE);   // shown by value(…) when there is one
             LinearLayout.LayoutParams vp = fill();
             vp.topMargin = dp(c, 1);
@@ -1172,8 +1172,8 @@ final class Ui {
             lp.topMargin = dp(c, 3);
             col.addView(tags, lp);
             note = small(c, "");
-            note.setMaxLines(2);
-            note.setEllipsize(TextUtils.TruncateAt.END);
+            note.setMaxLines(Integer.MAX_VALUE);
+            note.setEllipsize(null);
             note.setVisibility(View.GONE);   // shown by note(…)
             col.addView(note);
             view.addView(col, weight());
