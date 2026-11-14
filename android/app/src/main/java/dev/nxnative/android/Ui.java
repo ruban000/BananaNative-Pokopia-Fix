@@ -1243,6 +1243,8 @@ final class Ui {
         ScrollView sv = new ScrollView(a);
         sv.setFillViewport(true);
         sv.setClipToPadding(false);
+        sv.setBackground(round(0xE60F192D, dp(a, 22), 0x33FFFFFF, dp(a, 1)));
+        content.setBackgroundColor(Color.TRANSPARENT);
         int p = dp(a, 20);
         content.setPadding(p, dp(a, 4), p, dp(a, 8));
         sv.addView(content);
