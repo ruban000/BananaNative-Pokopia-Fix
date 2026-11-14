@@ -456,26 +456,13 @@ final class GameSettings {
         String[] labels = {"Game default (" + gpuTsName(p == null ? "submission" : p.gpuTs) + ")", "Per segment", "Per submission"};
         String m = Prefs.gpuTs(a, g.titleId);
         int checked = m == null ? 0 : 1 + Math.max(0, Arrays.asList(GPU_TS).indexOf(m));
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        AlertDialog[] d = new AlertDialog[1];
-        box.addView(Ui.small(a, "Per segment: the game's timestamps see the real GPU time, so its dynamic resolution can adapt. Per submission: one time for the whole "
-                + "submission (the older behaviour). A DM_NVN_GPU_TS line in env.txt wins."));
-        android.widget.RadioGroup rg = new android.widget.RadioGroup(a);
-        for (int k = 0; k < labels.length; k++) {
-            android.widget.RadioButton rb = new android.widget.RadioButton(a);
-            rb.setText(labels[k]);
-            rb.setId(k + 1);
-            rg.addView(rb);
-        }
-        rg.check(checked + 1);
-        rg.setOnCheckedChangeListener((x, w) -> {
-            Prefs.gpuTs(a, g.titleId, w <= 1 ? null : GPU_TS[w - 2]);
-            d[0].dismiss();
-            done.run();
-        });
-        Ui.add(box, rg, 8);
-        d[0] = Ui.sheet(a, "GPU timing · " + g.name, box).setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(a, "GPU timing · " + g.name,
+                "Per segment: the game's timestamps see the real GPU time, so its dynamic resolution can adapt. Per submission: one time for the whole "
+                        + "submission (the older behaviour). A DM_NVN_GPU_TS line in env.txt wins.",
+                labels, checked, w -> {
+                    Prefs.gpuTs(a, g.titleId, w == 0 ? null : GPU_TS[w - 1]);
+                    done.run();
+                });
     }
 
     /** The pack's scene_res rows (Pack.scenes), empty without a pack or from one that cannot be read */
@@ -504,34 +491,24 @@ final class GameSettings {
         if (ps.isEmpty()) return;
         java.util.Map<String, String> rows = packScenes(g);
         File pd = g.packDir != null ? new File(g.packDir) : null;
-        String recPreset = Prefs.rec(a, g.titleId, Recommend.RES_PRESET);   // this phone's recommended preset (Prefs.recommended), named in its line
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        AlertDialog[] d = new AlertDialog[1];
+        String recPreset = Prefs.rec(a, g.titleId, Recommend.RES_PRESET);
         boolean simple = Prefs.simpleRes(a, g.titleId);
-        box.addView(Ui.small(a, ResPresets.NOTE + " Menus and text follow the window. Sizes marked about are estimates. The 3D pictures are made from your game files when the game is prepared."));
-        android.widget.RadioGroup rg = new android.widget.RadioGroup(a);
-        for (int k = 0; k <= (simple ? ps.size() - 1 : ps.size()); k++) {   // the tester rows add Advanced after the presets
-            android.widget.RadioButton rb = new android.widget.RadioButton(a);
-            if (k < ps.size()) {
-                ResPresets.Preset p = ps.get(k);
-                boolean missing = p.overlay() && SceneRes.overlay(rows, pd, p.id) == null;
-                rb.setText(ResPresets.itemText(p, k == 0, p.id.equals(recPreset)) + (missing ? " \u00b7 needs Prepare again" : ""));
-            } else rb.setText("Advanced (for testers)\nwindow and 3D scene set apart");
-            rb.setId(k + 1);
-            rg.addView(rb);
+        String[] labels = new String[ps.size() + (simple ? 0 : 1)];
+        for (int k = 0; k < ps.size(); k++) {
+            ResPresets.Preset p = ps.get(k);
+            boolean missing = p.overlay() && SceneRes.overlay(rows, pd, p.id) == null;
+            labels[k] = ResPresets.itemText(p, k == 0, p.id.equals(recPreset)) + (missing ? " · needs Prepare again" : "");
         }
+        if (!simple) labels[ps.size()] = "Advanced (for testers)\nwindow and 3D scene set apart";
         String rc = Prefs.resolutionChoice(a, g.titleId);
         ResPresets.Preset cur = ResPresets.of(ps, rc);
-        if (cur != null) rg.check(ps.indexOf(cur) + 1);
-        else if (!simple) rg.check(ps.size() + 1);   // Advanced; a player's saved custom setup shows none checked
-        rg.setOnCheckedChangeListener((x, w) -> {
-            Prefs.resPreset(a, g.titleId, w <= ps.size() ? ps.get(w - 1).id : ResPresets.ADVANCED);
-            d[0].dismiss();
-            done.run();
-        });
-        Ui.add(box, rg, 8);
-        d[0] = Ui.sheet(a, "Resolution \u00b7 " + g.name, box).setNegativeButton("Cancel", null).show();
+        int checked = cur != null ? ps.indexOf(cur) : simple ? -1 : ps.size();
+        Ui.choiceSheet(a, "Resolution · " + g.name,
+                ResPresets.NOTE + " Menus and text follow the window. Sizes marked about are estimates. The 3D pictures are made from your game files when the game is prepared.",
+                labels, checked, w -> {
+                    Prefs.resPreset(a, g.titleId, w < ps.size() ? ps.get(w).id : ResPresets.ADVANCED);
+                    done.run();
+                });
     }
 
     /** Game settings' value of Advanced › 3D scene: the choice's label, and when the pack has no overlay for it (made before the option, or the pack step refused the palette), what to do */
@@ -555,31 +532,18 @@ final class GameSettings {
         labels[0] = "Game default (its own dynamic resolution)";
         for (int k = 0; k < ps.size(); k++) labels[k + 1] = ps.get(k).label;
         SceneRes.Preset cur = SceneRes.of(ps, Prefs.sceneRes(a, g.titleId));
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        AlertDialog[] d = new AlertDialog[1];
         boolean args = ps.stream().allMatch(SceneRes.Preset::arg);
-        box.addView(Ui.small(a, args
+        String note = args
                 ? "The 3D scene as a share of the picture, set through the game's own settings: higher is sharper and slower, menus and text stay sharp. "
                   + "Sizes are the most the game draws; under load its dynamic resolution lowers them. Applies at the next start. A DM_GAME_ARGS_ADD line in env.txt wins."
                 : "The 3D scene as a scale of the window's upscaler output, before the upscaler takes it to the window: lower is faster and softer. Menus and text stay sharp. "
-                  + "Made from your game files when the game is prepared; applies at the next start. A DM_ROMFS_OVERLAY line in env.txt wins."));
-        android.widget.RadioGroup rg = new android.widget.RadioGroup(a);
-        for (int k = 0; k < labels.length; k++) {
-            android.widget.RadioButton rb = new android.widget.RadioButton(a);
-            rb.setText(labels[k]);
-            rb.setId(k + 1);
-            rg.addView(rb);
-        }
-        rg.check(cur == null ? 1 : ps.indexOf(cur) + 2);
-        rg.setOnCheckedChangeListener((x, w) -> {
-            Prefs.sceneRes(a, g.titleId, w <= 1 ? null : ps.get(w - 2).name);
+                  + "Made from your game files when the game is prepared; applies at the next start. A DM_ROMFS_OVERLAY line in env.txt wins.";
+        int checked = cur == null ? 0 : ps.indexOf(cur) + 1;
+        Ui.choiceSheet(a, "3D scene · " + g.name, note, labels, checked, w -> {
+            Prefs.sceneRes(a, g.titleId, w == 0 ? null : ps.get(w - 1).name);
             keepAdvanced(a, g);
-            d[0].dismiss();
             done.run();
         });
-        Ui.add(box, rg, 8);
-        d[0] = Ui.sheet(a, "3D scene · " + g.name, box).setNegativeButton("Cancel", null).show();
     }
 
     static String phoneTag() { return java.util.Locale.getDefault().toLanguageTag(); }
