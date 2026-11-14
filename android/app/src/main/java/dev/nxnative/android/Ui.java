@@ -1420,7 +1420,8 @@ final class Ui {
         t.setSoundEffectsEnabled(false);
         t.setSelected(selected);
         t.setContentDescription(label);
-        focusMotion(c, t, 12);
+        // Wide game-settings section columns use the same shared PS5 sliding focus frame as Settings rows.
+        sharedFocus(c, t, 12);
         t.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
         return t;
     }
