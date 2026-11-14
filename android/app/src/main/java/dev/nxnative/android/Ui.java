@@ -201,8 +201,11 @@ final class Ui {
     private static final class SettingFocusDrawable extends Drawable implements android.graphics.drawable.Animatable {
         private final android.graphics.Paint edge = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint shimmer = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint movingGlow = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint movingCore = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.RectF bounds = new android.graphics.RectF();
         private final android.graphics.Path pill = new android.graphics.Path();
+        private final android.graphics.Path glowPath = new android.graphics.Path();
         private final android.graphics.Matrix shimmerMatrix = new android.graphics.Matrix();
         private android.graphics.LinearGradient sheen;
         private final float radius, stroke, gap;
@@ -218,6 +221,12 @@ final class Ui {
             edge.setStyle(android.graphics.Paint.Style.STROKE);
             edge.setStrokeWidth(stroke);
             shimmer.setStyle(android.graphics.Paint.Style.FILL);
+            movingGlow.setStyle(android.graphics.Paint.Style.STROKE);
+            movingGlow.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            movingGlow.setStrokeWidth(stroke * 3.2f);
+            movingCore.setStyle(android.graphics.Paint.Style.STROKE);
+            movingCore.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            movingCore.setStrokeWidth(stroke * 1.25f);
 
             sheenAnimator = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
             sheenAnimator.setDuration(2700);
@@ -272,6 +281,32 @@ final class Ui {
                     android.graphics.Color.argb(Math.round(112f * focusAlpha), 255, 255, 255));
             canvas.drawRoundRect(bounds, radius, radius, edge);
             edge.clearShadowLayer();
+
+            // A bright white segment travels continuously around the rounded focus ring,
+            // like the moving highlight on a PS5 settings selection.
+            android.graphics.PathMeasure measure = new android.graphics.PathMeasure(pill, false);
+            float perimeter = measure.getLength();
+            if (perimeter > 0f && focusAlpha > 0f) {
+                float segment = Math.min(perimeter * 0.24f, Math.max(stroke * 12f, perimeter * 0.16f));
+                float progress = (phase + 1.25f) / 2.5f;
+                float start = progress * perimeter;
+                float end = start + segment;
+                glowPath.reset();
+                if (end <= perimeter) {
+                    measure.getSegment(start, end, glowPath, true);
+                } else {
+                    measure.getSegment(start, perimeter, glowPath, true);
+                    measure.getSegment(0f, end - perimeter, glowPath, true);
+                }
+                int glowAlpha = Math.round(210f * focusAlpha);
+                movingGlow.setColor(android.graphics.Color.argb(glowAlpha, 255, 255, 255));
+                movingGlow.setShadowLayer(stroke * 2.8f, 0, 0,
+                        android.graphics.Color.argb(Math.round(190f * focusAlpha), 255, 255, 255));
+                canvas.drawPath(glowPath, movingGlow);
+                movingGlow.clearShadowLayer();
+                movingCore.setColor(android.graphics.Color.argb(Math.round(245f * focusAlpha), 255, 255, 255));
+                canvas.drawPath(glowPath, movingCore);
+            }
         }
 
         @Override protected void onBoundsChange(android.graphics.Rect b) {
@@ -279,8 +314,8 @@ final class Ui {
             shimmer.setShader(null);
             invalidateSelf();
         }
-        @Override public void setAlpha(int alpha) { edge.setAlpha(alpha); shimmer.setAlpha(alpha); invalidateSelf(); }
-        @Override public void setColorFilter(android.graphics.ColorFilter filter) { edge.setColorFilter(filter); shimmer.setColorFilter(filter); invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { edge.setAlpha(alpha); shimmer.setAlpha(alpha); movingGlow.setAlpha(alpha); movingCore.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { edge.setColorFilter(filter); shimmer.setColorFilter(filter); movingGlow.setColorFilter(filter); movingCore.setColorFilter(filter); invalidateSelf(); }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
         @Override public void start() {
             if (!sheenAnimator.isStarted()) sheenAnimator.start();
