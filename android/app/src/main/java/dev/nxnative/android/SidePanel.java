@@ -83,9 +83,9 @@ final class SidePanel extends FrameLayout {
     private static GradientDrawable makePanelBackground() {
         GradientDrawable bg = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
-                new int[] {0xF51A2032, 0xF50D1424, 0xF51A1830});
+                new int[] {0xF5182638, 0xF50B1422, 0xF5162233});
         bg.setCornerRadius(0);
-        bg.setStroke(1, 0x553C4B72);
+        bg.setStroke(1, 0x5579A9D8);
         return bg;
     }
 
@@ -132,7 +132,7 @@ final class SidePanel extends FrameLayout {
         sh.addView(brand, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         tabs = new LinearLayout(a);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setBackgroundColor(0xFF151B2B);
+        tabs.setBackgroundColor(0xFF101B2A);
         sh.addView(tabs, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         sh.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         addView(sh, new LayoutParams(PanelLook.widthPx(Prefs.panelSize(a), dp, a.getResources().getDisplayMetrics().widthPixels), LayoutParams.MATCH_PARENT, Gravity.END));
@@ -276,14 +276,22 @@ final class SidePanel extends FrameLayout {
 
     /** The focus frame: a yellow outline on the focused row of the panel (not in touch mode, where nothing has the focus) */
     private void focusMoved(View old, View now) {
-        if (lit != null) { lit.setForeground(null); lit = null; }
-        if (now == null || !inside(now) || isInTouchMode()) return;
+        if (lit != null) {
+            View previous = lit;
+            previous.animate().cancel();
+            previous.animate().scaleX(1f).scaleY(1f).setDuration(150)
+                    .withEndAction(() -> { if (previous != lit) previous.setForeground(null); }).start();
+            lit = null;
+        }
+        if (now == null || !inside(now)) return;
         float dp = getResources().getDisplayMetrics().density;
         android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
         d.setColor(0x229B8CFF);
         d.setStroke(Math.round(2.5f * dp), FOCUS);
         d.setCornerRadius(10 * dp);
         now.setForeground(d);
+        now.animate().cancel();
+        now.animate().scaleX(1.018f).scaleY(1.018f).setDuration(180).start();
         lit = now;
     }
 
@@ -322,10 +330,10 @@ final class SidePanel extends FrameLayout {
             t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);   // compact icon-and-label navigation
             t.setPadding(pad, 0, pad, 0);
             t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setTextColor(on ? 0xFFFFFFFF : 0xFFB7C0D5);
+            t.setTextColor(on ? 0xFFECF4FF : 0xFFB5C2D2);
             GradientDrawable tabBg = new GradientDrawable();
             tabBg.setCornerRadius(14 * dp);
-            tabBg.setColor(on ? 0xFF6658D8 : 0x00151B2B);
+            tabBg.setColor(on ? 0xFF397FD0 : 0x00101B2A);
             t.setBackground(tabBg);
             t.setPadding(pad, Math.round(5 * dp), pad, Math.round(5 * dp));
             t.setSelected(on);
@@ -587,7 +595,7 @@ final class SidePanel extends FrameLayout {
 
         Button pause = new Button(act);   // the game suspended (clock, graphics, threads, audio) until a tap on the screen, or A / Start: GameActivity.pause
         pause.setText("Ⅱ   Pause the game");
-        actionButton(pause, 0xFF29264B, 0xFF7668E8, 0xFFEDEAFF);
+        actionButton(pause, 0xFF1D3552, 0xFF5B9FE8, 0xFFF0F6FF);
         pause.setOnClickListener(v -> { close(); if (act instanceof GameActivity) ((GameActivity) act).pause(); });
         LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         pl.topMargin = Math.round(24 * getResources().getDisplayMetrics().density);
