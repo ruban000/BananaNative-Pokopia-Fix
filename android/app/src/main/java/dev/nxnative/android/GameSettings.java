@@ -726,8 +726,7 @@ final class GameSettings {
         String[] labels = new String[items.length + 1];
         labels[0] = first;
         System.arraycopy(items, 0, labels, 1, items.length);
-        new AlertDialog.Builder(a).setTitle(title).setSingleChoiceItems(labels, own ? cur + 1 : 0, (x, w) -> { set.accept(w == 0 ? null : w - 1); x.dismiss(); done.run(); })
-                .setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(a, title, labels, own ? cur + 1 : 0, w -> { set.accept(w == 0 ? null : w - 1); done.run(); });
     }
 
     private static void upscaler(MainActivity a, Game g, Runnable done) {   // the Upscaler (GameUpscaler: DM_VK_NDSR and the present's scaling); the in-game panel changes it live
