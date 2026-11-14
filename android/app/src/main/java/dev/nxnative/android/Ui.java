@@ -131,7 +131,7 @@ final class Ui {
         SharedFocusController(ViewGroup host, float radius) {
             this.host = host;
             glow = new SharedFocusGlow(radius);
-            slide.setDuration(250);
+            slide.setDuration(420);
             slide.setInterpolator(new android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f));
             slide.addUpdateListener(a -> {
                 float t = (Float) a.getAnimatedValue();
@@ -200,9 +200,7 @@ final class Ui {
         private final android.graphics.Matrix sheenMatrix = new android.graphics.Matrix();
         private android.graphics.LinearGradient sheen;
         private float radius;
-        private float breath = 1f;
         private float phase;
-        private final android.animation.ValueAnimator breathing = android.animation.ValueAnimator.ofFloat(0.6f, 1f);
         private final android.animation.ValueAnimator sweep = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
 
         SharedFocusGlow(float radius) {
@@ -218,23 +216,15 @@ final class Ui {
             movingCore.setStyle(android.graphics.Paint.Style.STROKE);
             movingCore.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             movingCore.setStrokeWidth(2.6f);
-            breathing.setDuration(2000);
-            breathing.setRepeatCount(android.animation.ValueAnimator.INFINITE);
-            breathing.setRepeatMode(android.animation.ValueAnimator.REVERSE);
-            breathing.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
-            breathing.addUpdateListener(a -> { breath = (Float) a.getAnimatedValue(); invalidateSelf(); });
-            sweep.setDuration(2700);
+            sweep.setDuration(4800);
             sweep.setRepeatCount(android.animation.ValueAnimator.INFINITE);
             sweep.setInterpolator(new android.view.animation.LinearInterpolator());
             sweep.addUpdateListener(a -> { phase = (Float) a.getAnimatedValue(); invalidateSelf(); });
         }
 
         void setRadius(float value) { radius = value; invalidateSelf(); }
-        void startBreathing() {
-            if (!breathing.isStarted()) breathing.start();
-            if (!sweep.isStarted()) sweep.start();
-        }
-        void stopBreathing() { breathing.cancel(); sweep.cancel(); }
+        void startBreathing() { if (!sweep.isStarted()) sweep.start(); }
+        void stopBreathing() { sweep.cancel(); }
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
@@ -255,15 +245,15 @@ final class Ui {
             float travel = (phase + 1.25f) * (r.width() + r.height()) * 0.5f - r.height();
             sheenMatrix.setTranslate(r.left + travel, r.top);
             sheen.setLocalMatrix(sheenMatrix);
-            sheenPaint.setAlpha(Math.round(255f * breath));
+            sheenPaint.setAlpha(105);
             canvas.drawRect(r, sheenPaint);
             canvas.restoreToCount(save);
 
-            halo.setColor(android.graphics.Color.argb(Math.round(105f * breath), 255, 255, 255));
-            halo.setShadowLayer(12f, 0f, 0f, android.graphics.Color.argb(Math.round(150f * breath), 255, 255, 255));
+            halo.setColor(android.graphics.Color.argb(52, 255, 255, 255));
+            halo.setShadowLayer(7f, 0f, 0f, 0x55FFFFFF);
             canvas.drawRoundRect(r, radius, radius, halo);
             halo.clearShadowLayer();
-            border.setColor(android.graphics.Color.argb(Math.round(242f * breath), 255, 255, 255));
+            border.setColor(android.graphics.Color.argb(205, 255, 255, 255));
             canvas.drawRoundRect(r, radius, radius, border);
 
             android.graphics.PathMeasure measure = new android.graphics.PathMeasure(outline, false);
@@ -278,11 +268,11 @@ final class Ui {
                     measure.getSegment(start, perimeter, segmentPath, true);
                     measure.getSegment(0f, end - perimeter, segmentPath, true);
                 }
-                movingGlow.setColor(android.graphics.Color.argb(Math.round(190f * breath), 255, 255, 255));
-                movingGlow.setShadowLayer(9f, 0f, 0f, android.graphics.Color.WHITE);
+                movingGlow.setColor(android.graphics.Color.argb(125, 255, 255, 255));
+                movingGlow.setShadowLayer(5f, 0f, 0f, 0x99FFFFFF);
                 canvas.drawPath(segmentPath, movingGlow);
                 movingGlow.clearShadowLayer();
-                movingCore.setColor(android.graphics.Color.WHITE);
+                movingCore.setColor(0xD9FFFFFF);
                 canvas.drawPath(segmentPath, movingCore);
             }
         }
@@ -295,7 +285,7 @@ final class Ui {
     private static void animateFocusContent(View view, boolean focused) {
         if (view instanceof TextView || view instanceof ImageView) {
             view.animate().cancel();
-            float scale = focused ? 1.02f : 1f;
+            float scale = focused ? 1.015f : 1f;
             view.setPivotX(view.getWidth() * 0.5f);
             view.setPivotY(view.getHeight() * 0.5f);
             view.animate().scaleX(scale).scaleY(scale).setDuration(180)
@@ -323,14 +313,14 @@ final class Ui {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
                 view.requestFocus();
                 view.animate().cancel();
-                view.animate().scaleX(0.97f).scaleY(0.97f).setDuration(85)
+                view.animate().scaleX(0.985f).scaleY(0.985f).setDuration(110)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             } else if (event.getAction() == android.view.MotionEvent.ACTION_UP
                     || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
                 view.animate().cancel();
                 boolean focused = view.hasFocus();
-                view.animate().scaleX(focused ? safeFocusScaleX(view, c, 1.03f) : 1f)
-                        .scaleY(focused ? 1.03f : 1f).setDuration(160)
+                view.animate().scaleX(focused ? safeFocusScaleX(view, c, 1.015f) : 1f)
+                        .scaleY(focused ? 1.015f : 1f).setDuration(280)
                         .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             }
             return false;
@@ -352,8 +342,8 @@ final class Ui {
                 controller.moveTo(view, radiusDp);
                 view.setElevation(dp(c, 8));
                 view.setPivotX(view.getWidth() * 0.5f);
-                view.animate().translationY(-dp(c, 3)).scaleX(safeFocusScaleX(view, c, 1.03f)).scaleY(1.03f)
-                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                view.animate().translationY(-dp(c, 1.5f)).scaleX(safeFocusScaleX(view, c, 1.015f)).scaleY(1.015f)
+                        .setDuration(320).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
                 animateFocusContent(view, true);
             } else {
                 view.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(180)
