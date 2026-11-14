@@ -287,12 +287,32 @@ final class Ui {
                     measure.getSegment(start, perimeter, segmentPath, true);
                     measure.getSegment(0f, end - perimeter, segmentPath, true);
                 }
-                movingGlow.setColor(android.graphics.Color.argb(125, 255, 255, 255));
-                movingGlow.setShadowLayer(5f, 0f, 0f, 0x99FFFFFF);
-                canvas.drawPath(segmentPath, movingGlow);
-                movingGlow.clearShadowLayer();
-                movingCore.setColor(0xD9FFFFFF);
-                canvas.drawPath(segmentPath, movingCore);
+                // Fade the travelling white highlight from 1% at both ends to
+                // full opacity at its centre, then back to 1%.
+                android.graphics.PathMeasure highlightMeasure = new android.graphics.PathMeasure(segmentPath, false);
+                float highlightLength = highlightMeasure.getLength();
+                if (highlightLength > 0f) {
+                    float[] previous = new float[2];
+                    float[] current = new float[2];
+                    final int samples = 96;
+                    highlightMeasure.getPosTan(0f, previous, null);
+                    movingGlow.setColor(android.graphics.Color.WHITE);
+                    movingGlow.setShadowLayer(5f, 0f, 0f, 0x99FFFFFF);
+                    movingCore.setColor(android.graphics.Color.WHITE);
+                    for (int i = 1; i <= samples; i++) {
+                        float fraction = i / (float) samples;
+                        float fade = 0.01f + 0.99f * (1f - Math.abs(2f * fraction - 1f));
+                        int alpha = Math.round(255f * fade);
+                        highlightMeasure.getPosTan(highlightLength * fraction, current, null);
+                        movingGlow.setAlpha(Math.round(alpha * 0.52f));
+                        canvas.drawLine(previous[0], previous[1], current[0], current[1], movingGlow);
+                        movingCore.setAlpha(alpha);
+                        canvas.drawLine(previous[0], previous[1], current[0], current[1], movingCore);
+                        previous[0] = current[0];
+                        previous[1] = current[1];
+                    }
+                    movingGlow.clearShadowLayer();
+                }
             }
         }
 
