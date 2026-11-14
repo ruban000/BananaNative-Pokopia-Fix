@@ -320,14 +320,27 @@ final class Ui {
         });
     }
 
-    /** Banana Native focus: a moving white highlight travels around the focused outline. */
-    static void ps5Focus(Context c, View v, float radiusDp) {
-        v.setFocusable(true);
-        v.setFocusableInTouchMode(true);
+    /** Let focus effects draw outside every containing layout, not just the focused control. */
+    private static void allowFocusOverflow(View v) {
         if (v instanceof ViewGroup) {
             ((ViewGroup) v).setClipChildren(false);
             ((ViewGroup) v).setClipToPadding(false);
         }
+        android.view.ViewParent parent = v.getParent();
+        while (parent instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) parent;
+            group.setClipChildren(false);
+            group.setClipToPadding(false);
+            parent = group.getParent();
+        }
+    }
+
+    /** Banana Native focus: a moving white highlight travels around the focused outline. */
+    static void ps5Focus(Context c, View v, float radiusDp) {
+        v.setFocusable(true);
+        v.setFocusableInTouchMode(true);
+        // Standard buttons and action controls all get the same unclipped focus halo.
+        allowFocusOverflow(v);
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
