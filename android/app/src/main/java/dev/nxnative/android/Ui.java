@@ -194,6 +194,7 @@ final class Ui {
         private final android.graphics.Paint halo = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint sheenPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint movingGlow = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint oppositeShade = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint movingCore = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Path outline = new android.graphics.Path();
         private final android.graphics.Path segmentPath = new android.graphics.Path();
@@ -213,6 +214,9 @@ final class Ui {
             movingGlow.setStyle(android.graphics.Paint.Style.STROKE);
             movingGlow.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             movingGlow.setStrokeWidth(6f);
+            oppositeShade.setStyle(android.graphics.Paint.Style.STROKE);
+            oppositeShade.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            oppositeShade.setStrokeWidth(4f);
             movingCore.setStyle(android.graphics.Paint.Style.STROKE);
             movingCore.setStrokeCap(android.graphics.Paint.Cap.ROUND);
             movingCore.setStrokeWidth(2.6f);
@@ -262,6 +266,21 @@ final class Ui {
                 float segment = Math.min(perimeter * 0.24f, Math.max(24f, perimeter * 0.16f));
                 float start = ((phase + 1.25f) / 2.5f) * perimeter;
                 float end = start + segment;
+                // A restrained dark counter-shade sits opposite the travelling white glint,
+                // matching the light/dark contrast of the PS5 focus treatment.
+                float shadeStart = (start + perimeter * 0.5f) % perimeter;
+                float shadeEnd = shadeStart + segment;
+                segmentPath.reset();
+                if (shadeEnd <= perimeter) measure.getSegment(shadeStart, shadeEnd, segmentPath, true);
+                else {
+                    measure.getSegment(shadeStart, perimeter, segmentPath, true);
+                    measure.getSegment(0f, shadeEnd - perimeter, segmentPath, true);
+                }
+                oppositeShade.setColor(android.graphics.Color.argb(82, 0, 0, 0));
+                oppositeShade.setShadowLayer(3f, 0f, 0f, 0x66000000);
+                canvas.drawPath(segmentPath, oppositeShade);
+                oppositeShade.clearShadowLayer();
+
                 segmentPath.reset();
                 if (end <= perimeter) measure.getSegment(start, end, segmentPath, true);
                 else {
