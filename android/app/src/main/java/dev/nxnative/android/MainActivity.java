@@ -320,7 +320,9 @@ public final class MainActivity extends Activity {
         // File access is an informational step, not an error: use the same midnight card and hairline edge as Settings.
         c.setBackground(Ui.round(Ui.col(this, R.color.bn_card), dp(20), Ui.col(this, R.color.bn_card_stroke), dp(1)));
         c.addView(Ui.heading(this, "Allow file access"));
-        Ui.add(c, Ui.body(this, "Needed to read a dump folder where it is. A .nup file works without it, and a dump folder can be copied into the app instead."), 4);
+        TextView accessNote = Ui.body(this, "Needed to read a dump folder where it is. A .nup file works without it, and a dump folder can be copied into the app instead.");
+        accessNote.setTextColor(Ui.col(this, R.color.bn_text_2));
+        Ui.add(c, accessNote, 4);
         Ui.add(c, Ui.button(this, "Allow", Ui.Kind.PRIMARY, v -> openAccessSettings()), 14, Ui.wrap());
         return c;
     }
