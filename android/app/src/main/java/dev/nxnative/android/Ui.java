@@ -619,10 +619,13 @@ final class Ui {
         frame.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         scroll.setOnApplyWindowInsetsListener((v, in) -> {
             Insets i = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            Insets navigation = in.getInsets(WindowInsets.Type.navigationBars());
             int w = a.getResources().getDisplayMetrics().widthPixels;
             int gutter = dp(a, a.getResources().getConfiguration().screenWidthDp < 360 ? 16 : 20);
             int side = Math.max(gutter, (w - i.left - i.right - dp(a, maxWidthDp)) / 2);
-            v.setPadding(side + i.left, i.top + dp(a, 8), side + i.right, i.bottom + dp(a, 24));
+            // Explicit navigation-bar inset: the final list row (including Readiness check) stays above Android's system buttons.
+            v.setPadding(side + i.left, i.top + dp(a, 8), side + i.right,
+                    Math.max(i.bottom, navigation.bottom) + dp(a, 24));
             scrim.getLayoutParams().height = i.top;
             scrim.requestLayout();
             return in;
