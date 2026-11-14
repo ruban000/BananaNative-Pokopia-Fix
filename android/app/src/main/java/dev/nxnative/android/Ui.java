@@ -307,25 +307,37 @@ final class Ui {
     static void ps5Focus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
+        if (v instanceof ViewGroup) {
+            ((ViewGroup) v).setClipChildren(false);
+            ((ViewGroup) v).setClipToPadding(false);
+        }
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
         });
         v.setOnFocusChangeListener((view, focused) -> {
+            Drawable current = view.getForeground();
+            if (current instanceof SettingFocusDrawable) ((SettingFocusDrawable) current).stop();
             view.animate().cancel();
             if (focused) {
-                MovingBorderDrawable border = new MovingBorderDrawable(dp(c, radiusDp), dp(c, 2));
+                SettingFocusDrawable border = new SettingFocusDrawable(dp(c, radiusDp), dp(c, 2), dp(c, 3));
                 view.setForeground(border);
                 border.start();
-                view.setElevation(dp(c, 14));
+                view.setElevation(dp(c, 8));
                 view.animate().translationY(-dp(c, 3)).scaleX(1.025f).scaleY(1.025f)
-                        .setDuration(230).setInterpolator(new android.view.animation.OvershootInterpolator(0.8f)).start();
+                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
             } else {
-                Drawable current = view.getForeground();
-                if (current instanceof MovingBorderDrawable) ((MovingBorderDrawable) current).stop();
-                view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(190)
-                        .withEndAction(() -> { if (!view.hasFocus()) view.setForeground(null); }).start();
-                view.setElevation(dp(c, 2));
+                view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(180)
+                        .withEndAction(() -> {
+                            if (!view.hasFocus()) {
+                                Drawable fg = view.getForeground();
+                                if (fg instanceof SettingFocusDrawable) {
+                                    ((SettingFocusDrawable) fg).stop();
+                                    view.setForeground(null);
+                                }
+                            }
+                        }).start();
+                view.setElevation(0f);
             }
         });
     }
@@ -596,6 +608,15 @@ final class Ui {
         return l;
     }
 
+    static LinearLayout settingsList(Context c) {
+        LinearLayout l = new LinearLayout(c);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        l.setDividerDrawable(new android.graphics.drawable.ColorDrawable(0x14FFFFFF));
+        l.setDividerPadding(dp(c, 2));
+        return l;
+    }
+
     /** A card inside a card: the tint color, no edge */
     static LinearLayout inner(Context c, int fillRes) {
         LinearLayout l = new LinearLayout(c);
@@ -655,6 +676,11 @@ final class Ui {
         LinearLayout content = new LinearLayout(a);
         content.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        android.graphics.drawable.GradientDrawable ps5Background = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xFF050A14, 0xFF0D192E});
+        scroll.setBackground(ps5Background);
+        content.setBackgroundColor(Color.TRANSPARENT);
         frame.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         frame.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         scroll.setOnApplyWindowInsetsListener((v, in) -> {
@@ -890,6 +916,23 @@ final class Ui {
      * state does, says(…)), a short status line when the setting needs something (status(…): "Needs Prepare again: …"), its tags on a line of their own (so they never
      * squeeze the text), a muted note, and a chevron (or a switch); the whole row is the touch target (a switch row's tap flips the switch). Compact: 52 dp high, 36 dp tiles
      */
+    private static String monochromeGlyph(String source) {
+        if (source == null || source.isEmpty()) return "·";
+        switch (source) {
+            case "🔄": return "↻"; case "👀": return "◉"; case "🎮": case "🎛️": return "⌘";
+            case "🔘": return "●"; case "🖼️": case "📺": return "▣"; case "⏱️": case "⏲️": return "◷";
+            case "📳": return "⌁"; case "🚀": return "↗"; case "🅰️": return "A"; case "🕹️": return "⊙";
+            case "🔍": return "⌕"; case "✨": return "✧"; case "📐": case "📏": return "⌁";
+            case "📁": return "▱"; case "🧹": return "⌫"; case "📋": return "▤"; case "🧪": return "◌";
+            case "📨": return "↗"; case "🛠": return "⚙"; case "🪟": return "▢"; case "🎬": return "▷";
+            case "🌀": return "◎"; case "🔳": return "▦"; case "🎯": return "⊙"; case "🏃": return "›";
+            case "🌿": return "✳"; case "🧩": return "◇"; case "🧱": return "▥"; case "🧵": return "≋";
+            case "💾": return "▣"; case "⚡": return "ϟ"; case "⏸️": return "Ⅱ"; case "📝": return "≡";
+            case "🌐": return "◎"; case "🔁": return "↻"; case "📦": return "□"; case "📲": return "▯";
+            case "🏠": return "⌂"; default: return "·";
+        }
+    }
+
     static final class Setting {
         final LinearLayout view;
         final TextView title, value, status, tag, badge, note;   // tag: Recommended / Changed (Ui.tag); badge: a fixed label such as Experimental; note: a muted line under them
@@ -905,10 +948,11 @@ final class Ui {
             // Foreground bounds track the complete measured row, including wrapped subtitles and tags.
             settingFocus(c, view, 12);
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
-            tile = text(c, emoji, 17, R.color.bn_text, 400);
+            tile = text(c, monochromeGlyph(emoji), 19, R.color.bn_text, 400);
+            tile.setTextColor(0xFFFFFFFF);
             tile.setGravity(Gravity.CENTER);
             tile.setIncludeFontPadding(false);
-            tile.setBackground(round(col(c, R.color.bn_tint), dp(c, 11), 0, 0));
+            tile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
             tile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             view.addView(tile, new LinearLayout.LayoutParams(dp(c, 36), dp(c, 36)));
             LinearLayout col = new LinearLayout(c);
@@ -967,6 +1011,12 @@ final class Ui {
         /** A switch at the end; a tap anywhere on a row without its own action flips it (when it is enabled) */
         Setting toggle(Context c, boolean on, android.widget.CompoundButton.OnCheckedChangeListener l) {
             toggle = new Switch(c);
+            toggle.setThumbTintList(new ColorStateList(
+                    new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                    new int[]{0xFFFFFFFF, 0xFFCBD5E1}));
+            toggle.setTrackTintList(new ColorStateList(
+                    new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                    new int[]{0x66FFFFFF, 0xFF475569}));
             toggle.setChecked(on);
             toggle.setOnCheckedChangeListener((b, x) -> { if (l != null) l.onCheckedChanged(b, x); says(); });   // the value line follows the switch (says)
             view.addView(toggle);
@@ -1144,6 +1194,46 @@ final class Ui {
     private static void styleTag(Context c, TextView t, boolean warn) {
         t.setTextColor(col(c, warn ? R.color.bn_danger : R.color.bn_accent));
         t.setBackground(round(col(c, warn ? R.color.bn_warn_tint : R.color.bn_tint), dp(c, 999), 0, 0));
+    }
+
+    static AlertDialog choiceSheet(Activity a, CharSequence title, String[] labels, int checked,
+                                   java.util.function.IntConsumer choose) {
+        LinearLayout options = new LinearLayout(a);
+        options.setOrientation(LinearLayout.VERTICAL);
+        AlertDialog[] dialog = new AlertDialog[1];
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            LinearLayout item = row(a);
+            item.setMinimumHeight(dp(a, 52));
+            item.setPadding(dp(a, 14), dp(a, 8), dp(a, 12), dp(a, 8));
+            item.addView(text(a, labels[i], 15, R.color.bn_text, 600), weight());
+            TextView tick = text(a, i == checked ? "✓" : "", 18, R.color.bn_text, 700);
+            tick.setTextColor(Color.WHITE);
+            item.addView(tick, new LinearLayout.LayoutParams(dp(a, 28), ViewGroup.LayoutParams.WRAP_CONTENT));
+            ps5Focus(a, item, 12);
+            item.setOnClickListener(v -> {
+                click(v);
+                choose.accept(index);
+                if (dialog[0] != null) dialog[0].dismiss();
+            });
+            options.addView(item, fill());
+            if (i + 1 < labels.length) options.addView(divider(a));
+        }
+        dialog[0] = sheet(a, title, options).setNegativeButton("Cancel", null).create();
+        dialog[0].setOnShowListener(v -> {
+            if (dialog[0].getWindow() != null) {
+                dialog[0].getWindow().setBackgroundDrawable(round(0xF20F192D, dp(a, 22), 0x44FFFFFF, dp(a, 1)));
+                dialog[0].getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                android.view.WindowManager.LayoutParams lp = dialog[0].getWindow().getAttributes();
+                lp.dimAmount = 0.62f;
+                dialog[0].getWindow().setAttributes(lp);
+            }
+            Button cancel = dialog[0].getButton(AlertDialog.BUTTON_NEGATIVE);
+            if (cancel != null) cancel.setTextColor(Color.WHITE);
+            if (checked >= 0 && checked < labels.length) options.getChildAt(checked * 2).requestFocus();
+        });
+        dialog[0].show();
+        return dialog[0];
     }
 
     // ---- Dialogs ----
