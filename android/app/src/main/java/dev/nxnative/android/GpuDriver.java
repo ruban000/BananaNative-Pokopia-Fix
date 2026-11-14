@@ -204,18 +204,30 @@ final class GpuDriver {
         labels.add("System (the phone's own driver)");
         int checked = 0;
         for (int k = 0; k < inst.size(); k++) { labels.add(inst.get(k).label() + (recommended(inst.get(k)) ? " (recommended)" : "")); if (sel != null && inst.get(k).dir.equals(sel.dir)) checked = k + 1; }
-        new AlertDialog.Builder(a).setTitle("GPU driver (takes effect at the next game start)")
-                .setSingleChoiceItems(labels.toArray(new String[0]), checked, (d, w) -> { select(a, w == 0 ? null : inst.get(w - 1)); d.dismiss(); })
-                .setPositiveButton("Install…", (d, w) -> installDialog(a, request))
-                .setNeutralButton(sel != null ? "Remove picked…" : "Close", (d, w) -> {
-                    if (sel == null) return;
-                    Ui.confirmDanger(a, "Remove " + sel.label() + "?", "Deleted: this driver's copy inside the app (" + sel.dir + ").\n\nKept: the zip you installed it from, "
-                            + "your games, packs and saves. The game uses the phone's own driver until you pick another.", "Remove driver", () -> {
-                        DriverZip.deleteTree(sel.dir); select(a, null);
-                        Toast.makeText(a, "Removed " + sel.label() + "; the system driver is used", Toast.LENGTH_LONG).show();
-                    });
-                })
-                .setNegativeButton("Cancel", null).show();
+        List<String> options = new ArrayList<>(labels);
+        int installIndex = options.size();
+        options.add("＋  Install a driver…");
+        int removeIndex = -1;
+        if (sel != null) {
+            removeIndex = options.size();
+            options.add("－  Remove picked driver…");
+        }
+        final int removeAction = removeIndex;
+        Ui.choiceSheet(a, "GPU driver · takes effect next game start",
+                options.toArray(new String[0]), checked, w -> {
+                    if (w < inst.size() + 1) {
+                        select(a, w == 0 ? null : inst.get(w - 1));
+                        Toast.makeText(a, "GPU driver: " + (w == 0 ? "system" : inst.get(w - 1).label()), Toast.LENGTH_SHORT).show();
+                    } else if (w == installIndex) {
+                        installDialog(a, request);
+                    } else if (w == removeAction && sel != null) {
+                        Ui.confirmDanger(a, "Remove " + sel.label() + "?", "Deleted: this driver's copy inside the app (" + sel.dir + ").\\n\\nKept: the zip you installed it from, your games, packs and saves. The game uses the phone's own driver until you pick another.", "Remove driver", () -> {
+                            DriverZip.deleteTree(sel.dir);
+                            select(a, null);
+                            Toast.makeText(a, "Removed " + sel.label() + "; the system driver is used", Toast.LENGTH_LONG).show();
+                        });
+                    }
+                });
     }
 
     private static void installDialog(Activity a, int request) {
