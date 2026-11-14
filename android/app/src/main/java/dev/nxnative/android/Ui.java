@@ -263,7 +263,7 @@ final class Ui {
             android.graphics.PathMeasure measure = new android.graphics.PathMeasure(outline, false);
             float perimeter = measure.getLength();
             if (perimeter > 0f) {
-                float segment = Math.min(perimeter * 0.24f, Math.max(24f, perimeter * 0.16f));
+                float segment = perimeter * 0.5f; // Equal 50/50 white highlight and opposite dark shadow.
                 float start = ((phase + 1.25f) / 2.5f) * perimeter;
                 float end = start + segment;
                 // A restrained dark counter-shade sits opposite the travelling white glint,
