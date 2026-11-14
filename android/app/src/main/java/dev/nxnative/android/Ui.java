@@ -1190,7 +1190,7 @@ final class Ui {
                 t.setClickable(true);
                 t.setFocusable(true);
                 t.setSoundEffectsEnabled(false);
-                t.setOnClickListener(v -> { if (i != selected) { click(v); select(i); pick.accept(i); } });
+                t.setOnClickListener(v -> { click(v); if (i != selected) { select(i); pick.accept(i); } });
                 items[k] = t;
                 addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             }
@@ -1243,7 +1243,7 @@ final class Ui {
             tab.setSelected(on);
             tab.setContentDescription(labels[k] + (on ? ", tab, selected" : ", tab"));
             focusMotion(c, tab, 10);
-            tab.setOnClickListener(v -> { if (i != sel) { click(v); pick.accept(i); } });
+            tab.setOnClickListener(v -> { click(v); if (i != sel) pick.accept(i); });
             row.addView(tab, wrap());
         }
         hs.addView(row);
@@ -1344,6 +1344,9 @@ final class Ui {
         }
         dialog[0] = sheet(a, title, options).setNegativeButton("Cancel", null).create();
         dialog[0].setOnShowListener(v -> {
+            // The dialog window supplies the single outer PS5 panel; remove the nested ScrollView panel.
+            android.view.ViewParent contentParent = options.getParent();
+            if (contentParent instanceof View) ((View) contentParent).setBackgroundColor(Color.TRANSPARENT);
             if (dialog[0].getWindow() != null) {
                 android.graphics.drawable.GradientDrawable dialogBg = new android.graphics.drawable.GradientDrawable(
                         android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
