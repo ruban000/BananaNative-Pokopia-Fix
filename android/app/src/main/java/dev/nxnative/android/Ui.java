@@ -508,7 +508,8 @@ final class Ui {
         t.setSingleLine(true);
         t.setEllipsize(TextUtils.TruncateAt.END);
         t.setContentDescription(s + ": tap for details");
-        t.setOnClickListener(v -> new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show());
+        t.setSoundEffectsEnabled(false);
+        t.setOnClickListener(v -> { click(v); new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show(); });
         return t;
     }
 
@@ -697,6 +698,7 @@ final class Ui {
         // The animated white glass border is the only focus outline; do not add the old blue focus stroke.
         card.setFocusable(true);
         card.setClickable(true);
+        card.setSoundEffectsEnabled(false);
         card.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
     }
 
@@ -765,6 +767,7 @@ final class Ui {
         b.setIncludeFontPadding(false);
         b.setTextColor(col(c, textColor(k)));
         style(c, b, k, 14);
+        b.setSoundEffectsEnabled(false);
         b.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
         // Every standard button uses the same animated white PS5-style focus edge.
         ps5Focus(c, b, 14);
@@ -787,6 +790,7 @@ final class Ui {
             style(c, this, k, 16);
             setClickable(true);
             setFocusable(true);
+            setSoundEffectsEnabled(false);
             icon = new ImageView(c);
             icon.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
             addView(icon, new LinearLayout.LayoutParams(dp(c, 22), dp(c, 22)));
@@ -824,6 +828,7 @@ final class Ui {
         v.setContentDescription(description);
         v.setClickable(true);
         v.setFocusable(true);
+        v.setSoundEffectsEnabled(false);
         v.setOnClickListener(x -> { click(x); if (l != null) l.onClick(x); });
         v.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 44), dp(c, 44)));
         // Icon-only controls share the exact same moving white focus treatment.
@@ -1039,6 +1044,7 @@ final class Ui {
             view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 12), 0, 0)));
             // Foreground bounds track the complete measured row, including wrapped subtitles and tags.
             settingFocus(c, view, 12);
+            view.setSoundEffectsEnabled(false);
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
             tile = new SettingIconView(c, emoji);
             tile.setTextSize(22);
@@ -1114,7 +1120,8 @@ final class Ui {
                     new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
                     new int[]{0x66FFFFFF, 0xFF475569}));
             toggle.setChecked(on);
-            toggle.setOnCheckedChangeListener((b, x) -> { if (l != null) l.onCheckedChanged(b, x); says(); });   // the value line follows the switch (says)
+            toggle.setSoundEffectsEnabled(false);
+            toggle.setOnCheckedChangeListener((b, x) -> { click(b); if (l != null) l.onCheckedChanged(b, x); says(); });   // the value line follows the switch (says)
             view.addView(toggle);
             if (!view.hasOnClickListeners()) view.setOnClickListener(v -> { if (toggle.isEnabled()) toggle.toggle(); });
             return this;
@@ -1182,7 +1189,8 @@ final class Ui {
                 t.setPadding(dp(c, 10), 0, dp(c, 10), 0);
                 t.setClickable(true);
                 t.setFocusable(true);
-                t.setOnClickListener(v -> { if (i != selected) { select(i); pick.accept(i); } });
+                t.setSoundEffectsEnabled(false);
+                t.setOnClickListener(v -> { if (i != selected) { click(v); select(i); pick.accept(i); } });
                 items[k] = t;
                 addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             }
@@ -1231,10 +1239,11 @@ final class Ui {
             tab.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 10), 0, 0)));
             tab.setClickable(true);
             tab.setFocusable(true);
+            tab.setSoundEffectsEnabled(false);
             tab.setSelected(on);
             tab.setContentDescription(labels[k] + (on ? ", tab, selected" : ", tab"));
             focusMotion(c, tab, 10);
-            tab.setOnClickListener(v -> { if (i != sel) pick.accept(i); });
+            tab.setOnClickListener(v -> { if (i != sel) { click(v); pick.accept(i); } });
             row.addView(tab, wrap());
         }
         hs.addView(row);
@@ -1254,10 +1263,11 @@ final class Ui {
         t.setBackground(ripple(c, round(selected ? col(c, R.color.bn_tint) : Color.TRANSPARENT, dp(c, 12), 0, 0)));
         t.setClickable(true);
         t.setFocusable(true);
+        t.setSoundEffectsEnabled(false);
         t.setSelected(selected);
         t.setContentDescription(label);
         focusMotion(c, t, 12);
-        t.setOnClickListener(l);
+        t.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
         return t;
     }
 
