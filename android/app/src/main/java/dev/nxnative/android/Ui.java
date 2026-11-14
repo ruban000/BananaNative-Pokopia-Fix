@@ -183,9 +183,18 @@ final class Ui {
     private static final class SharedFocusGlow extends Drawable {
         private final android.graphics.Paint border = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint halo = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint sheenPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint movingGlow = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint movingCore = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path outline = new android.graphics.Path();
+        private final android.graphics.Path segmentPath = new android.graphics.Path();
+        private final android.graphics.Matrix sheenMatrix = new android.graphics.Matrix();
+        private android.graphics.LinearGradient sheen;
         private float radius;
-        private float breath = 0.8f;
+        private float breath = 1f;
+        private float phase;
         private final android.animation.ValueAnimator breathing = android.animation.ValueAnimator.ofFloat(0.6f, 1f);
+        private final android.animation.ValueAnimator sweep = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
 
         SharedFocusGlow(float radius) {
             this.radius = radius;
@@ -193,35 +202,84 @@ final class Ui {
             border.setStrokeWidth(2f);
             halo.setStyle(android.graphics.Paint.Style.STROKE);
             halo.setStrokeWidth(2f);
+            sheenPaint.setStyle(android.graphics.Paint.Style.FILL);
+            movingGlow.setStyle(android.graphics.Paint.Style.STROKE);
+            movingGlow.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            movingGlow.setStrokeWidth(6f);
+            movingCore.setStyle(android.graphics.Paint.Style.STROKE);
+            movingCore.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            movingCore.setStrokeWidth(2.6f);
             breathing.setDuration(2000);
             breathing.setRepeatCount(android.animation.ValueAnimator.INFINITE);
             breathing.setRepeatMode(android.animation.ValueAnimator.REVERSE);
             breathing.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
-            breathing.addUpdateListener(a -> {
-                breath = (Float) a.getAnimatedValue();
-                invalidateSelf();
-            });
+            breathing.addUpdateListener(a -> { breath = (Float) a.getAnimatedValue(); invalidateSelf(); });
+            sweep.setDuration(2700);
+            sweep.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            sweep.setInterpolator(new android.view.animation.LinearInterpolator());
+            sweep.addUpdateListener(a -> { phase = (Float) a.getAnimatedValue(); invalidateSelf(); });
         }
 
         void setRadius(float value) { radius = value; invalidateSelf(); }
-        void startBreathing() { if (!breathing.isStarted()) breathing.start(); }
-        void stopBreathing() { breathing.cancel(); }
+        void startBreathing() {
+            if (!breathing.isStarted()) breathing.start();
+            if (!sweep.isStarted()) sweep.start();
+        }
+        void stopBreathing() { breathing.cancel(); sweep.cancel(); }
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
             if (b.width() <= 0 || b.height() <= 0) return;
             android.graphics.RectF r = new android.graphics.RectF(b.left + 2f, b.top + 2f, b.right - 2f, b.bottom - 2f);
-            int alpha = Math.round(255f * breath);
+            outline.reset();
+            outline.addRoundRect(r, radius, radius, android.graphics.Path.Direction.CW);
+
+            int save = canvas.save();
+            canvas.clipPath(outline);
+            if (sheen == null) {
+                float h = r.height();
+                sheen = new android.graphics.LinearGradient(-h, 0, 0, h,
+                        new int[]{0x00FFFFFF, 0x0AFFFFFF, 0x20FFFFFF, 0x0AFFFFFF, 0x00FFFFFF},
+                        new float[]{0f, 0.38f, 0.5f, 0.62f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+                sheenPaint.setShader(sheen);
+            }
+            float travel = (phase + 1.25f) * (r.width() + r.height()) * 0.5f - r.height();
+            sheenMatrix.setTranslate(r.left + travel, r.top);
+            sheen.setLocalMatrix(sheenMatrix);
+            sheenPaint.setAlpha(Math.round(255f * breath));
+            canvas.drawRect(r, sheenPaint);
+            canvas.restoreToCount(save);
+
             halo.setColor(android.graphics.Color.argb(Math.round(105f * breath), 255, 255, 255));
             halo.setShadowLayer(12f, 0f, 0f, android.graphics.Color.argb(Math.round(150f * breath), 255, 255, 255));
             canvas.drawRoundRect(r, radius, radius, halo);
             halo.clearShadowLayer();
-            border.setColor(android.graphics.Color.argb(alpha, 255, 255, 255));
+            border.setColor(android.graphics.Color.argb(Math.round(242f * breath), 255, 255, 255));
             canvas.drawRoundRect(r, radius, radius, border);
+
+            android.graphics.PathMeasure measure = new android.graphics.PathMeasure(outline, false);
+            float perimeter = measure.getLength();
+            if (perimeter > 0f) {
+                float segment = Math.min(perimeter * 0.24f, Math.max(24f, perimeter * 0.16f));
+                float start = ((phase + 1.25f) / 2.5f) * perimeter;
+                float end = start + segment;
+                segmentPath.reset();
+                if (end <= perimeter) measure.getSegment(start, end, segmentPath, true);
+                else {
+                    measure.getSegment(start, perimeter, segmentPath, true);
+                    measure.getSegment(0f, end - perimeter, segmentPath, true);
+                }
+                movingGlow.setColor(android.graphics.Color.argb(Math.round(190f * breath), 255, 255, 255));
+                movingGlow.setShadowLayer(9f, 0f, 0f, android.graphics.Color.WHITE);
+                canvas.drawPath(segmentPath, movingGlow);
+                movingGlow.clearShadowLayer();
+                movingCore.setColor(android.graphics.Color.WHITE);
+                canvas.drawPath(segmentPath, movingCore);
+            }
         }
 
-        @Override public void setAlpha(int alpha) { border.setAlpha(alpha); halo.setAlpha(alpha); invalidateSelf(); }
-        @Override public void setColorFilter(android.graphics.ColorFilter filter) { border.setColorFilter(filter); halo.setColorFilter(filter); invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { border.setAlpha(alpha); halo.setAlpha(alpha); sheenPaint.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { border.setColorFilter(filter); halo.setColorFilter(filter); sheenPaint.setColorFilter(filter); invalidateSelf(); }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
     }
 
@@ -249,7 +307,19 @@ final class Ui {
             @Override public void onViewDetachedFromWindow(View view) { }
         });
         v.setOnTouchListener((view, event) -> {
-            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
+            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                view.requestFocus();
+                view.animate().cancel();
+                view.animate().scaleX(0.97f).scaleY(0.97f).setDuration(85)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            } else if (event.getAction() == android.view.MotionEvent.ACTION_UP
+                    || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
+                view.animate().cancel();
+                boolean focused = view.hasFocus();
+                view.animate().scaleX(focused ? safeFocusScaleX(view, c, 1.03f) : 1f)
+                        .scaleY(focused ? 1.03f : 1f).setDuration(160)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            }
             return false;
         });
         v.setOnFocusChangeListener((view, focused) -> {
@@ -264,11 +334,17 @@ final class Ui {
                     sharedFocusControllers.put(host, controller);
                 }
             }
+            view.animate().cancel();
             if (focused) {
                 controller.moveTo(view, radiusDp);
-                view.setElevation(dp(c, 2));
+                view.setElevation(dp(c, 8));
+                view.setPivotX(view.getWidth() * 0.5f);
+                view.animate().translationY(-dp(c, 3)).scaleX(safeFocusScaleX(view, c, 1.03f)).scaleY(1.03f)
+                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
                 animateFocusContent(view, true);
             } else {
+                view.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(180)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
                 view.setElevation(0f);
                 animateFocusContent(view, false);
                 controller.clearIfIdle();
