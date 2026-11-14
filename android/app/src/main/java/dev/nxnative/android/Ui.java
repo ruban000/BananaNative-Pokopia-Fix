@@ -192,17 +192,13 @@ final class Ui {
     private static final class SharedFocusGlow extends Drawable {
         private final android.graphics.Paint border = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Paint halo = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Paint sheenPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Paint movingGlow = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Paint oppositeShade = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Paint movingCore = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Path outline = new android.graphics.Path();
-        private final android.graphics.Path segmentPath = new android.graphics.Path();
-        private final android.graphics.Matrix sheenMatrix = new android.graphics.Matrix();
-        private android.graphics.LinearGradient sheen;
+        private final android.graphics.Paint innerSheenPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Matrix gradientMatrix = new android.graphics.Matrix();
+        private android.graphics.SweepGradient rimGradient;
+        private android.graphics.LinearGradient innerSheen;
         private float radius;
-        private float phase;
-        private final android.animation.ValueAnimator sweep = android.animation.ValueAnimator.ofFloat(-1.25f, 1.25f);
+        private float rotation;
+        private final android.animation.ValueAnimator rotationAnimator = android.animation.ValueAnimator.ofFloat(0f, 360f);
 
         SharedFocusGlow(float radius) {
             this.radius = radius;
@@ -210,115 +206,73 @@ final class Ui {
             border.setStrokeWidth(2f);
             halo.setStyle(android.graphics.Paint.Style.STROKE);
             halo.setStrokeWidth(2f);
-            sheenPaint.setStyle(android.graphics.Paint.Style.FILL);
-            movingGlow.setStyle(android.graphics.Paint.Style.STROKE);
-            movingGlow.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            movingGlow.setStrokeWidth(6f);
-            oppositeShade.setStyle(android.graphics.Paint.Style.STROKE);
-            oppositeShade.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            oppositeShade.setStrokeWidth(4f);
-            movingCore.setStyle(android.graphics.Paint.Style.STROKE);
-            movingCore.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            movingCore.setStrokeWidth(2.6f);
-            sweep.setDuration(4800);
-            sweep.setRepeatCount(android.animation.ValueAnimator.INFINITE);
-            sweep.setInterpolator(new android.view.animation.LinearInterpolator());
-            sweep.addUpdateListener(a -> { phase = (Float) a.getAnimatedValue(); invalidateSelf(); });
+            innerSheenPaint.setStyle(android.graphics.Paint.Style.FILL);
+            rotationAnimator.setDuration(7000);
+            rotationAnimator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            rotationAnimator.setInterpolator(new android.view.animation.LinearInterpolator());
+            rotationAnimator.addUpdateListener(a -> {
+                rotation = (Float) a.getAnimatedValue();
+                if (rimGradient != null) {
+                    android.graphics.Rect bounds = getBounds();
+                    gradientMatrix.setRotate(rotation, bounds.exactCenterX(), bounds.exactCenterY());
+                    rimGradient.setLocalMatrix(gradientMatrix);
+                }
+                invalidateSelf();
+            });
         }
 
         void setRadius(float value) { radius = value; invalidateSelf(); }
-        void startBreathing() { if (!sweep.isStarted()) sweep.start(); }
-        void stopBreathing() { sweep.cancel(); }
+        void startBreathing() { if (!rotationAnimator.isStarted()) rotationAnimator.start(); }
+        void stopBreathing() { rotationAnimator.cancel(); }
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
             if (b.width() <= 0 || b.height() <= 0) return;
             android.graphics.RectF r = new android.graphics.RectF(b.left + 2f, b.top + 2f, b.right - 2f, b.bottom - 2f);
-            outline.reset();
+            android.graphics.Path outline = new android.graphics.Path();
             outline.addRoundRect(r, radius, radius, android.graphics.Path.Direction.CW);
 
             int save = canvas.save();
             canvas.clipPath(outline);
-            if (sheen == null) {
-                float h = r.height();
-                sheen = new android.graphics.LinearGradient(-h, 0, 0, h,
-                        new int[]{0x00FFFFFF, 0x0AFFFFFF, 0x20FFFFFF, 0x0AFFFFFF, 0x00FFFFFF},
-                        new float[]{0f, 0.38f, 0.5f, 0.62f, 1f}, android.graphics.Shader.TileMode.CLAMP);
-                sheenPaint.setShader(sheen);
+            if (innerSheen == null) {
+                innerSheen = new android.graphics.LinearGradient(0f, r.top, 0f, r.bottom,
+                        new int[]{0x1FFFFFFF, 0x05FFFFFF},
+                        new float[]{0f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+                innerSheenPaint.setShader(innerSheen);
             }
-            float travel = (phase + 1.25f) * (r.width() + r.height()) * 0.5f - r.height();
-            sheenMatrix.setTranslate(r.left + travel, r.top);
-            sheen.setLocalMatrix(sheenMatrix);
-            sheenPaint.setAlpha(105);
-            canvas.drawRect(r, sheenPaint);
+            canvas.drawRect(r, innerSheenPaint);
             canvas.restoreToCount(save);
 
-            halo.setColor(android.graphics.Color.argb(52, 255, 255, 255));
-            halo.setShadowLayer(7f, 0f, 0f, 0x55FFFFFF);
+            // Soft outer white bloom behind the rotating conic rim.
+            halo.setColor(0x28FFFFFF);
+            halo.setShadowLayer(8f, 0f, 0f, 0x66FFFFFF);
             canvas.drawRoundRect(r, radius, radius, halo);
             halo.clearShadowLayer();
-            border.setColor(android.graphics.Color.argb(205, 255, 255, 255));
-            canvas.drawRoundRect(r, radius, radius, border);
 
-            android.graphics.PathMeasure measure = new android.graphics.PathMeasure(outline, false);
-            float perimeter = measure.getLength();
-            if (perimeter > 0f) {
-                float segment = perimeter * 0.5f; // Equal 50/50 white highlight and opposite dark shadow.
-                float start = ((phase + 1.25f) / 2.5f) * perimeter;
-                float end = start + segment;
-                // A restrained dark counter-shade sits opposite the travelling white glint,
-                // matching the light/dark contrast of the PS5 focus treatment.
-                float shadeStart = (start + perimeter * 0.5f) % perimeter;
-                float shadeEnd = shadeStart + segment;
-                segmentPath.reset();
-                if (shadeEnd <= perimeter) measure.getSegment(shadeStart, shadeEnd, segmentPath, true);
-                else {
-                    measure.getSegment(shadeStart, perimeter, segmentPath, true);
-                    measure.getSegment(0f, shadeEnd - perimeter, segmentPath, true);
-                }
-                oppositeShade.setColor(android.graphics.Color.argb(82, 0, 0, 0));
-                oppositeShade.setShadowLayer(3f, 0f, 0f, 0x66000000);
-                canvas.drawPath(segmentPath, oppositeShade);
-                oppositeShade.clearShadowLayer();
-
-                segmentPath.reset();
-                if (end <= perimeter) measure.getSegment(start, end, segmentPath, true);
-                else {
-                    measure.getSegment(start, perimeter, segmentPath, true);
-                    measure.getSegment(0f, end - perimeter, segmentPath, true);
-                }
-                // Fade the travelling white highlight from 1% at both ends to
-                // full opacity at its centre, then back to 1%.
-                android.graphics.PathMeasure highlightMeasure = new android.graphics.PathMeasure(segmentPath, false);
-                float highlightLength = highlightMeasure.getLength();
-                if (highlightLength > 0f) {
-                    float[] previous = new float[2];
-                    float[] current = new float[2];
-                    final int samples = 96;
-                    highlightMeasure.getPosTan(0f, previous, null);
-                    movingGlow.setColor(android.graphics.Color.WHITE);
-                    movingGlow.setShadowLayer(3f, 0f, 0f, 0x44FFFFFF);
-                    movingCore.setColor(android.graphics.Color.WHITE);
-                    for (int i = 1; i <= samples; i++) {
-                        float fraction = i / (float) samples;
-                        // Keep the taper, but cap the centre at 38% opacity instead of 100%.
-                        float fade = 0.01f + 0.37f * (1f - Math.abs(2f * fraction - 1f));
-                        int alpha = Math.round(255f * fade);
-                        highlightMeasure.getPosTan(highlightLength * fraction, current, null);
-                        movingGlow.setAlpha(Math.round(alpha * 0.28f));
-                        canvas.drawLine(previous[0], previous[1], current[0], current[1], movingGlow);
-                        movingCore.setAlpha(Math.round(alpha * 0.78f));
-                        canvas.drawLine(previous[0], previous[1], current[0], current[1], movingCore);
-                        previous[0] = current[0];
-                        previous[1] = current[1];
-                    }
-                    movingGlow.clearShadowLayer();
-                }
+            if (rimGradient == null) {
+                rimGradient = new android.graphics.SweepGradient(r.centerX(), r.centerY(),
+                        new int[]{0xFFFFFFFF, 0x80B4DCFF, 0x14FFFFFF, 0x80B4DCFF, 0xFFFFFFFF},
+                        new float[]{0f, 0.22f, 0.5f, 0.78f, 1f});
+                gradientMatrix.setRotate(rotation, r.centerX(), r.centerY());
+                rimGradient.setLocalMatrix(gradientMatrix);
+                border.setShader(rimGradient);
             }
+            border.setStrokeWidth(2f);
+            canvas.drawRoundRect(r, radius, radius, border);
         }
 
-        @Override public void setAlpha(int alpha) { border.setAlpha(alpha); halo.setAlpha(alpha); sheenPaint.setAlpha(alpha); invalidateSelf(); }
-        @Override public void setColorFilter(android.graphics.ColorFilter filter) { border.setColorFilter(filter); halo.setColorFilter(filter); sheenPaint.setColorFilter(filter); invalidateSelf(); }
+        @Override public void setAlpha(int alpha) {
+            border.setAlpha(alpha);
+            halo.setAlpha(alpha);
+            innerSheenPaint.setAlpha(alpha);
+            invalidateSelf();
+        }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) {
+            border.setColorFilter(filter);
+            halo.setColorFilter(filter);
+            innerSheenPaint.setColorFilter(filter);
+            invalidateSelf();
+        }
         @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
     }
 
