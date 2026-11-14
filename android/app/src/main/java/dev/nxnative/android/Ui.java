@@ -1216,7 +1216,7 @@ final class Ui {
             view.addView(tile, iconLp);
             LinearLayout col = new LinearLayout(c);
             col.setOrientation(LinearLayout.VERTICAL);
-            col.setPadding(dp(c, 12), 0, dp(c, 8), 0);
+            col.setPadding(dp(c, 16), 0, dp(c, 16), 0);
             this.title = text(c, title, 15, R.color.bn_text, 600);
             this.title.setMaxLines(2);   // one line at the normal font scale (titles are kept short); a large font scale wraps it rather than cut it
             this.title.setEllipsize(TextUtils.TruncateAt.END);
