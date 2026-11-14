@@ -169,10 +169,7 @@ final class Ui {
                             child.setAlpha(1f);
                         }
                     }
-                    if (group.getChildCount() > 0) {
-                        View iconTile = group.getChildAt(0);
-                        iconTile.setBackground(round(0x44FFFFFF, dp(c, 11), 0, 0));
-                    }
+                    // Keep setting icons bare; the selected row itself carries the focus treatment.
                 }
             } else {
                 view.setBackground(normalBackground);
@@ -185,10 +182,7 @@ final class Ui {
                         View child = group.getChildAt(i);
                         child.animate().translationX(0).setDuration(160).start();
                     }
-                    if (group.getChildCount() > 0) {
-                        View iconTile = group.getChildAt(0);
-                        iconTile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
-                    }
+                    // No per-icon background is applied in either focus state.
                 }
                 view.post(() -> {
                     if (!view.hasFocus()) {
