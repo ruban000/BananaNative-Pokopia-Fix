@@ -48,7 +48,8 @@ public final class MainActivity extends Activity {
     private final List<Game> games = new ArrayList<>();
     private LinearLayout gameBox;   // the game cards (refresh)
     private View accessCard;
-    private BananaBackgroundView bananas;   // the drifting bananas behind the screen
+    private BananaBackgroundView bananas;   // retained background view host
+    private Ps5AmbientBackground ambientBackground;
     private Ui.Setting overlayRow, resRow, capRow, upsRow, sharpRow, drsRow, lsfgRow, gpuRow, updateRow;
     private boolean resumed, settingsPage;
     private Game settingsGame;   // the game whose settings page shows (GameSettings), else null
@@ -137,9 +138,16 @@ public final class MainActivity extends Activity {
     /** (Re)builds the current page above the bananas (Ui.page: the same gutter, width and header spacing as every screen; a game's settings page wider on a wide window, for its rail) */
     private void build() {
         FrameLayout frame = (FrameLayout) bananas.getParent();
+        if (ambientBackground != null) ambientBackground.stop();
         while (frame.getChildCount() > 1) frame.removeViewAt(1);
         boolean wide = getResources().getConfiguration().screenWidthDp >= 600;
         LinearLayout content = Ui.page(this, frame, settingsGame != null && wide ? 1040 : 640);
+        android.widget.ScrollView backgroundHost = pageScroll();
+        if (backgroundHost != null) {
+            ambientBackground = new Ps5AmbientBackground();
+            backgroundHost.setBackground(ambientBackground);
+            if (resumed) ambientBackground.start();
+        }
         if (settingsGame != null) for (Game x : Game.load(this)) if (x.gameDir.equals(settingsGame.gameDir)) { settingsGame = x; break; }   // its folders as they are now (Folders, Import pack)
         if (settingsGame != null) { accessCard = null; gameBox = null; overlayRow = null; GameSettings.build(this, content, settingsGame, this::gameSettingsAgain, () -> page(false)); }
         else if (settingsPage) buildSettings(content);
@@ -147,129 +155,100 @@ public final class MainActivity extends Activity {
     }
 
     /** Layered PS5-inspired ambient background: drifting light fields, depth ribbons and slow particles. */
+    /** Three-layer PS5-inspired ambient background: navy gradient, a blurred gold/cyan ribbon, and rising dust. */
     private static final class Ps5AmbientBackground extends android.graphics.drawable.Drawable
             implements android.graphics.drawable.Animatable {
-        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint base = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint ribbonPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint particle = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Path ribbon = new android.graphics.Path();
         private final android.animation.ValueAnimator animator = android.animation.ValueAnimator.ofFloat(0f, 1f);
         private float phase;
 
         Ps5AmbientBackground() {
-            animator.setDuration(22000L);
+            animator.setDuration(28000L);
             animator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
             animator.setInterpolator(new android.view.animation.LinearInterpolator());
             animator.addUpdateListener(a -> {
                 phase = (Float) a.getAnimatedValue();
                 invalidateSelf();
             });
+            ribbonPaint.setStyle(android.graphics.Paint.Style.STROKE);
+            ribbonPaint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            particle.setStyle(android.graphics.Paint.Style.FILL);
         }
 
         private float wave(float speed, float offset) {
-            return (float) Math.sin((phase * Math.PI * 2.0 * speed) + offset);
+            return (float) Math.sin(phase * Math.PI * 2.0 * speed + offset);
+        }
+
+        private static int withAlpha(int color, int alpha) {
+            return (color & 0x00FFFFFF) | (Math.max(0, Math.min(255, alpha)) << 24);
         }
 
         @Override public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect b = getBounds();
             float w = b.width(), h = b.height();
-            if (w <= 0 || h <= 0) return;
-            canvas.drawColor(0xFF05070B);
+            if (w <= 0f || h <= 0f) return;
 
-            // Three independently drifting light fields create depth without washing out the UI.
-            float driftA = wave(1.0f, 0f) * w * 0.13f;
-            float driftB = wave(0.63f, 1.8f) * w * 0.17f;
-            float driftC = wave(1.37f, 3.2f) * w * 0.08f;
-            paint.setStyle(android.graphics.Paint.Style.FILL);
-            paint.setShader(new android.graphics.RadialGradient(w * 0.78f + driftA, h * 0.27f,
-                    Math.max(w, h) * 0.76f, new int[]{0x242B5C91, 0x10204470, 0x0005070B},
-                    null, android.graphics.Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, w, h, paint);
-            paint.setShader(new android.graphics.RadialGradient(w * 0.16f + driftB, h * 0.78f,
-                    Math.max(w, h) * 0.62f, new int[]{0x18204D82, 0x08204470, 0x0005070B},
-                    null, android.graphics.Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, w, h, paint);
-            paint.setShader(new android.graphics.RadialGradient(w * 0.52f + driftC, h * 0.48f,
-                    Math.max(w, h) * 0.45f, new int[]{0x0D4A79B8, 0x0005070B},
-                    null, android.graphics.Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, w, h, paint);
-            paint.setShader(null);
+            // 1. Deep space-blue base: #0E1A33 at the top, #050811 at the bottom.
+            base.setShader(new android.graphics.LinearGradient(0f, 0f, 0f, h,
+                    new int[]{0xFF0E1A33, 0xFF091224, 0xFF050811},
+                    new float[]{0f, 0.56f, 1f}, android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0f, 0f, w, h, base);
+            base.setShader(null);
 
-            // Broad, very soft light bands move at different speeds behind the cards.
-            paint.setStyle(android.graphics.Paint.Style.STROKE);
-            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            for (int i = 0; i < 5; i++) {
-                float speed = 0.42f + i * 0.17f;
-                float sway = wave(speed, i * 1.13f);
-                float y = h * (0.18f + i * 0.16f);
-                paint.setStrokeWidth(Math.max(1f, w * (i % 2 == 0 ? 0.0022f : 0.0012f)));
-                paint.setShader(new android.graphics.LinearGradient(0, y - h * 0.25f, w, y + h * 0.25f,
-                        new int[]{0x00000000, i % 2 == 0 ? 0x173D6FA8 : 0x103E83B9,
-                                i % 2 == 0 ? 0x0D8CB9E8 : 0x164A83C4, 0x00000000},
-                        null, android.graphics.Shader.TileMode.CLAMP));
-                ribbon.reset();
-                ribbon.moveTo(-w * 0.16f, y + h * (0.08f + sway * 0.035f));
-                ribbon.cubicTo(w * 0.20f + sway * w * 0.10f, y - h * 0.22f,
-                        w * 0.68f - sway * w * 0.12f, y + h * 0.25f,
-                        w * 1.16f, y - h * (0.07f + sway * 0.025f));
-                canvas.drawPath(ribbon, paint);
-            }
-            paint.setShader(null);
+            // 2. One broad, translucent ribbon, drifting gently across the middle.
+            float sway = wave(0.72f, 0.35f);
+            float lift = wave(0.43f, 1.1f);
+            float centerY = h * (0.50f + lift * 0.035f);
+            float ribbonWidth = Math.max(dpPx(w, 0.16f), h * 0.12f);
+            ribbon.reset();
+            ribbon.moveTo(-w * 0.18f, centerY + h * (0.10f + sway * 0.025f));
+            ribbon.cubicTo(w * 0.18f, centerY - h * (0.22f + sway * 0.035f),
+                    w * 0.70f, centerY + h * (0.24f - sway * 0.025f),
+                    w * 1.18f, centerY - h * (0.08f + lift * 0.025f));
 
-            // Layer 1: a denser field of distant particles with independent parallax and twinkle.
-            paint.setStyle(android.graphics.Paint.Style.FILL);
-            for (int i = 0; i < 128; i++) {
-                float seed = i * 2.399f;
-                float depth = 0.012f + (i % 5) * 0.009f;
-                float x = (float) ((i * 0.6180339f % 1.0f) * w
-                        + wave(0.22f + (i % 6) * 0.095f, seed) * w * depth);
-                float y = (float) ((i * 0.381966f % 1.0f) * h
-                        + wave(0.19f + (i % 4) * 0.105f, seed * 0.7f) * h * depth);
-                float twinkle = 0.5f + 0.5f * wave(0.7f + (i % 7) * 0.13f, seed * 1.7f);
-                int alpha = 10 + (int) (twinkle * (i % 9 == 0 ? 42 : 19));
-                paint.setColor((alpha << 24) | (i % 5 == 0 ? 0x009FD7FF : 0x006FA9E8));
-                float radius = Math.max(1f, w * (i % 11 == 0 ? 0.0022f : 0.00085f));
-                canvas.drawCircle(x, y, radius, paint);
-            }
+            ribbonPaint.setStrokeWidth(ribbonWidth);
+            ribbonPaint.setShader(new android.graphics.LinearGradient(0f, centerY - h * 0.24f,
+                    w, centerY + h * 0.24f,
+                    new int[]{0x00D4AF37, 0x1FD4AF37, 0x2038BDF8, 0x0038BDF8},
+                    new float[]{0f, 0.30f, 0.72f, 1f}, android.graphics.Shader.TileMode.CLAMP));
+            ribbonPaint.setShadowLayer(Math.max(18f, ribbonWidth * 0.72f), 0f, 0f, 0x4438BDF8);
+            canvas.drawPath(ribbon, ribbonPaint);
+            ribbonPaint.clearShadowLayer();
+            ribbonPaint.setShader(null);
 
-            // Layer 2: slow luminous motes with tiny horizontal trails for visible movement.
-            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            for (int i = 0; i < 24; i++) {
-                float seed = i * 1.731f + 0.8f;
-                float x = (float) ((i * 0.754877f % 1.0f) * w
-                        + wave(0.42f + (i % 4) * 0.16f, seed) * w * 0.055f);
-                float y = (float) ((i * 0.56984f % 1.0f) * h
-                        + wave(0.31f + (i % 3) * 0.17f, seed * 0.8f) * h * 0.04f);
-                float glow = 0.5f + 0.5f * wave(0.55f, seed);
-                int alpha = 18 + (int) (glow * 35);
-                paint.setColor((alpha << 24) | 0x009DD9FF);
-                paint.setStrokeWidth(Math.max(1f, w * 0.0011f));
-                canvas.drawLine(x - w * 0.009f, y, x + w * (0.004f + glow * 0.009f), y - h * 0.002f, paint);
-                canvas.drawCircle(x, y, Math.max(1f, w * 0.0015f), paint);
+            // 3. Tiny white and warm-gold dust motes rise slowly and wrap seamlessly at the top.
+            for (int i = 0; i < 64; i++) {
+                float seed = i * 2.3999632f;
+                float xBase = (i * 0.6180339f % 1f) * w;
+                float speed = 0.035f + (i % 7) * 0.006f;
+                float travel = (phase * speed + (i * 0.173205f % 1f)) % 1f;
+                float y = h * (1f - travel);
+                float x = xBase + wave(0.20f + (i % 5) * 0.035f, seed) * w * 0.009f;
+                float twinkle = 0.5f + 0.5f * wave(1.1f + (i % 4) * 0.17f, seed * 0.8f);
+                boolean gold = i % 4 == 0 || i % 7 == 0;
+                int color = gold ? 0xFFFFD98A : 0xFFEAF5FF;
+                int alpha = 22 + Math.round(twinkle * (gold ? 62f : 48f));
+                particle.setColor(withAlpha(color, alpha));
+                float radius = Math.max(1f, Math.min(w, h) * (i % 9 == 0 ? 0.0021f : 0.00105f));
+                particle.setShadowLayer(radius * 3.5f, 0f, 0f,
+                        withAlpha(color, Math.round(alpha * 0.65f)));
+                canvas.drawCircle(x, y, radius, particle);
+                particle.clearShadowLayer();
             }
-            // Layer 3: occasional four-point star glints that gently brighten and fade.
-            paint.setStyle(android.graphics.Paint.Style.STROKE);
-            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            for (int i = 0; i < 14; i++) {
-                float seed = i * 2.173f + 1.1f;
-                float x = (float) ((i * 0.683281f % 1.0f) * w
-                        + wave(0.28f + (i % 5) * 0.12f, seed) * w * 0.035f);
-                float y = (float) ((i * 0.414214f % 1.0f) * h
-                        + wave(0.23f + (i % 4) * 0.14f, seed * 0.9f) * h * 0.03f);
-                float sparkle = 0.5f + 0.5f * wave(0.9f + (i % 3) * 0.22f, seed);
-                int alpha = 8 + (int) (sparkle * 54);
-                paint.setColor((alpha << 24) | 0x00C5E7FF);
-                float arm = Math.max(2f, w * (0.002f + sparkle * 0.0022f));
-                paint.setStrokeWidth(Math.max(1f, w * 0.0008f));
-                canvas.drawLine(x - arm, y, x + arm, y, paint);
-                canvas.drawLine(x, y - arm, x, y + arm, paint);
-                canvas.drawCircle(x, y, Math.max(1f, arm * 0.22f), paint);
-            }
-            paint.setStyle(android.graphics.Paint.Style.FILL);
-            paint.setColor(android.graphics.Color.WHITE);
+        }
+
+        private static float dpPx(float width, float fraction) {
+            return Math.max(1f, width * fraction);
         }
 
         @Override protected void onBoundsChange(android.graphics.Rect bounds) { invalidateSelf(); }
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }
-        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); invalidateSelf(); }
+        @Override public void setAlpha(int alpha) { base.setAlpha(alpha); ribbonPaint.setAlpha(alpha); particle.setAlpha(alpha); invalidateSelf(); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) {
+            base.setColorFilter(filter); ribbonPaint.setColorFilter(filter); particle.setColorFilter(filter); invalidateSelf();
+        }
         @Override public int getOpacity() { return android.graphics.PixelFormat.OPAQUE; }
         @Override public void start() { if (!animator.isStarted()) animator.start(); }
         @Override public void stop() { animator.cancel(); }
@@ -278,13 +257,6 @@ public final class MainActivity extends Activity {
 
     private void buildHome(LinearLayout content) {
         overlayRow = null;
-        android.widget.ScrollView homeScroll = pageScroll();
-        if (homeScroll != null) {
-            Ps5AmbientBackground ambient = new Ps5AmbientBackground();
-            homeScroll.setBackground(ambient);
-            ambient.start();
-        }
-
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setOrientation(LinearLayout.HORIZONTAL);
@@ -555,6 +527,7 @@ public final class MainActivity extends Activity {
     private void onResumeViews() {
         if (accessCard != null) accessCard.setVisibility(Environment.isExternalStorageManager() || !listNeedsAccess() ? View.GONE : View.VISIBLE);
         bananas.setRunning(true);
+        if (ambientBackground != null) ambientBackground.start();
         refreshSettings();
     }
 
@@ -562,6 +535,7 @@ public final class MainActivity extends Activity {
     @Override protected void onPause() {
         resumed = false;
         bananas.setRunning(false);
+        if (ambientBackground != null) ambientBackground.stop();
         Ondevice.pause(this);
         ExitWatch.pause();
         updateUi.removeCallbacks(updateRun);
