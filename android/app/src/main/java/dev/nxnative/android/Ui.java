@@ -1048,7 +1048,11 @@ final class Ui {
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
             tile = new SettingIconView(c, emoji);
             tile.setTextSize(22);
-            tile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
+            // Keep the icon itself completely bare; selection is shown by the row focus border only.
+            tile.setBackground(null);
+            tile.setForeground(null);
+            tile.setClickable(false);
+            tile.setFocusable(false);
             // A 26dp viewport gives font glyphs and custom paths breathing room, avoiding edge clipping.
             LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 26), dp(c, 26));
             iconLp.setMarginEnd(dp(c, 12));
