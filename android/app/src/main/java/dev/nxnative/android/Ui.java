@@ -196,6 +196,7 @@ final class Ui {
         private final android.graphics.Matrix gradientMatrix = new android.graphics.Matrix();
         private android.graphics.SweepGradient rimGradient;
         private android.graphics.LinearGradient innerSheen;
+        private final android.graphics.Rect shaderBounds = new android.graphics.Rect();
         private float radius;
         private float rotation;
         private final android.animation.ValueAnimator rotationAnimator = android.animation.ValueAnimator.ofFloat(0f, 360f);
@@ -234,7 +235,8 @@ final class Ui {
 
             int save = canvas.save();
             canvas.clipPath(outline);
-            if (innerSheen == null) {
+            if (!shaderBounds.equals(b)) {
+                shaderBounds.set(b);
                 innerSheen = new android.graphics.LinearGradient(0f, r.top, 0f, r.bottom,
                         new int[]{0x1FFFFFFF, 0x05FFFFFF},
                         new float[]{0f, 1f}, android.graphics.Shader.TileMode.CLAMP);
@@ -249,7 +251,6 @@ final class Ui {
             canvas.drawRoundRect(r, radius, radius, halo);
             halo.clearShadowLayer();
 
-            if (rimGradient == null) {
                 rimGradient = new android.graphics.SweepGradient(r.centerX(), r.centerY(),
                         new int[]{0xFFFFFFFF, 0x80B4DCFF, 0x14FFFFFF, 0x80B4DCFF, 0xFFFFFFFF},
                         new float[]{0f, 0.22f, 0.5f, 0.78f, 1f});
@@ -257,6 +258,7 @@ final class Ui {
                 rimGradient.setLocalMatrix(gradientMatrix);
                 border.setShader(rimGradient);
             }
+
             border.setStrokeWidth(2f);
             canvas.drawRoundRect(r, radius, radius, border);
         }
