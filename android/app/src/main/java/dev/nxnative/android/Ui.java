@@ -1025,7 +1025,7 @@ final class Ui {
                 t.setPadding(dp(c, 10), 0, dp(c, 10), 0);
                 t.setClickable(true);
                 t.setFocusable(true);
-                t.setOnClickListener(v -> { if (i != selected) { select(i); pick.accept(i); } });
+                t.setOnClickListener(v -> { click(v); if (i != selected) { select(i); pick.accept(i); } });
                 items[k] = t;
                 addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             }
@@ -1077,7 +1077,7 @@ final class Ui {
             tab.setSelected(on);
             tab.setContentDescription(labels[k] + (on ? ", tab, selected" : ", tab"));
             focusMotion(c, tab, 10);
-            tab.setOnClickListener(v -> { if (i != sel) pick.accept(i); });
+            tab.setOnClickListener(v -> { click(v); if (i != sel) pick.accept(i); });
             row.addView(tab, wrap());
         }
         hs.addView(row);
@@ -1177,6 +1177,9 @@ final class Ui {
         }
         dialog[0] = sheet(a, title, options).setNegativeButton("Cancel", null).create();
         dialog[0].setOnShowListener(v -> {
+            // Keep the dialog outer panel; remove the nested options-container panel.
+            android.view.ViewParent contentParent = options.getParent();
+            if (contentParent instanceof View) ((View) contentParent).setBackgroundColor(Color.TRANSPARENT);
             if (dialog[0].getWindow() != null) {
                 android.graphics.drawable.GradientDrawable dialogBg = new android.graphics.drawable.GradientDrawable(
                         android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
