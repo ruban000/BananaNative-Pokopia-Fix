@@ -297,16 +297,17 @@ final class Ui {
                     final int samples = 96;
                     highlightMeasure.getPosTan(0f, previous, null);
                     movingGlow.setColor(android.graphics.Color.WHITE);
-                    movingGlow.setShadowLayer(5f, 0f, 0f, 0x99FFFFFF);
+                    movingGlow.setShadowLayer(3f, 0f, 0f, 0x44FFFFFF);
                     movingCore.setColor(android.graphics.Color.WHITE);
                     for (int i = 1; i <= samples; i++) {
                         float fraction = i / (float) samples;
-                        float fade = 0.01f + 0.99f * (1f - Math.abs(2f * fraction - 1f));
+                        // Keep the taper, but cap the centre at 38% opacity instead of 100%.
+                        float fade = 0.01f + 0.37f * (1f - Math.abs(2f * fraction - 1f));
                         int alpha = Math.round(255f * fade);
                         highlightMeasure.getPosTan(highlightLength * fraction, current, null);
-                        movingGlow.setAlpha(Math.round(alpha * 0.52f));
+                        movingGlow.setAlpha(Math.round(alpha * 0.28f));
                         canvas.drawLine(previous[0], previous[1], current[0], current[1], movingGlow);
-                        movingCore.setAlpha(alpha);
+                        movingCore.setAlpha(Math.round(alpha * 0.78f));
                         canvas.drawLine(previous[0], previous[1], current[0], current[1], movingCore);
                         previous[0] = current[0];
                         previous[1] = current[1];
