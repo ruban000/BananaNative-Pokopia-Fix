@@ -236,17 +236,21 @@ final class GpuDriver {
         for (File f : zips) labels.add(f.getName() + "  (the app's gpu_drivers folder)");
         labels.add("Pick a zip…");
         labels.add("Download…");   // DriverFetch: GitHub releases, only on a tap
-        new AlertDialog.Builder(a).setTitle("Install a driver zip (with meta.json)")
-                .setItems(labels.toArray(new String[0]), (d, w) -> {
-                    if (w == zips.size() + 1) { DriverFetch.dialog(a, request); return; }
-                    if (w == zips.size()) {
-                        a.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")   // some providers label zips otherwise
-                                .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"}), request);
-                        return;
-                    }
-                    File z = zips.get(w);
-                    installInBackground(a, z.getName(), () -> install(a, z), null);
-                }).setNegativeButton("Cancel", null).show();
+        int pickIndex = labels.size();
+        labels.add("＋  Pick a zip…");
+        int downloadIndex = labels.size();
+        labels.add("↓  Download a driver…");
+        Ui.choiceSheet(a, "Install a driver zip · meta.json", labels.toArray(new String[0]), -1, w -> {
+            if (w == downloadIndex) {
+                DriverFetch.dialog(a, request);
+            } else if (w == pickIndex) {
+                a.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                        .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"}), request);
+            } else {
+                File z = zips.get(w);
+                installInBackground(a, z.getName(), () -> install(a, z), null);
+            }
+        });
     }
 
     /** The picker's result (MainActivity.onActivityResult) */
