@@ -126,6 +126,7 @@ final class Ui {
         float fromLeft, fromTop, fromRight, fromBottom;
         float toLeft, toTop, toRight, toBottom;
         boolean positioned;
+        boolean attached = true;
 
         SharedFocusController(ViewGroup host, float radius) {
             this.host = host;
@@ -145,6 +146,13 @@ final class Ui {
         }
 
         void moveTo(View row, float radius) {
+            // clearIfIdle() may have removed the overlay while focus was outside this list.
+            // Reattach it before every new focus so returning to the list never loses the frame.
+            if (!attached) {
+                host.getOverlay().add(glow);
+                attached = true;
+            }
+            glow.startBreathing();
             int[] rowPos = new int[2], hostPos = new int[2];
             row.getLocationOnScreen(rowPos);
             host.getLocationOnScreen(hostPos);
@@ -174,6 +182,7 @@ final class Ui {
                     slide.cancel();
                     glow.stopBreathing();
                     host.getOverlay().remove(glow);
+                    attached = false;
                     positioned = false;
                 }
             });
