@@ -153,7 +153,7 @@ final class Ui {
                 highlight.start();
                 view.setPivotX(view.getWidth() * 0.5f);
                 float safeScale = safeFocusScaleX(view, c, 1.03f);
-                view.animate().scaleX(safeScale).scaleY(1.03f).setDuration(220)
+                view.animate().scaleX(safeScale).scaleY(1.02f).setDuration(200)
                         .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
                 view.setElevation(dp(c, 8));
                 if (view instanceof ViewGroup) {
@@ -343,8 +343,8 @@ final class Ui {
                 view.setElevation(dp(c, 8));
                 view.setPivotX(view.getWidth() * 0.5f);
                 float safeScale = safeFocusScaleX(view, c, 1.025f);
-                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.025f)
-                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.02f)
+                        .setDuration(200).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
             } else {
                 view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(180)
                         .withEndAction(() -> {
@@ -1183,8 +1183,8 @@ final class Ui {
             if (dialog[0].getWindow() != null) {
                 android.graphics.drawable.GradientDrawable dialogBg = new android.graphics.drawable.GradientDrawable(
                         android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[]{0xFF050A14, 0xFF0D192E});
-                dialogBg.setCornerRadius(dp(a, 22));
+                        new int[]{0xFF0B101B, 0xFF111B2A});
+                dialogBg.setCornerRadius(dp(a, 24));
                 dialogBg.setStroke(dp(a, 1), 0x44FFFFFF);
                 dialog[0].getWindow().setBackgroundDrawable(dialogBg);
                 if (android.os.Build.VERSION.SDK_INT >= 31) dialog[0].getWindow().setBackgroundBlurRadius(dp(a, 24));
@@ -1210,8 +1210,8 @@ final class Ui {
         sv.setClipToPadding(false);
         android.graphics.drawable.GradientDrawable ps5Sheet = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF050A14, 0xFF0D192E});
-        ps5Sheet.setCornerRadius(dp(a, 22));
+                new int[]{0xFF0B101B, 0xFF111B2A});
+        ps5Sheet.setCornerRadius(dp(a, 24));
         ps5Sheet.setStroke(dp(a, 1), 0x33FFFFFF);
         sv.setBackground(ps5Sheet);
         content.setBackgroundColor(Color.TRANSPARENT);
