@@ -1234,6 +1234,7 @@ final class Ui {
         dialog[0].setOnShowListener(v -> {
             if (dialog[0].getWindow() != null) {
                 dialog[0].getWindow().setBackgroundDrawable(round(0xF20F192D, dp(a, 22), 0x44FFFFFF, dp(a, 1)));
+                if (android.os.Build.VERSION.SDK_INT >= 31) dialog[0].getWindow().setBackgroundBlurRadius(dp(a, 24));
                 dialog[0].getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
                 android.view.WindowManager.LayoutParams lp = dialog[0].getWindow().getAttributes();
                 lp.dimAmount = 0.62f;
