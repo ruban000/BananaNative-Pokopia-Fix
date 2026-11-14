@@ -167,7 +167,7 @@ final class Ui {
                     }
                     if (group.getChildCount() > 0) {
                         View iconTile = group.getChildAt(0);
-                        iconTile.setBackground(round(col(c, R.color.bn_tint), dp(c, 11), 0, 0));
+                        iconTile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
                     }
                 }
                 view.post(() -> {
