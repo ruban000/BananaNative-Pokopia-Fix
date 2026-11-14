@@ -303,6 +303,10 @@ final class Ui {
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
+            // Focus scaling slightly expands glyphs beyond their normal bounds. Let the
+            // text and icon render outside child bounds so the first/last glyph is not cut.
+            group.setClipChildren(false);
+            group.setClipToPadding(false);
             for (int i = 0; i < group.getChildCount(); i++) animateFocusContent(group.getChildAt(i), focused);
         }
     }
