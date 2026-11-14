@@ -1198,8 +1198,19 @@ final class Ui {
 
     static AlertDialog choiceSheet(Activity a, CharSequence title, String[] labels, int checked,
                                    java.util.function.IntConsumer choose) {
+        return choiceSheet(a, title, null, labels, checked, choose);
+    }
+
+    static AlertDialog choiceSheet(Activity a, CharSequence title, CharSequence note, String[] labels, int checked,
+                                   java.util.function.IntConsumer choose) {
         LinearLayout options = new LinearLayout(a);
         options.setOrientation(LinearLayout.VERTICAL);
+        if (note != null && note.length() > 0) {
+            TextView intro = small(a, note);
+            intro.setTextColor(0xFFD4DCE8);
+            add(options, intro, 0);
+            add(options, divider(a), 10);
+        }
         AlertDialog[] dialog = new AlertDialog[1];
         for (int i = 0; i < labels.length; i++) {
             final int index = i;
