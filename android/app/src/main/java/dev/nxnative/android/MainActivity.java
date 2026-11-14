@@ -371,18 +371,16 @@ public final class MainActivity extends Activity {
                 .toggle(this, Prefs.overlay(this), (b, on) -> { Prefs.overlay(this, on); refreshSettings(); });
         play.addView(overlayRow.view);
         Ui.Setting touch = new Ui.Setting(this, "🎮", "On-screen controls", null).chevron(this);
-        touch.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("On-screen controls")
-                .setSingleChoiceItems(TouchControls.MODE_NAMES, TouchControls.mode(this), (d, w) -> { TouchControls.mode(this, w); touch.value(touchLabel(w)); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show());
+        touch.view.setOnClickListener(v -> Ui.choiceSheet(this, "On-screen controls", TouchControls.MODE_NAMES,
+                TouchControls.mode(this), w -> { TouchControls.mode(this, w); touch.value(touchLabel(w)); }));
         touch.value(touchLabel(TouchControls.mode(this)));
         play.addView(touch.view);
         play.addView(new Ui.Setting(this, "🔘", "Show / hide button", null).toggle(this, TouchControls.toggleButton(this), (b, on) -> TouchControls.toggleButton(this, on))
                 .value("The small button at the top centre that hides the on-screen controls").view);
         // How a controller opens the in-game panel (PadPanel); the panel opens by touch with a swipe in from the right edge or Back
         Ui.Setting padPanel = new Ui.Setting(this, "🎛️", "Controller: in-game panel", null).chevron(this);
-        padPanel.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Open the in-game panel with a controller")
-                .setSingleChoiceItems(PadPanel.OPEN_NAMES, Prefs.panelPad(this), (d, w) -> { Prefs.panelPad(this, w); padPanel.value(padPanelLabel(w)); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show());
+        padPanel.view.setOnClickListener(v -> Ui.choiceSheet(this, "Open the in-game panel with a controller", PadPanel.OPEN_NAMES,
+                Prefs.panelPad(this), w -> { Prefs.panelPad(this, w); padPanel.value(padPanelLabel(w)); }));
         padPanel.value(padPanelLabel(Prefs.panelPad(this)));
         play.addView(padPanel.view);
         resRow = new Ui.Setting(this, "🖼️", "Resolution", v -> gameRes()).chevron(this);
@@ -395,9 +393,8 @@ public final class MainActivity extends Activity {
         play.addView(new Ui.Setting(this, "🚀", "Use fast cores", null).toggle(this, Prefs.pinThreads(this), (b, on) -> Prefs.pinThreadsDefault(this, on))
                 .value("Keeps the busiest threads off the small cores").view);
         Ui.Setting xbox = new Ui.Setting(this, "🅰️", "Xbox button label swap", null).chevron(this);
-        xbox.view.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Xbox button label swap")
-                .setSingleChoiceItems(Prefs.XBOX_NAMES, Prefs.xboxButtons(this), (d, w) -> { Prefs.xboxButtonsDefault(this, w); xbox.value(Prefs.xboxLabel(w)); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show());
+        xbox.view.setOnClickListener(v -> Ui.choiceSheet(this, "Xbox button label swap", Prefs.XBOX_NAMES,
+                Prefs.xboxButtons(this), w -> { Prefs.xboxButtonsDefault(this, w); xbox.value(Prefs.xboxLabel(w)); }));
         xbox.value(Prefs.xboxLabel(Prefs.xboxButtons(this)));
         play.addView(xbox.view);
         Ui.Setting padMap = new Ui.Setting(this, "🕹️", "Button mapping", null).chevron(this);
@@ -464,7 +461,7 @@ public final class MainActivity extends Activity {
     }
 
     /** A settings group's card of rows, under its section label */
-    private LinearLayout settingsCard(LinearLayout content) { return Ui.add(content, Ui.listCard(this), 8); }
+    private LinearLayout settingsCard(LinearLayout content) { return Ui.add(content, Ui.settingsList(this), 8); }
 
     /** The settings rows' current values (after a dialog, on resume) */
     private void refreshSettings() {
@@ -1532,8 +1529,10 @@ public final class MainActivity extends Activity {
     /** Game resolution: the window size the host gives the game (DM_WINDOW), from the next start */
     private void gameRes() {
         int i = Math.max(0, java.util.Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.window(this)));
-        new AlertDialog.Builder(this).setTitle("Game resolution").setSingleChoiceItems(Prefs.WINDOW_NAMES, i, (d, w) -> { Prefs.window(this, Prefs.WINDOWS[w]); refreshSettings(); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(this, "Game resolution", Prefs.WINDOW_NAMES, i, w -> {
+            Prefs.window(this, Prefs.WINDOWS[w]);
+            refreshSettings();
+        });
     }
 
     static String capLabel(int v) { return v < 0 ? "Default" : v == 0 ? "The game's own" : v + " fps"; }
@@ -1549,9 +1548,10 @@ public final class MainActivity extends Activity {
             labels[k + 1] = capLabel(v);
             if (v == cur) checked = k + 1;
         }
-        new AlertDialog.Builder(this).setTitle("Frame rate cap")
-                .setSingleChoiceItems(labels, checked, (d, w) -> { Prefs.fpsCap(this, w == 0 ? -1 : Prefs.FPS_CAPS[w - 1]); refreshSettings(); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(this, "Frame rate cap", labels, checked, w -> {
+            Prefs.fpsCap(this, w == 0 ? -1 : Prefs.FPS_CAPS[w - 1]);
+            refreshSettings();
+        });
     }
 
     /** Frame generation's settings and the Lossless.dll found (or a manual pick when it is in none of the known places) */
@@ -1611,6 +1611,6 @@ public final class MainActivity extends Activity {
     private static String touchLabel(int m) { return m == TouchControls.MODE_AUTO ? "Auto: hidden while a controller is connected" : TouchControls.MODE_NAMES[m]; }
     /** A default's choice in Settings (no "Default" entry: this is the default) */
     private void pick(String title, String[] items, int cur, java.util.function.IntConsumer set) {
-        new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(items, cur, (d, w) -> { set.accept(w); refreshSettings(); d.dismiss(); }).setNegativeButton("Cancel", null).show();
+        Ui.choiceSheet(this, title, items, cur, w -> { set.accept(w); refreshSettings(); });
     }
 }
