@@ -121,13 +121,10 @@ final class Ui {
         final Drawable normalBackground = v.getBackground();
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
-        // Focus handlers are installed before rows are attached; apply overflow rules again
-        // after attachment so the complete parent chain is included.
-        allowFocusOverflow(v);
-        v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
-            @Override public void onViewAttachedToWindow(View view) { allowFocusOverflow(view); }
-            @Override public void onViewDetachedFromWindow(View view) { }
-        });
+        if (v instanceof ViewGroup) {
+            ((ViewGroup) v).setClipChildren(false);
+            ((ViewGroup) v).setClipToPadding(false);
+        }
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
                 view.requestFocus();
@@ -156,7 +153,7 @@ final class Ui {
                 highlight.start();
                 view.setPivotX(view.getWidth() * 0.5f);
                 float safeScale = safeFocusScaleX(view, c, 1.03f);
-                view.animate().scaleX(safeScale).scaleY(1.03f).setDuration(220)
+                view.animate().scaleX(safeScale).scaleY(1.02f).setDuration(200)
                         .setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
                 view.setElevation(dp(c, 8));
                 if (view instanceof ViewGroup) {
@@ -169,7 +166,10 @@ final class Ui {
                             child.setAlpha(1f);
                         }
                     }
-                    // Keep setting icons bare; the selected row itself carries the focus treatment.
+                    if (group.getChildCount() > 0) {
+                        View iconTile = group.getChildAt(0);
+                        iconTile.setBackground(round(0x44FFFFFF, dp(c, 11), 0, 0));
+                    }
                 }
             } else {
                 view.setBackground(normalBackground);
@@ -182,7 +182,10 @@ final class Ui {
                         View child = group.getChildAt(i);
                         child.animate().translationX(0).setDuration(160).start();
                     }
-                    // No per-icon background is applied in either focus state.
+                    if (group.getChildCount() > 0) {
+                        View iconTile = group.getChildAt(0);
+                        iconTile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
+                    }
                 }
                 view.post(() -> {
                     if (!view.hasFocus()) {
@@ -317,31 +320,14 @@ final class Ui {
         });
     }
 
-    /** Let focus effects draw outside every containing layout, not just the focused control. */
-    private static void allowFocusOverflow(View v) {
-        if (v instanceof ViewGroup) {
-            ((ViewGroup) v).setClipChildren(false);
-            ((ViewGroup) v).setClipToPadding(false);
-        }
-        android.view.ViewParent parent = v.getParent();
-        while (parent instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) parent;
-            group.setClipChildren(false);
-            group.setClipToPadding(false);
-            parent = group.getParent();
-        }
-    }
-
     /** Banana Native focus: a moving white highlight travels around the focused outline. */
     static void ps5Focus(Context c, View v, float radiusDp) {
         v.setFocusable(true);
         v.setFocusableInTouchMode(true);
-        // Controls are often styled before their parent is assigned; reapply on attach.
-        allowFocusOverflow(v);
-        v.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
-            @Override public void onViewAttachedToWindow(View view) { allowFocusOverflow(view); }
-            @Override public void onViewDetachedFromWindow(View view) { }
-        });
+        if (v instanceof ViewGroup) {
+            ((ViewGroup) v).setClipChildren(false);
+            ((ViewGroup) v).setClipToPadding(false);
+        }
         v.setOnTouchListener((view, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) view.requestFocus();
             return false;
@@ -357,8 +343,8 @@ final class Ui {
                 view.setElevation(dp(c, 8));
                 view.setPivotX(view.getWidth() * 0.5f);
                 float safeScale = safeFocusScaleX(view, c, 1.025f);
-                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.025f)
-                        .setDuration(220).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
+                view.animate().translationY(-dp(c, 3)).scaleX(safeScale).scaleY(1.02f)
+                        .setDuration(200).setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f)).start();
             } else {
                 view.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(180)
                         .withEndAction(() -> {
@@ -508,8 +494,7 @@ final class Ui {
         t.setSingleLine(true);
         t.setEllipsize(TextUtils.TruncateAt.END);
         t.setContentDescription(s + ": tap for details");
-        t.setSoundEffectsEnabled(false);
-        t.setOnClickListener(v -> { click(v); new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show(); });
+        t.setOnClickListener(v -> new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show());
         return t;
     }
 
@@ -629,13 +614,13 @@ final class Ui {
         scroll.setScrollBarStyle(View.SCROLLBARS_OUTSIDE_OVERLAY);
         LinearLayout content = new LinearLayout(a);
         content.setOrientation(LinearLayout.VERTICAL);
-        // Let focused rows draw beyond their own bounds; the 16dp list gutters below keep them inside the viewport. 
+        // Let focused rows draw beyond their own bounds while list gutters keep them inside the viewport.
         content.setClipChildren(false);
         content.setClipToPadding(false);
         scroll.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         android.graphics.drawable.GradientDrawable ps5Background = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF050A14, 0xFF0D192E});
+                new int[]{0xFF0B101B, 0xFF111B2A});
         scroll.setBackground(ps5Background);
         content.setBackgroundColor(Color.TRANSPARENT);
         frame.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -698,7 +683,6 @@ final class Ui {
         // The animated white glass border is the only focus outline; do not add the old blue focus stroke.
         card.setFocusable(true);
         card.setClickable(true);
-        card.setSoundEffectsEnabled(false);
         card.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
     }
 
@@ -767,7 +751,6 @@ final class Ui {
         b.setIncludeFontPadding(false);
         b.setTextColor(col(c, textColor(k)));
         style(c, b, k, 14);
-        b.setSoundEffectsEnabled(false);
         b.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
         // Every standard button uses the same animated white PS5-style focus edge.
         ps5Focus(c, b, 14);
@@ -790,7 +773,6 @@ final class Ui {
             style(c, this, k, 16);
             setClickable(true);
             setFocusable(true);
-            setSoundEffectsEnabled(false);
             icon = new ImageView(c);
             icon.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
             addView(icon, new LinearLayout.LayoutParams(dp(c, 22), dp(c, 22)));
@@ -828,7 +810,6 @@ final class Ui {
         v.setContentDescription(description);
         v.setClickable(true);
         v.setFocusable(true);
-        v.setSoundEffectsEnabled(false);
         v.setOnClickListener(x -> { click(x); if (l != null) l.onClick(x); });
         v.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 44), dp(c, 44)));
         // Icon-only controls share the exact same moving white focus treatment.
@@ -880,139 +861,6 @@ final class Ui {
      * state does, says(…)), a short status line when the setting needs something (status(…): "Needs Prepare again: …"), its tags on a line of their own (so they never
      * squeeze the text), a muted note, and a chevron (or a switch); the whole row is the touch target (a switch row's tap flips the switch). Compact: 52 dp high, 36 dp tiles
      */
-    /** Full-size 22dp line icons for the settings rows that previously used tiny text glyphs. */
-    private static final class SettingIconView extends TextView {
-        private final String source;
-        private final android.graphics.Paint iconPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Path iconPath = new android.graphics.Path();
-
-        SettingIconView(Context c, String source) {
-            super(c);
-            this.source = source;
-            setText(isCustomIcon(source) ? "" : monochromeGlyph(source));
-            setTextColor(Color.WHITE);
-            setGravity(Gravity.CENTER);
-            setIncludeFontPadding(false);
-            setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            iconPaint.setColor(Color.WHITE);
-            iconPaint.setStyle(android.graphics.Paint.Style.STROKE);
-            iconPaint.setStrokeWidth(2f); // Canvas is scaled to dp below, so this is exactly 2dp.
-            iconPaint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-            iconPaint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
-        }
-
-        private static boolean isCustomIcon(String source) {
-            return "🔄".equals(source) || "👀".equals(source) || "🎮".equals(source)
-                    || "🎛️".equals(source) || "🔘".equals(source) || "🖼️".equals(source)
-                    || "📺".equals(source) || "⏱️".equals(source) || "⏲️".equals(source)
-                    || "📳".equals(source) || "🚀".equals(source) || "🅰️".equals(source)
-                    || "🔍".equals(source) || "🕹️".equals(source) || "🧹".equals(source)
-                    || "🧪".equals(source) || "✨".equals(source);
-        }
-
-        private void line(android.graphics.Canvas c, float x1, float y1, float x2, float y2) {
-            c.drawLine(x1, y1, x2, y2, iconPaint);
-        }
-        private void circle(android.graphics.Canvas c, float x, float y, float r) {
-            c.drawCircle(x, y, r, iconPaint);
-        }
-        private void path(android.graphics.Canvas c, float... xy) {
-            iconPath.reset();
-            iconPath.moveTo(xy[0], xy[1]);
-            for (int i = 2; i < xy.length; i += 2) iconPath.lineTo(xy[i], xy[i + 1]);
-            c.drawPath(iconPath, iconPaint);
-        }
-        @Override protected void onDraw(android.graphics.Canvas canvas) {
-            float density = getResources().getDisplayMetrics().density;
-            int save = canvas.save();
-            float side = Math.min(getWidth(), getHeight()) / density;
-            canvas.translate((getWidth() - side * density) * 0.5f, (getHeight() - side * density) * 0.5f);
-            canvas.scale(density, density);
-            canvas.translate((side - 22f) * 0.5f, (side - 22f) * 0.5f);
-            switch (source) {
-                case "🔄": // update / refresh
-                    canvas.drawArc(3, 3, 19, 19, 42, 285, false, iconPaint);
-                    path(canvas, 15, 2.8f, 19, 3.5f, 18.2f, 7.5f);
-                    break;
-                case "👀": // overlay / visibility
-                    path(canvas, 1.5f, 11, 5, 6.5f, 11, 4.5f, 17, 6.5f, 20.5f, 11, 17, 15.5f, 11, 17.5f, 5, 15.5f, 1.5f, 11);
-                    circle(canvas, 11, 11, 3);
-                    break;
-                case "🎮": case "🎛️": // clean, symmetric controller silhouette
-                    path(canvas, 5.2f, 7.2f, 16.8f, 7.2f, 19.2f, 9.2f, 20.2f, 15.2f,
-                            18.5f, 17.5f, 16.2f, 17.2f, 13.8f, 13.8f, 8.2f, 13.8f,
-                            5.8f, 17.2f, 3.5f, 17.5f, 1.8f, 15.2f, 2.8f, 9.2f, 5.2f, 7.2f);
-                    line(canvas, 6.2f, 9.5f, 6.2f, 13.2f); line(canvas, 4.3f, 11.35f, 8.1f, 11.35f);
-                    circle(canvas, 15.2f, 10.2f, 0.9f); circle(canvas, 17.3f, 12.4f, 0.9f);
-                    circle(canvas, 12.8f, 12.2f, 0.65f);
-                    break;
-                case "🔘": // show / hide
-                    circle(canvas, 11, 11, 8.5f); circle(canvas, 11, 11, 3.2f);
-                    break;
-                case "🖼️": case "📺": // resolution / display
-                    canvas.drawRoundRect(1.8f, 3, 20.2f, 17, 2, 2, iconPaint);
-                    line(canvas, 8, 20, 14, 20); line(canvas, 11, 17, 11, 20);
-                    break;
-                case "⏱️": case "⏲️": // frame-rate cap
-                    circle(canvas, 11, 12, 8);
-                    line(canvas, 8, 2, 14, 2); line(canvas, 11, 2, 11, 4);
-                    line(canvas, 11, 12, 11, 7); line(canvas, 11, 12, 15, 14);
-                    break;
-                case "📳": // rumble
-                    path(canvas, 7, 4, 7, 18); path(canvas, 15, 4, 15, 18);
-                    path(canvas, 3.5f, 7, 2, 9, 2, 13, 3.5f, 15);
-                    path(canvas, 18.5f, 7, 20, 9, 20, 13, 18.5f, 15);
-                    break;
-                case "🚀": // fast cores: processor with fast-lane accents
-                    canvas.drawRoundRect(6, 6, 16, 16, 2, 2, iconPaint);
-                    line(canvas, 9, 9, 13, 9); line(canvas, 9, 12, 13, 12);
-                    line(canvas, 9, 15, 12, 15);
-                    line(canvas, 2, 8, 4.5f, 8); line(canvas, 1, 11, 4.5f, 11);
-                    line(canvas, 2, 14, 4.5f, 14);
-                    line(canvas, 17.5f, 8, 20, 8); line(canvas, 17.5f, 14, 20, 14);
-                    break;
-                case "🅰️": // Xbox label swap
-                    circle(canvas, 11, 11, 9);
-                    iconPaint.setStyle(android.graphics.Paint.Style.FILL);
-                    iconPaint.setTextSize(12);
-                    iconPaint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
-                    canvas.drawText("A", 7.1f, 15.2f, iconPaint);
-                    iconPaint.setStyle(android.graphics.Paint.Style.STROKE);
-                    break;
-                case "🔍": // upscaler / magnification
-                    circle(canvas, 9.5f, 9.5f, 6.5f);
-                    line(canvas, 14.3f, 14.3f, 20, 20);
-                    break;
-                case "🕹️": // button mapping: directional pad and mapped buttons
-                    canvas.drawRoundRect(2, 4, 20, 18, 3, 3, iconPaint);
-                    line(canvas, 7, 7.5f, 7, 14.5f); line(canvas, 3.5f, 11, 10.5f, 11);
-                    circle(canvas, 15, 8.5f, 1.1f); circle(canvas, 17.5f, 11.5f, 1.1f);
-                    circle(canvas, 14, 14.5f, 0.8f);
-                    break;
-                case "🧹": // storage / cleanup: compact drive with eject/clear mark
-                    canvas.drawRoundRect(2, 5, 20, 18, 2, 2, iconPaint);
-                    line(canvas, 5, 9, 17, 9); line(canvas, 5, 13, 13, 13);
-                    line(canvas, 14.5f, 12, 19.5f, 17); line(canvas, 19.5f, 12, 14.5f, 17);
-                    break;
-                case "🧪": // graphics self-test: test flask with a check
-                    line(canvas, 8, 3, 14, 3); line(canvas, 10, 3, 10, 9);
-                    line(canvas, 12, 3, 12, 9); path(canvas, 10, 9, 4, 18, 18, 18, 12, 9);
-                    line(canvas, 8, 14, 10, 16); line(canvas, 10, 16, 14, 12);
-                    break;
-                case "✨": // frame generation: crisp four-point frame sparkle
-                    path(canvas, 11, 1.5f, 13.2f, 8.8f, 20.5f, 11, 13.2f, 13.2f,
-                            11, 20.5f, 8.8f, 13.2f, 1.5f, 11, 8.8f, 8.8f, 11, 1.5f);
-                    line(canvas, 18, 2, 18, 6); line(canvas, 16, 4, 20, 4);
-                    break;
-                default:
-                    canvas.restoreToCount(save);
-                    super.onDraw(canvas);
-                    return;
-            }
-            canvas.restoreToCount(save);
-        }
-    }
-
     private static String monochromeGlyph(String source) {
         if (source == null || source.isEmpty()) return "·";
         switch (source) {
@@ -1044,18 +892,15 @@ final class Ui {
             view.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 12), 0, 0)));
             // Foreground bounds track the complete measured row, including wrapped subtitles and tags.
             settingFocus(c, view, 12);
-            view.setSoundEffectsEnabled(false);
             view.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
-            tile = new SettingIconView(c, emoji);
-            tile.setTextSize(22);
-            // Keep the icon itself completely bare; selection is shown by the row focus border only.
-            tile.setBackground(null);
-            tile.setForeground(null);
-            tile.setClickable(false);
-            tile.setFocusable(false);
-            // A 26dp viewport gives font glyphs and custom paths breathing room, avoiding edge clipping.
-            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 26), dp(c, 26));
-            iconLp.setMarginEnd(dp(c, 12));
+            tile = text(c, monochromeGlyph(emoji), 22, R.color.bn_text, 400);
+            tile.setTextColor(0xFFFFFFFF);
+            tile.setGravity(Gravity.CENTER);
+            tile.setIncludeFontPadding(false);
+            tile.setBackground(round(0x00000000, dp(c, 11), 0, 0));
+            tile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(c, 22), dp(c, 22));
+            iconLp.setMarginEnd(dp(c, 14));
             view.addView(tile, iconLp);
             LinearLayout col = new LinearLayout(c);
             col.setOrientation(LinearLayout.VERTICAL);
@@ -1120,8 +965,7 @@ final class Ui {
                     new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
                     new int[]{0x66FFFFFF, 0xFF475569}));
             toggle.setChecked(on);
-            toggle.setSoundEffectsEnabled(false);
-            toggle.setOnCheckedChangeListener((b, x) -> { click(b); if (l != null) l.onCheckedChanged(b, x); says(); });   // the value line follows the switch (says)
+            toggle.setOnCheckedChangeListener((b, x) -> { if (l != null) l.onCheckedChanged(b, x); says(); });   // the value line follows the switch (says)
             view.addView(toggle);
             if (!view.hasOnClickListeners()) view.setOnClickListener(v -> { if (toggle.isEnabled()) toggle.toggle(); });
             return this;
@@ -1158,7 +1002,7 @@ final class Ui {
             view.setPaddingRelative(dp(c, 30), dp(c, 4), dp(c, 10), dp(c, 4));
             view.setMinimumHeight(dp(c, 46));
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) tile.getLayoutParams();
-            lp.width = lp.height = dp(c, 26);
+            lp.width = lp.height = dp(c, 22);
             lp.setMarginEnd(dp(c, 6));
             tile.setLayoutParams(lp);
             tile.setTextSize(22);
@@ -1189,7 +1033,6 @@ final class Ui {
                 t.setPadding(dp(c, 10), 0, dp(c, 10), 0);
                 t.setClickable(true);
                 t.setFocusable(true);
-                t.setSoundEffectsEnabled(false);
                 t.setOnClickListener(v -> { click(v); if (i != selected) { select(i); pick.accept(i); } });
                 items[k] = t;
                 addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -1239,7 +1082,6 @@ final class Ui {
             tab.setBackground(ripple(c, round(Color.TRANSPARENT, dp(c, 10), 0, 0)));
             tab.setClickable(true);
             tab.setFocusable(true);
-            tab.setSoundEffectsEnabled(false);
             tab.setSelected(on);
             tab.setContentDescription(labels[k] + (on ? ", tab, selected" : ", tab"));
             focusMotion(c, tab, 10);
@@ -1263,11 +1105,10 @@ final class Ui {
         t.setBackground(ripple(c, round(selected ? col(c, R.color.bn_tint) : Color.TRANSPARENT, dp(c, 12), 0, 0)));
         t.setClickable(true);
         t.setFocusable(true);
-        t.setSoundEffectsEnabled(false);
         t.setSelected(selected);
         t.setContentDescription(label);
         focusMotion(c, t, 12);
-        t.setOnClickListener(v -> { click(v); if (l != null) l.onClick(v); });
+        t.setOnClickListener(l);
         return t;
     }
 
@@ -1344,14 +1185,14 @@ final class Ui {
         }
         dialog[0] = sheet(a, title, options).setNegativeButton("Cancel", null).create();
         dialog[0].setOnShowListener(v -> {
-            // The dialog window supplies the single outer PS5 panel; remove the nested ScrollView panel.
+            // Keep the dialog outer panel; remove the nested options-container panel.
             android.view.ViewParent contentParent = options.getParent();
             if (contentParent instanceof View) ((View) contentParent).setBackgroundColor(Color.TRANSPARENT);
             if (dialog[0].getWindow() != null) {
                 android.graphics.drawable.GradientDrawable dialogBg = new android.graphics.drawable.GradientDrawable(
                         android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[]{0xFF050A14, 0xFF0D192E});
-                dialogBg.setCornerRadius(dp(a, 22));
+                        new int[]{0xFF0B101B, 0xFF111B2A});
+                dialogBg.setCornerRadius(dp(a, 24));
                 dialogBg.setStroke(dp(a, 1), 0x44FFFFFF);
                 dialog[0].getWindow().setBackgroundDrawable(dialogBg);
                 if (android.os.Build.VERSION.SDK_INT >= 31) dialog[0].getWindow().setBackgroundBlurRadius(dp(a, 24));
@@ -1377,8 +1218,8 @@ final class Ui {
         sv.setClipToPadding(false);
         android.graphics.drawable.GradientDrawable ps5Sheet = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF050A14, 0xFF0D192E});
-        ps5Sheet.setCornerRadius(dp(a, 22));
+                new int[]{0xFF0B101B, 0xFF111B2A});
+        ps5Sheet.setCornerRadius(dp(a, 24));
         ps5Sheet.setStroke(dp(a, 1), 0x33FFFFFF);
         sv.setBackground(ps5Sheet);
         content.setBackgroundColor(Color.TRANSPARENT);
